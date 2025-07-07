@@ -1,0 +1,160 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Asset {
+  id                 Int           @id @default(autoincrement())
+  assetId            String        @unique
+  assetName          String
+  assetType          String
+  assetCategoryId    Int
+  assetCategory      AssetCategory @relation(fields: [assetCategoryId], references: [id])
+  serialNumber       String        @unique
+  purchaseDate       DateTime
+  vendorId           Int
+  vendor             Vendor        @relation(fields: [vendorId], references: [id])
+  departmentId       Int
+  department         Department    @relation(fields: [departmentId], references: [id])
+  allottedToId       Int
+  allottedTo         Employee      @relation(fields: [allottedToId], references: [id])
+  rfidCode           String        @unique
+  currentLocation    String?
+  fromLocation       String?
+  toLocation         String?
+  status             String
+  assetPhoto         String?
+  slaExpectedValue   Int?
+  slaExpectedUnit    String?
+  slaNextDueAt       DateTime?
+  slaBreached        Boolean?
+  lastSlaServiceDate DateTime?
+
+  maintenanceHistory MaintenanceHistory[]
+
+  warranty Warranty?
+  tickets  Ticket[]
+}
+
+model Warranty {
+  id      Int   @id @default(autoincrement())
+  assetId Int   @unique
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  warrantyStart   DateTime
+  warrantyEnd     DateTime
+  daysToExpiry    Int?
+  isUnderWarranty Boolean
+  amcActive       Boolean
+  amcVendor       String?
+  amcStart        DateTime?
+  amcEnd          DateTime?
+  amcVisitsDue    Int?
+  lastServiceDate DateTime?
+  nextVisitDue    DateTime?
+  serviceReport   String?
+  alertSent       Boolean   @default(false)
+}
+
+model Ticket {
+  id           Int        @id @default(autoincrement())
+  ticketId     String     @unique
+  raisedBy     String
+  departmentId Int
+  department   Department @relation(fields: [departmentId], references: [id])
+  assetId      Int
+  asset        Asset      @relation(fields: [assetId], references: [id])
+
+  issueType    String
+  detailedDesc String  @db.Text
+  priority     String
+  photoOfIssue String?
+  location     String
+  status       String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  slaExpectedValue Int? // numeric value
+  slaExpectedUnit  String? // e.g., "HOURS", "DAYS", "MONTHS", "YEARS"
+  slaResolvedAt    DateTime?
+  slaBreached      Boolean?
+}
+
+model MaintenanceHistory {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  scheduledDue  DateTime
+  actualDoneAt  DateTime
+  wasLate       Boolean
+  performedBy   String
+  notes         String?
+  serviceReport String?
+
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  employeeID String   @unique
+  employee   Employee @relation(fields: [employeeID], references: [employeeID])
+
+  username     String    @unique
+  passwordHash String
+  role         String
+  lastLogin    DateTime?
+
+  loginHistory LoginHistory[]
+}
+
+model LoginHistory {
+  id     Int  @id @default(autoincrement())
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+
+  attemptedAt DateTime @default(now())
+  ipAddress   String?
+  userAgent   String?
+  success     Boolean
+}
+
+model AssetCategory {
+  id     Int     @id @default(autoincrement())
+  name   String  @unique
+  assets Asset[]
+}
+
+model Department {
+  id      Int      @id @default(autoincrement())
+  name    String   @unique
+  assets  Asset[]
+  tickets Ticket[]
+}
+
+model Employee {
+  id         Int     @id @default(autoincrement())
+  name       String
+  employeeID String  @unique
+  assets     Asset[]
+  user       User?
+}
+
+model Vendor {
+  id      Int     @id @default(autoincrement())
+  name    String  @unique
+  contact String
+  email   String?
+  assets  Asset[]
+}
