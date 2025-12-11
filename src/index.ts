@@ -10,10 +10,18 @@ import maintenanceHistoryRoutes from "./api/maintenanceHistory/maintenanceHistor
 import userRoutes from "./api/user/user.routes";
 import loginHistoryRoutes from "./api/loginHistory/loginHistory.routes";
 import emailRoutes from "./api/email/email.routes";
+import locationRoutes from "./api/location/location.routes";
+import transferRoutes from "./api/transfer/transfer.routes";
+import insuranceRoutes from "./api/insurance/insurance.routes";
+import depreciationRoutes from "./api/depreciation/depreciation.routes";
+import branchRoutes from "./api/branches/branches.routes";
+
+
+
 import cors from "cors";
 
 const app = express();
-const port = 3000;
+const port = 3001;
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -35,6 +43,13 @@ app.use("/api/maintenance-history", maintenanceHistoryRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/login-history", loginHistoryRoutes);
 app.use("/api/email", emailRoutes);
+
+app.use("/api/branches", branchRoutes);
+app.use("/api/location", locationRoutes);
+app.use("/api/transfers", transferRoutes);
+app.use("/api/insurance", insuranceRoutes);
+app.use("/api/depreciation", depreciationRoutes);
+
 
 // Default route
 app.get("/", (req, res) => {

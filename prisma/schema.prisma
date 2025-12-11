@@ -14,21 +14,58 @@ datasource db {
 }
 
 model Asset {
-  id                 Int           @id @default(autoincrement())
-  assetId            String        @unique
-  assetName          String
-  assetType          String
-  assetCategoryId    Int
-  assetCategory      AssetCategory @relation(fields: [assetCategoryId], references: [id])
-  serialNumber       String        @unique
-  purchaseDate       DateTime
-  vendorId           Int
-  vendor             Vendor        @relation(fields: [vendorId], references: [id])
-  departmentId       Int
-  department         Department    @relation(fields: [departmentId], references: [id])
-  allottedToId       Int
-  allottedTo         Employee      @relation(fields: [allottedToId], references: [id])
-  rfidCode           String        @unique
+  id                Int           @id @default(autoincrement())
+  assetId           String        @unique
+  assetName         String
+  assetType         String
+  assetCategoryId   Int
+  assetCategory     AssetCategory @relation(fields: [assetCategoryId], references: [id])
+  serialNumber      String        @unique
+  purchaseDate      DateTime?
+  modeOfProcurement String        @default("PURCHASE") // PURCHASE | DONATION | LEASE | RENTAL 
+
+  // PURCHASE
+  invoiceNumber     String?
+  purchaseOrderNo   String?
+  purchaseOrderDate DateTime?
+  deliveryDate      DateTime?
+  purchaseCost      Float?
+
+  // DONATION
+  donorName        String?
+  donationDate     DateTime?
+  assetCondition   String? // NEW / USED
+  estimatedValue   Float?
+  donationDocument String?
+
+  // LEASE
+  leaseStartDate   DateTime?
+  leaseEndDate     DateTime?
+  leaseAmount      Float?
+  leaseRenewalDate DateTime?
+  leaseContractDoc String?
+
+  // RENTAL
+  rentalStartDate    DateTime?
+  rentalEndDate      DateTime?
+  rentalAmount       Float?
+  rentalAgreementDoc String?
+
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  // GRN
+  grnNumber         String?
+  grnDate           DateTime?
+  grnValue          Float?
+  inspectionStatus  String?
+  inspectionRemarks String?
+
+  departmentId       Int?
+  department         Department? @relation(fields: [departmentId], references: [id])
+  allottedToId       Int?
+  allottedTo         Employee?   @relation(fields: [allottedToId], references: [id])
+  rfidCode           String      @unique
   currentLocation    String?
   fromLocation       String?
   toLocation         String?
@@ -39,6 +76,20 @@ model Asset {
   slaNextDueAt       DateTime?
   slaBreached        Boolean?
   lastSlaServiceDate DateTime?
+
+  retiredDate          DateTime?
+  retiredReason        String?
+  expectedLifetime     Int?
+  expectedLifetimeUnit String?
+  retiredBy            String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  depreciation AssetDepreciation?
+  insurance    AssetInsurance[]
+  locations    AssetLocation[]
+  transfers    AssetTransferHistory[]
 
   maintenanceHistory MaintenanceHistory[]
 
@@ -64,6 +115,9 @@ model Warranty {
   nextVisitDue    DateTime?
   serviceReport   String?
   alertSent       Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 model Ticket {
@@ -83,12 +137,14 @@ model Ticket {
   status       String
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   slaExpectedValue Int? // numeric value
   slaExpectedUnit  String? // e.g., "HOURS", "DAYS", "MONTHS", "YEARS"
   slaResolvedAt    DateTime?
   slaBreached      Boolean?
+
+  statusHistory TicketStatusHistory[]
 }
 
 model MaintenanceHistory {
@@ -104,6 +160,7 @@ model MaintenanceHistory {
   serviceReport String?
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 model User {
@@ -117,6 +174,8 @@ model User {
   lastLogin    DateTime?
 
   loginHistory LoginHistory[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @default(now()) @updatedAt
 }
 
 model LoginHistory {
@@ -128,33 +187,148 @@ model LoginHistory {
   ipAddress   String?
   userAgent   String?
   success     Boolean
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
 }
 
 model AssetCategory {
-  id     Int     @id @default(autoincrement())
-  name   String  @unique
-  assets Asset[]
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  assets    Asset[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 }
 
 model Department {
-  id      Int      @id @default(autoincrement())
-  name    String   @unique
-  assets  Asset[]
-  tickets Ticket[]
+  id        Int        @id @default(autoincrement())
+  name      String     @unique
+  assets    Asset[]
+  tickets   Ticket[]
+  employees Employee[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @default(now()) @updatedAt
 }
 
 model Employee {
-  id         Int     @id @default(autoincrement())
-  name       String
-  employeeID String  @unique
-  assets     Asset[]
-  user       User?
+  id            Int             @id @default(autoincrement())
+  name          String
+  employeeID    String          @unique
+  departmentId  Int?
+  department    Department?     @relation(fields: [departmentId], references: [id])
+  assets        Asset[]
+  user          User?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @default(now()) @updatedAt
+  AssetLocation AssetLocation[]
 }
 
 model Vendor {
-  id      Int     @id @default(autoincrement())
-  name    String  @unique
-  contact String
-  email   String?
-  assets  Asset[]
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  contact   String
+  email     String?
+  assets    Asset[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model TicketStatusHistory {
+  id        Int      @id @default(autoincrement())
+  ticketId  Int
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  status    String
+  changedAt DateTime @default(now())
+  changedBy String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model AssetDepreciation {
+  id      Int   @id @default(autoincrement())
+  assetId Int   @unique
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  depreciationMethod String // SL | DB | OTHER
+  depreciationRate   Float
+  expectedLifeYears  Int
+  salvageValue       Float?
+  depreciationStart  DateTime
+  lastCalculatedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model AssetInsurance {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  provider       String?
+  policyNumber   String?
+  coverageAmount Float?
+  premiumAmount  Float?
+  startDate      DateTime?
+  endDate        DateTime?
+  isActive       Boolean   @default(true)
+
+  document String?
+  notes    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model Branch {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  locations     AssetLocation[]
+  transfersFrom AssetTransferHistory[] @relation("FromBranch")
+  transfersTo   AssetTransferHistory[] @relation("ToBranch")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+}
+
+model AssetLocation {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  branchId Int
+  branch   Branch @relation(fields: [branchId], references: [id])
+
+  block String?
+  floor String?
+  room  String?
+
+  employeeResponsibleId Int?
+  employeeResponsible   Employee? @relation(fields: [employeeResponsibleId], references: [id])
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+}
+
+model AssetTransferHistory {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  // FROM branch (nullable for first move)
+  fromBranchId Int?
+  fromBranch   Branch? @relation("FromBranch", fields: [fromBranchId], references: [id])
+
+  // TO branch (required)
+  toBranchId Int
+  toBranch   Branch @relation("ToBranch", fields: [toBranchId], references: [id])
+
+  temporary    Boolean   @default(false)
+  expiresAt    DateTime?
+  approvedBy   String
+  transferDate DateTime  @default(now())
+
+  createdAt DateTime @default(now())
 }
