@@ -12,8 +12,8 @@ import {
     getBranches
   } from "./location.controller";
   
-  router.post("/assets/location", authenticateToken, addAssetLocation);
-  router.put("/assets/location/:locationId", authenticateToken, updateCurrentLocation);
+  router.post("/", authenticateToken, addAssetLocation);
+  router.put("/:locationId", authenticateToken, updateCurrentLocation);
   
   router.get("/assets/:assetId/location/current", authenticateToken, getCurrentLocation);
   router.get("/assets/:assetId/location/history", authenticateToken, getLocationHistory);

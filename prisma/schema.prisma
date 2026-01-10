@@ -61,11 +61,14 @@ model Asset {
   inspectionStatus  String?
   inspectionRemarks String?
 
-  departmentId       Int?
-  department         Department? @relation(fields: [departmentId], references: [id])
+  departmentId Int?
+  department   Department? @relation(fields: [departmentId], references: [id])
+  supervisorId Int?
+  supervisor   Employee?   @relation("AssetSupervisor", fields: [supervisorId], references: [id])
+
   allottedToId       Int?
-  allottedTo         Employee?   @relation(fields: [allottedToId], references: [id])
-  rfidCode           String      @unique
+  allottedTo         Employee? @relation("AssetEndUser", fields: [allottedToId], references: [id])
+  rfidCode           String    @unique
   currentLocation    String?
   fromLocation       String?
   toLocation         String?
@@ -93,8 +96,10 @@ model Asset {
 
   maintenanceHistory MaintenanceHistory[]
 
-  warranty Warranty?
-  tickets  Ticket[]
+  warranty   Warranty?
+  tickets    Ticket[]
+  Employee   Employee? @relation(fields: [employeeId], references: [id])
+  employeeId Int?
 }
 
 model Warranty {
@@ -210,16 +215,18 @@ model Department {
 }
 
 model Employee {
-  id            Int             @id @default(autoincrement())
-  name          String
-  employeeID    String          @unique
-  departmentId  Int?
-  department    Department?     @relation(fields: [departmentId], references: [id])
-  assets        Asset[]
-  user          User?
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @default(now()) @updatedAt
-  AssetLocation AssetLocation[]
+  id               Int             @id @default(autoincrement())
+  name             String
+  employeeID       String          @unique
+  departmentId     Int?
+  department       Department?     @relation(fields: [departmentId], references: [id])
+  assets           Asset[]
+  user             User?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @default(now()) @updatedAt
+  AssetLocation    AssetLocation[]
+  supervisedAssets Asset[]         @relation("AssetSupervisor")
+  allocatedAssets  Asset[]         @relation("AssetEndUser")
 }
 
 model Vendor {
@@ -317,13 +324,23 @@ model AssetTransferHistory {
   assetId Int
   asset   Asset @relation(fields: [assetId], references: [id])
 
+  transferType String // INTERNAL | EXTERNAL
+
+  // INTERNAL DETAILS
+  block String?
+  floor String?
+  room  String?
+
+  // EXTERNAL DETAILS
+  externalType String? // BRANCH | SERVICE | DEAD
+
   // FROM branch (nullable for first move)
   fromBranchId Int?
   fromBranch   Branch? @relation("FromBranch", fields: [fromBranchId], references: [id])
 
   // TO branch (required)
-  toBranchId Int
-  toBranch   Branch @relation("ToBranch", fields: [toBranchId], references: [id])
+  toBranchId Int?
+  toBranch   Branch? @relation("ToBranch", fields: [toBranchId], references: [id])
 
   temporary    Boolean   @default(false)
   expiresAt    DateTime?

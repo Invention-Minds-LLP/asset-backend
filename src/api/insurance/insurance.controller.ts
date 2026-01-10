@@ -4,10 +4,10 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
 export const addInsurancePolicy = async (req:AuthenticatedRequest, res: Response) => {
     try {
-      if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
-         res.status(403).json({ message: "Not allowed" });
-         return;
-      }
+      // if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
+      //    res.status(403).json({ message: "Not allowed" });
+      //    return;
+      // }
   
       const {
         assetId,
@@ -45,10 +45,10 @@ export const addInsurancePolicy = async (req:AuthenticatedRequest, res: Response
   };
   export const updateInsurancePolicy = async (req:AuthenticatedRequest, res: Response) => {
     try {
-      if (req.user.role !== "superadmin") {
-         res.status(403).json({ message: "Admins only" });
-         return
-      }
+      // if (req.user.role !== "superadmin") {
+      //    res.status(403).json({ message: "Admins only" });
+      //    return
+      // }
   
       const id = Number(req.params.id);
       const data = req.body;

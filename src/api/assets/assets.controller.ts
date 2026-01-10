@@ -96,10 +96,10 @@ export const getAssetById = async (req: Request, res: Response) => {
 
 export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    if (req.user.role !== "store_user" && req.user.role !== "superadmin") {
-      res.status(403).json({ message: "Only store users can create assets" });
-      return
-    }
+    // if (req.user.role !== "store_user" && req.user.role !== "superadmin") {
+    //   res.status(403).json({ message: "Only store users can create assets" });
+    //   return
+    // }
 
     // Financial Year ID (AST-FY2025-26-001)
     const now = new Date();
@@ -341,7 +341,7 @@ export const updateAsset = async (req: Request, res: Response) => {
       // SLA
       slaExpectedValue: data.slaExpectedValue ? Number(data.slaExpectedValue) : null,
       slaExpectedUnit: data.slaExpectedUnit || null,
-      slaDetails: data.slaDetails,
+      // slaDetails: data.slaDetails,
 
       status: data.status,
     };
@@ -379,6 +379,11 @@ export const updateAsset = async (req: Request, res: Response) => {
     if (data.allottedToId) {
       updateData.allottedTo = {
         connect: { id: Number(data.allottedToId) }
+      };
+    }
+    if (data.supervisorId) {
+      updateData.supervisor = {
+        connect: { id: Number(data.supervisorId) }
       };
     }
 
@@ -462,23 +467,40 @@ export const getAssetByAssetId = async (req: Request, res: Response) => {
       include: {
         depreciation: true,
         insurance: true,
-        locations: { orderBy: { id: "desc" }, take: 1 },
-        transfers: true
+
+        // ✅ CURRENT LOCATION ONLY
+        locations: {
+          where: { isActive: true },
+          take: 1,
+          include: {
+            branch: true,
+            employeeResponsible: true
+          }
+        },
+
+        // ✅ TRANSFER HISTORY (latest first)
+        transfers: {
+          orderBy: { transferDate: "desc" },
+          include: {
+            fromBranch: true,
+            toBranch: true
+          }
+        }
       }
     });
 
     if (!asset) {
-      res.status(404).json({ message: "Asset not found" });
-      return;
+       res.status(404).json({ message: "Asset not found" });
+       return
     }
 
     res.json(asset);
-    return;
-
   } catch (err) {
+    console.error("getAssetByAssetId error:", err);
     res.status(500).json({ message: "Error fetching asset" });
   }
 };
+
 
 const TEMP_FOLDER = path.join(__dirname, "../../temp");
 if (!fs.existsSync(TEMP_FOLDER)) {
@@ -567,5 +589,45 @@ export const uploadAssetImage = async (req: Request, res: Response) => {
     console.error("Upload error:", error);
     res.status(500).json({ error: (error as Error).message });
     return
+  }
+};
+export const updateAssetAssignment = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { departmentId, supervisorId, allottedToId } = req.body;
+
+    if (!id) {
+       res.status(400).json({ message: "Asset ID required" });
+    }
+
+    const updateData: any = {};
+
+    if (departmentId !== undefined) {
+      updateData.department = { connect: { id: Number(departmentId) } };
+    }
+
+    if (supervisorId !== undefined) {
+      updateData.supervisor = { connect: { id: Number(supervisorId) } };
+    }
+
+    if (allottedToId !== undefined) {
+      updateData.allottedTo = { connect: { id: Number(allottedToId) } };
+    }
+
+    updateData.status = 'active'
+    const updated = await prisma.asset.update({
+      where: { id },
+      data: updateData,
+      include: {
+        department: true,
+        supervisor: true,
+        allottedTo: true,
+      }
+    });
+
+    res.json(updated);
+  } catch (err) {
+    console.error("Assignment update error:", err);
+    res.status(500).json({ message: "Failed to update assignment" });
   }
 };

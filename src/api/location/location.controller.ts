@@ -2,30 +2,35 @@ import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
-export const addAssetLocation = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
-         res.status(403).json({ message: "Unauthorized" });
-         return
-      }
-  
-      const {
-        assetId,
-        branchId,
-        block,
-        floor,
-        room,
-        employeeResponsibleId
-      } = req.body;
-  
-      // Close previous active locations
-      await prisma.assetLocation.updateMany({
+export const addAssetLocation = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const {
+      assetId,
+      branchId,
+      block,
+      floor,
+      room,
+      employeeResponsibleId,
+      rfid
+    } = req.body;
+
+    if (!assetId) {
+      res.status(400).json({ message: "assetId is required" });
+      return;
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1️⃣ Close previous active locations
+      await tx.assetLocation.updateMany({
         where: { assetId, isActive: true },
         data: { isActive: false }
       });
-  
-      // Create new location entry
-      const newLocation = await prisma.assetLocation.create({
+
+      // 2️⃣ Create new location
+      const newLocation = await tx.assetLocation.create({
         data: {
           assetId,
           branchId,
@@ -36,14 +41,27 @@ export const addAssetLocation = async (req:AuthenticatedRequest, res: Response) 
           isActive: true
         }
       });
-  
-      res.status(201).json(newLocation);
-  
-    } catch (err) {
-      console.error("Error adding location:", err);
-      res.status(500).json({ message: "Failed to add location" });
-    }
-  };
+
+      // 3️⃣ Update asset RFID (and optionally branch)
+      await tx.asset.update({
+        where: { id: assetId },
+        data: {
+          rfidCode: rfid,
+        }
+      });
+
+      return newLocation;
+    });
+
+    res.status(201).json(result);
+
+  } catch (err) {
+    console.error("Error adding location:", err);
+    res.status(500).json({ message: "Failed to add location" });
+  }
+};
+
+
   export const updateCurrentLocation = async (req:AuthenticatedRequest, res: Response) => {
     try {
       const id = Number(req.params.locationId);

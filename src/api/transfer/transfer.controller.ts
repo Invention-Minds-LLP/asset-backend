@@ -1,80 +1,101 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
-export const transferAsset = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const { assetId, toBranchId, approvedBy, temporary, expiresAt } = req.body;
-  
-      if (!approvedBy) {
-         res.status(400).json({ message: "approvedBy is required" });
-         return
-      }
-  
-      const asset = await prisma.asset.findUnique({
-        where: { id: Number(assetId) },
-        include: {
-          locations: {
-            where: { isActive: true },
-            take: 1,
-            orderBy: { id: "desc" }
-          }
-        }
+export const transferAsset = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const {
+      assetId,
+      transferType,
+      externalType,
+      toBranchId,
+      block,
+      floor,
+      room,
+      temporary,
+      expiresAt,
+      approvedBy
+    } = req.body;
+
+    if (!assetId || !approvedBy || !transferType) {
+       res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+
+      const currentLocation = await tx.assetLocation.findFirst({
+        where: { assetId, isActive: true }
       });
-  
-      if (!asset) {
-         res.status(404).json({ message: "Asset not found" });
-         return;
-      }
-  
-      const currentLocation = asset.locations[0] || null;
-  
+
       const fromBranchId = currentLocation?.branchId ?? null;
-  
-      // 1️⃣ CLOSE PREVIOUS LOCATION
-      if (currentLocation) {
-        await prisma.assetLocation.update({
-          where: { id: currentLocation.id },
-          data: { isActive: false }
+
+      // 1️⃣ Close current location
+      await tx.assetLocation.updateMany({
+        where: { assetId, isActive: true },
+        data: { isActive: false }
+      });
+
+      // 2️⃣ Create new location (only if not DEAD)
+      let newLocation = null;
+
+      if (!(transferType === 'EXTERNAL' && externalType === 'DEAD')) {
+        newLocation = await tx.assetLocation.create({
+          data: {
+            assetId,
+            branchId: transferType === 'INTERNAL'
+              ? fromBranchId!
+              : Number(toBranchId),
+
+            block: transferType === 'INTERNAL' ? block : null,
+            floor: transferType === 'INTERNAL' ? floor : null,
+            room: transferType === 'INTERNAL' ? room : null,
+
+            isActive: true
+          }
         });
       }
-  
-      // 2️⃣ CREATE NEW LOCATION RECORD (active)
-      const newLocation = await prisma.assetLocation.create({
+
+      // 3️⃣ Transfer history
+      const history = await tx.assetTransferHistory.create({
         data: {
-          assetId: Number(assetId),
-          branchId: Number(toBranchId),
-          block: null,
-          floor: null,
-          room: null,
-          employeeResponsibleId: null,
-          isActive: true
-        }
-      });
-  
-      // 3️⃣ INSERT TRANSFER HISTORY
-      const history = await prisma.assetTransferHistory.create({
-        data: {
-          assetId: Number(assetId),
-          fromBranchId: fromBranchId,
-          toBranchId: Number(toBranchId),
-          approvedBy,
+          assetId,
+          transferType,
+          externalType,
+          fromBranchId,
+          toBranchId: externalType === 'BRANCH' ? Number(toBranchId) : null,
+          block,
+          floor,
+          room,
           temporary: temporary ?? false,
-          expiresAt: temporary ? new Date(expiresAt) : null
+          expiresAt: temporary ? new Date(expiresAt) : null,
+          approvedBy
         }
       });
-  
-       res.json({
-        message: "Asset transferred successfully",
-        location: newLocation,
-        history
-      });
-      return;
-  
-    } catch (err) {
-      console.error("Transfer error:", err);
-      res.status(500).json({ message: "Asset transfer failed" });
-    }
-  };
+
+      // 4️⃣ Update asset status
+      if (externalType === 'DEAD') {
+        await tx.asset.update({
+          where: { id: assetId },
+          data: { status: 'DEAD' }
+        });
+      }
+
+      return { history, newLocation };
+    });
+
+    res.json({
+      message: "Asset transferred successfully",
+      ...result
+    });
+
+  } catch (err) {
+    console.error("Transfer error:", err);
+    res.status(500).json({ message: "Transfer failed" });
+  }
+};
+
   export const getTransferHistory = async (req:AuthenticatedRequest, res: Response) => {
     try {
       const assetId = Number(req.params.assetId);
@@ -95,65 +116,65 @@ export const transferAsset = async (req:AuthenticatedRequest, res: Response) => 
       res.status(500).json({ message: "Failed to fetch transfer history" });
     }
   };
-  export const autoExpireTransfers = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const now = new Date();
+  // export const autoExpireTransfers = async (req:AuthenticatedRequest, res: Response) => {
+  //   try {
+  //     const now = new Date();
   
-      const expiringTransfers = await prisma.assetTransferHistory.findMany({
-        where: {
-          temporary: true,
-          expiresAt: { lt: now }
-        },
-        orderBy: { id: "desc" },
-        take: 50
-      });
+  //     const expiringTransfers = await prisma.assetTransferHistory.findMany({
+  //       where: {
+  //         temporary: true,
+  //         expiresAt: { lt: now }
+  //       },
+  //       orderBy: { id: "desc" },
+  //       take: 50
+  //     });
   
-      const results = [];
+  //     const results = [];
   
-      for (const transfer of expiringTransfers) {
-        const { assetId, fromBranchId, toBranchId } = transfer;
+  //     for (const transfer of expiringTransfers) {
+  //       const { assetId, fromBranchId, toBranchId } = transfer;
   
-        // Reverse Transfer → Back to fromBranch
-        if (fromBranchId) {
-          // Close current active location
-          await prisma.assetLocation.updateMany({
-            where: { assetId, isActive: true },
-            data: { isActive: false }
-          });
+  //       // Reverse Transfer → Back to fromBranch
+  //       if (fromBranchId) {
+  //         // Close current active location
+  //         await prisma.assetLocation.updateMany({
+  //           where: { assetId, isActive: true },
+  //           data: { isActive: false }
+  //         });
   
-          // Create new location entry
-          await prisma.assetLocation.create({
-            data: {
-              assetId,
-              branchId: fromBranchId,
-              isActive: true
-            }
-          });
+  //         // Create new location entry
+  //         await prisma.assetLocation.create({
+  //           data: {
+  //             assetId,
+  //             branchId: fromBranchId,
+  //             isActive: true
+  //           }
+  //         });
   
-          // Log transfer history
-          await prisma.assetTransferHistory.create({
-            data: {
-              assetId,
-              fromBranchId: toBranchId,   // returning from temporary branch
-              toBranchId: fromBranchId,   // going back
-              approvedBy: "SYSTEM-AUTO",
-              temporary: false,
-              expiresAt: null
-            }
-          });
-        }
+  //         // Log transfer history
+  //         await prisma.assetTransferHistory.create({
+  //           data: {
+  //             assetId,
+  //             fromBranchId: toBranchId,   // returning from temporary branch
+  //             toBranchId: fromBranchId,   // going back
+  //             approvedBy: "SYSTEM-AUTO",
+  //             temporary: false,
+  //             expiresAt: null
+  //           }
+  //         });
+  //       }
   
-        results.push(transfer.id);
-      }
+  //       results.push(transfer.id);
+  //     }
   
-      res.json({
-        message: "Temporary transfers auto expired and reverted",
-        processed: results
-      });
+  //     res.json({
+  //       message: "Temporary transfers auto expired and reverted",
+  //       processed: results
+  //     });
   
-    } catch (err) {
-      console.error("Auto-expire error:", err);
-      res.status(500).json({ message: "Auto-expire process failed" });
-    }
-  };
+  //   } catch (err) {
+  //     console.error("Auto-expire error:", err);
+  //     res.status(500).json({ message: "Auto-expire process failed" });
+  //   }
+  // };
       
