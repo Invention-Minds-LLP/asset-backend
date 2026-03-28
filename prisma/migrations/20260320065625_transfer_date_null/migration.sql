@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE `assettransferhistory` MODIFY `transferDate` DATETIME(3) NULL DEFAULT CURRENT_TIMESTAMP(3);

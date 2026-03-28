@@ -1,0 +1,22 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const assets_controller_1 = require("./assets.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = express_1.default.Router();
+router.get("/", authMiddleware_1.authenticateToken, assets_controller_1.getAllAssets);
+router.get('/:assetId', authMiddleware_1.authenticateToken, assets_controller_1.getAssetByAssetId);
+router.patch("/:id/assignment", authMiddleware_1.authenticateToken, assets_controller_1.updateAssetAssignment);
+router.get("/scan/:assetId", assets_controller_1.getAssetScanDetails);
+router.get("/:id", authMiddleware_1.authenticateToken, assets_controller_1.getAssetById);
+router.post("/", authMiddleware_1.authenticateToken, assets_controller_1.createAsset);
+router.put("/:id", authMiddleware_1.authenticateToken, assets_controller_1.updateAsset);
+router.delete("/:id", authMiddleware_1.authenticateToken, assets_controller_1.deleteAsset);
+router.post('/:assetId/upload-image', assets_controller_1.uploadAssetImage);
+router.get('/:assetId/specifications', assets_controller_1.getAssetSpecifications);
+router.post('/specifications', assets_controller_1.createAssetSpecification);
+router.put('/specifications/:id', assets_controller_1.updateAssetSpecification);
+exports.default = router;

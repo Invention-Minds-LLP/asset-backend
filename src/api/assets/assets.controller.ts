@@ -15,14 +15,58 @@ const FTP_CONFIG = {
 };
 
 
+// export const getAllAssets = async (req: Request, res: Response) => {
+//   const assets = await prisma.asset.findMany(
+//     {
+//       include: { assetCategory: true, vendor: true, department: true, allottedTo: true }
+//     });
+//   res.json(assets);
+// };
 export const getAllAssets = async (req: Request, res: Response) => {
-  const assets = await prisma.asset.findMany(
-    {
-      include: { assetCategory: true, vendor: true, department: true, allottedTo: true }
-    });
-  res.json(assets);
-};
+  try {
+    const user = req.user as any; // from auth middleware
 
+    const role = user?.role;
+    const departmentId = user?.departmentId;
+    const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
+
+    console.log(user)
+
+    let where: any = {};
+
+    if (role === 'ADMIN' || departmentId === 5) {
+      where = {};
+    } else if (role === 'HOD') {
+      where = {
+        departmentId: Number(departmentId)
+      };
+    } else if (role === 'SUPERVISOR') {
+      where = {
+        supervisorId: Number(employeeDbId)
+      };
+    } else {
+      where = {
+        id: -1
+      };
+    }
+
+    const assets = await prisma.asset.findMany({
+      where,
+      include: {
+        assetCategory: true,
+        vendor: true,
+        department: true,
+        allottedTo: true,
+        supervisor: true
+      }
+    });
+
+    res.json(assets);
+  } catch (error) {
+    console.error('getAllAssets error:', error);
+    res.status(500).json({ message: 'Failed to fetch assets' });
+  }
+};
 export const getAssetById = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   const asset = await prisma.asset.findUnique(
@@ -108,9 +152,14 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
     const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
 
     const latest = await prisma.asset.findFirst({
-      where: { assetId: { startsWith: `AST-${fyStr}` } },
+      where: {
+        assetId: { startsWith: `AST-${fyStr}` },
+        parentAssetId: null
+      },
       orderBy: { id: "desc" }
     });
+
+    console.log(latest)
 
     let next = 1;
     if (latest) {
@@ -128,7 +177,11 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         assetType: data.assetType,
         assetCategoryId: data.assetCategoryId,
 
-        rfidCode: data.rfidCode ?? null,
+        // rfidCode: data.rfidCode ?? null,
+        rfidCode: data.rfidCode && String(data.rfidCode).trim() !== ""
+          ? String(data.rfidCode).trim()
+          : null,
+        referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
         serialNumber: data.serialNumber,
         assetPhoto: data.assetPhoto ?? null,
 
@@ -170,6 +223,8 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         inspectionStatus: data.inspectionStatus,
         inspectionRemarks: data.inspectionRemarks,
 
+        departmentId: data.departmentId ? Number(data.departmentId) : null,
+
         status: "PENDING_COMPLETION"
       }
     });
@@ -182,77 +237,78 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
     res.status(500).json({ message: "Error creating asset" });
   }
 };
-export const completeAssetDetails = async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
-      res.status(403).json({ message: "Only department users can complete assets" });
-      return
-    }
+// export const completeAssetDetails = async (req: AuthenticatedRequest, res: Response) => {
+//   try {
 
-    const id = parseInt(req.params.id);
-    const data = req.body;
+//     if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
+//       res.status(403).json({ message: "Only department users can complete assets" });
+//       return
+//     }
 
-    const updated = await prisma.asset.update({
-      where: { id },
-      data: {
-        departmentId: data.departmentId,
-        allottedToId: data.allottedToId,
-        rfidCode: data.rfidCode,
-        slaExpectedValue: data.slaExpectedValue,
-        slaExpectedUnit: data.slaExpectedUnit,
-        slaDetails: data.slaDetails,
-        expectedLifetime: data.expectedLifetime,
-        expectedLifetimeUnit: data.expectedLifetimeUnit,
-        status: "ACTIVE"
-      }
-    });
+//     const id = parseInt(req.params.id);
+//     const data = req.body;
 
-    // Also create a location history entry
-    await prisma.assetLocation.create({
-      data: {
-        assetId: id,
-        branchId: data.branchId,
-        block: data.block,
-        floor: data.floor,
-        room: data.room,
-        employeeResponsibleId: data.employeeResponsibleId,
-        isActive: true
-      }
-    });
+//     const updated = await prisma.asset.update({
+//       where: { id },
+//       data: {
+//         departmentId: data.departmentId,
+//         allottedToId: data.allottedToId,
+//         rfidCode: data.rfidCode,
+//         slaExpectedValue: data.slaExpectedValue,
+//         slaExpectedUnit: data.slaExpectedUnit,
+//         slaDetails: data.slaDetails,
+//         expectedLifetime: data.expectedLifetime,
+//         expectedLifetimeUnit: data.expectedLifetimeUnit,
+//         status: "ACTIVE"
+//       }
+//     });
 
-    res.json(updated);
-    return
+//     // Also create a location history entry
+//     await prisma.assetLocation.create({
+//       data: {
+//         assetId: id,
+//         branchId: data.branchId,
+//         block: data.block,
+//         floor: data.floor,
+//         room: data.room,
+//         employeeResponsibleId: data.employeeResponsibleId,
+//         isActive: true
+//       }
+//     });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Error completing asset details" });
-    return
-  }
-};
-export const adminUpdateAsset = async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    if (req.user.role !== "superadmin") {
-      res.status(403).json({ message: "Admins only" });
-      return;
-    }
+//     res.json(updated);
+//     return
 
-    const id = parseInt(req.params.id);
-    const data = req.body;
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Error completing asset details" });
+//     return
+//   }
+// };
+// export const adminUpdateAsset = async (req: AuthenticatedRequest, res: Response) => {
+//   try {
+//     if (req.user.role !== "superadmin") {
+//       res.status(403).json({ message: "Admins only" });
+//       return;
+//     }
 
-    const updated = await prisma.asset.update({
-      where: { id },
-      data
-    });
+//     const id = parseInt(req.params.id);
+//     const data = req.body;
 
-    res.json(updated);
-    return;
+//     const updated = await prisma.asset.update({
+//       where: { id },
+//       data
+//     });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Admin update failed" });
-    return
-  }
-};
+//     res.json(updated);
+//     return;
+
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Admin update failed" });
+//     return
+//   }
+// };
 
 // export const updateAsset = async (req: Request, res: Response) => {
 //   const id = parseInt(req.params.id);
@@ -322,11 +378,12 @@ export const updateAsset = async (req: Request, res: Response) => {
     const updateData: any = {
       assetName: data.assetName,
       assetType: data.assetType,
+      referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
       serialNumber: data.serialNumber,
       assetPhoto: data.assetPhoto,
       rfidCode: data.rfidCode,
       modeOfProcurement: data.modeOfProcurement,
-      
+
       // GRN
       grnNumber: data.grnNumber,
       grnDate: data.grnDate ? new Date(data.grnDate) : null,
@@ -338,9 +395,14 @@ export const updateAsset = async (req: Request, res: Response) => {
       expectedLifetime: data.expectedLifetime ? Number(data.expectedLifetime) : null,
       expectedLifetimeUnit: data.expectedLifetimeUnit || null,
 
+      slaCategory: data.slaCategory || null,
+
+
       // SLA
       slaExpectedValue: data.slaExpectedValue ? Number(data.slaExpectedValue) : null,
       slaExpectedUnit: data.slaExpectedUnit || null,
+      slaResolutionValue: data.slaResolutionValue ? Number(data.slaResolutionValue) : null,
+      slaResolutionUnit: data.slaResolutionUnit || null,
       // slaDetails: data.slaDetails,
 
       status: data.status,
@@ -443,7 +505,7 @@ export const updateAsset = async (req: Request, res: Response) => {
 
     res.json(updated);
 
-  } catch (err:any) {
+  } catch (err: any) {
     console.error(err);
     res.status(500).json({ message: "Asset update error", error: err.message });
   }
@@ -490,8 +552,8 @@ export const getAssetByAssetId = async (req: Request, res: Response) => {
     });
 
     if (!asset) {
-       res.status(404).json({ message: "Asset not found" });
-       return
+      res.status(404).json({ message: "Asset not found" });
+      return
     }
 
     res.json(asset);
@@ -597,7 +659,7 @@ export const updateAssetAssignment = async (req: Request, res: Response) => {
     const { departmentId, supervisorId, allottedToId } = req.body;
 
     if (!id) {
-       res.status(400).json({ message: "Asset ID required" });
+      res.status(400).json({ message: "Asset ID required" });
     }
 
     const updateData: any = {};
@@ -629,5 +691,612 @@ export const updateAssetAssignment = async (req: Request, res: Response) => {
   } catch (err) {
     console.error("Assignment update error:", err);
     res.status(500).json({ message: "Failed to update assignment" });
+  }
+};
+export const createAssetSpecification = async (req: Request, res: Response) => {
+  try {
+    const {
+      assetId,
+      key,
+      value,
+      specificationGroup,
+      valueType,
+      unit,
+      sortOrder,
+      isMandatory,
+      source,
+      remarks,
+    } = req.body;
+
+    if (!assetId || !key || !value) {
+      res.status(400).json({ message: "assetId, key and value are required" });
+      return;
+    }
+
+    const spec = await prisma.assetSpecification.create({
+      data: {
+        assetId: Number(assetId),
+        key: String(key).trim(),
+        value: String(value).trim(),
+        specificationGroup: specificationGroup || null,
+        valueType: valueType || null,
+        unit: unit || null,
+        sortOrder: sortOrder != null ? Number(sortOrder) : 0,
+        isMandatory: !!isMandatory,
+        source: source || null,
+        remarks: remarks || null,
+      }
+    });
+
+    res.status(201).json(spec);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create specification", error: err.message });
+  }
+};
+
+export const getAssetSpecifications = async (req: Request, res: Response) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    const specs = await prisma.assetSpecification.findMany({
+      where: { assetId },
+      orderBy: [
+        { sortOrder: 'asc' },
+        { id: 'asc' }
+      ]
+    });
+
+    res.json(specs);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch specifications", error: err.message });
+  }
+};
+
+export const updateAssetSpecification = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const {
+      key,
+      value,
+      specificationGroup,
+      valueType,
+      unit,
+      sortOrder,
+      isMandatory,
+      source,
+      remarks,
+    } = req.body;
+
+    const existing = await prisma.assetSpecification.findUnique({ where: { id } });
+    if (!existing) {
+      res.status(404).json({ message: "Specification not found" });
+      return;
+    }
+
+    const updated = await prisma.assetSpecification.update({
+      where: { id },
+      data: {
+        key: key ? String(key).trim() : existing.key,
+        value: value ? String(value).trim() : existing.value,
+        specificationGroup: specificationGroup || null,
+        valueType: valueType || null,
+        unit: unit || null,
+        sortOrder: sortOrder != null ? Number(sortOrder) : 0,
+        isMandatory: !!isMandatory,
+        source: source || null,
+        remarks: remarks || null,
+      }
+    });
+
+    res.json(updated);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update specification", error: err.message });
+  }
+};
+
+export const getAssetScanDetails = async (req: Request, res: Response) => {
+  try {
+    const { assetId } = req.params;
+
+    if (!assetId || !String(assetId).trim()) {
+      res.status(400).json({ message: "assetId is required" });
+      return;
+    }
+
+    const asset = await prisma.asset.findFirst({
+      where: {
+        assetId: String(assetId).trim()
+      },
+      include: {
+        // master relations
+        assetCategory: true,
+        vendor: true,
+        department: true,
+        targetDepartment: true,
+        supervisor: true,
+        allottedTo: true,
+        employee: true,
+
+        // core details
+        depreciation: true,
+        warranties: {
+          include: {
+            vendor: true
+          }
+        },
+        insurance: {
+          include: {
+            claims: true
+          },
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+
+        // specifications
+        specifications: {
+          orderBy: [
+            { specificationGroup: "asc" },
+            { sortOrder: "asc" },
+            { id: "asc" }
+          ]
+        },
+
+        // location
+        locations: {
+          where: { isActive: true },
+          include: {
+            branch: true,
+            employeeResponsible: true
+          },
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+
+        // transfer history
+        transfers: {
+          include: {
+            fromBranch: true,
+            toBranch: true
+          },
+          orderBy: {
+            transferDate: "desc"
+          }
+        },
+
+        // assignments
+        assignments: {
+          include: {
+            assignedTo: true,
+            assignedBy: true,
+            employee: true,
+            assetAssignmentHistories: {
+              include: {
+                performedBy: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            }
+          },
+          orderBy: {
+            assignedAt: "desc"
+          }
+        },
+
+        // tickets
+        tickets: {
+          include: {
+            raisedBy: true,
+            assignedTo: true,
+            assignedBy: true,
+            department: true,
+            owningDepartment: true,
+            statusHistory: {
+              orderBy: {
+                changedAt: "desc"
+              }
+            },
+            ticketAssignmentHistories: {
+              include: {
+                fromEmployee: true,
+                toEmployee: true,
+                performedBy: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            },
+            ticketTransferHistories: {
+              include: {
+                fromDepartment: true,
+                toDepartment: true,
+                vendor: true,
+                requestedBy: true,
+                approvedBy: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            },
+            sparePartUsages: {
+              include: {
+                sparePart: true,
+                usedBy: true
+              },
+              orderBy: {
+                usedAt: "desc"
+              }
+            }
+          },
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+
+        // maintenance / service
+        maintenanceHistory: {
+          include: {
+            serviceContract: {
+              include: {
+                vendor: true
+              }
+            },
+            ticket: true,
+            preventiveChecklistRuns: {
+              include: {
+                template: true,
+                performedBy: true,
+                results: {
+                  include: {
+                    item: true
+                  }
+                }
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            },
+            pmChecklistRuns: {
+              include: {
+                template: true,
+                results: {
+                  include: {
+                    item: true
+                  }
+                }
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            }
+          },
+          orderBy: {
+            actualDoneAt: "desc"
+          }
+        },
+
+        maintenanceSchedules: {
+          where: { isActive: true },
+          orderBy: {
+            nextDueAt: "asc"
+          }
+        },
+
+        // service contracts
+        serviceContracts: {
+          include: {
+            vendor: true,
+            maintenanceHistories: true
+          },
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+
+        // documents
+        serviceDocuments: {
+          include: {
+            uploadedBy: true
+          },
+          orderBy: {
+            uploadedAt: "desc"
+          }
+        },
+
+        // calibration
+        calibrationSchedules: {
+          include: {
+            vendor: true,
+            histories: {
+              orderBy: {
+                calibratedAt: "desc"
+              }
+            }
+          },
+          orderBy: {
+            nextDueAt: "asc"
+          }
+        },
+
+        calibrationHistory: {
+          include: {
+            vendor: true,
+            schedule: true,
+            createdBy: true
+          },
+          orderBy: {
+            calibratedAt: "desc"
+          }
+        },
+
+        // checklist templates / runs
+        preventiveChecklistTemplates: {
+          include: {
+            items: {
+              orderBy: {
+                sortOrder: "asc"
+              }
+            }
+          }
+        },
+        preventiveChecklistRuns: {
+          include: {
+            template: true,
+            performedBy: true,
+            results: {
+              include: {
+                item: true
+              }
+            }
+          },
+          orderBy: {
+            scheduledDue: "desc"
+          }
+        },
+
+        pmChecklistTemplates: {
+          include: {
+            items: {
+              orderBy: {
+                sortOrder: "asc"
+              }
+            }
+          }
+        },
+        pmChecklistRuns: {
+          include: {
+            template: true,
+            maintenanceHistory: true,
+            results: {
+              include: {
+                item: true
+              }
+            }
+          },
+          orderBy: {
+            scheduledDue: "desc"
+          }
+        },
+
+        acknowledgementTemplates: {
+          include: {
+            items: {
+              orderBy: {
+                sortOrder: "asc"
+              }
+            }
+          }
+        },
+        acknowledgementRuns: {
+          include: {
+            template: true,
+            assignedTo: true,
+            rows: {
+              include: {
+                item: true
+              }
+            }
+          },
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+
+        supportMatrixes: {
+          include: {
+            employee: true
+          },
+          orderBy: {
+            levelNo: "asc"
+          }
+        },
+
+        sparePartUsages: {
+          include: {
+            sparePart: true,
+            usedBy: true,
+            ticket: true
+          },
+          orderBy: {
+            usedAt: "desc"
+          }
+        },
+
+        scanLogs: {
+          include: {
+            scannedBy: true
+          },
+          orderBy: {
+            scannedAt: "desc"
+          },
+          take: 20
+        },
+
+        qrScans: {
+          include: {
+            scannedBy: true
+          },
+          orderBy: {
+            scannedAt: "desc"
+          },
+          take: 20
+        },
+
+        gatePasses: {
+          orderBy: {
+            createdAt: "desc"
+          }
+        },
+        depreciationLogs: {
+          include: {
+            doneBy: true
+          },
+          orderBy: {
+            periodEnd: "desc"
+          }
+        },
+
+        insuranceClaims: {
+          include: {
+            insurance: true
+          },
+          orderBy: {
+            claimDate: "desc"
+          }
+        }
+      }
+    });
+
+    if (!asset) {
+      res.status(404).json({ message: "Asset not found" });
+      return;
+    }
+
+    const response = {
+      masterDetails: {
+        id: asset.id,
+        assetId: asset.assetId,
+        assetName: asset.assetName,
+        assetType: asset.assetType,
+        serialNumber: asset.serialNumber,
+        referenceCode: asset.referenceCode,
+        modeOfProcurement: asset.modeOfProcurement,
+        status: asset.status,
+        assetPhoto: asset.assetPhoto,
+        currentLocation: asset.currentLocation,
+        fromLocation: asset.fromLocation,
+        toLocation: asset.toLocation,
+        rfidCode: asset.rfidCode,
+        qrCode: asset.qrCode,
+        qrGeneratedAt: asset.qrGeneratedAt,
+        qrLabelPrinted: asset.qrLabelPrinted,
+        purchaseDate: asset.purchaseDate,
+        purchaseCost: asset.purchaseCost,
+        installedAt: asset.installedAt,
+        criticalityLevel: asset.criticalityLevel,
+        riskClass: asset.riskClass,
+        workingCondition: asset.workingCondition,
+        healthScore: asset.healthScore,
+        lastInspectionDate: asset.lastInspectionDate,
+        slaExpectedValue: asset.slaExpectedValue,
+        slaExpectedUnit: asset.slaExpectedUnit,
+        slaResolutionValue: asset.slaResolutionValue,
+        slaResolutionUnit: asset.slaResolutionUnit,
+        slaNextDueAt: asset.slaNextDueAt,
+        slaBreached: asset.slaBreached,
+        lastSlaServiceDate: asset.lastSlaServiceDate,
+        expectedLifetime: asset.expectedLifetime,
+        expectedLifetimeUnit: asset.expectedLifetimeUnit,
+        retiredDate: asset.retiredDate,
+        retiredReason: asset.retiredReason,
+        retiredBy: asset.retiredBy,
+        specificationSummary: asset.specificationSummary,
+        organogramNotes: asset.organogramNotes,
+        ticketHierarchyNotes: asset.ticketHierarchyNotes,
+        pmFormatNotes: asset.pmFormatNotes,
+        createdAt: asset.createdAt,
+        updatedAt: asset.updatedAt,
+
+        assetCategory: asset.assetCategory,
+        vendor: asset.vendor,
+        department: asset.department,
+        targetDepartment: asset.targetDepartment,
+        supervisor: asset.supervisor,
+        allottedTo: asset.allottedTo,
+        employee: asset.employee
+      },
+
+      procurementDetails: {
+        invoiceNumber: asset.invoiceNumber,
+        purchaseOrderNo: asset.purchaseOrderNo,
+        purchaseOrderDate: asset.purchaseOrderDate,
+        deliveryDate: asset.deliveryDate,
+        donorName: asset.donorName,
+        donationDate: asset.donationDate,
+        assetCondition: asset.assetCondition,
+        estimatedValue: asset.estimatedValue,
+        donationDocument: asset.donationDocument,
+        leaseStartDate: asset.leaseStartDate,
+        leaseEndDate: asset.leaseEndDate,
+        leaseAmount: asset.leaseAmount,
+        leaseRenewalDate: asset.leaseRenewalDate,
+        leaseContractDoc: asset.leaseContractDoc,
+        rentalStartDate: asset.rentalStartDate,
+        rentalEndDate: asset.rentalEndDate,
+        rentalAmount: asset.rentalAmount,
+        rentalAgreementDoc: asset.rentalAgreementDoc,
+        grnNumber: asset.grnNumber,
+        grnDate: asset.grnDate,
+        grnValue: asset.grnValue,
+        inspectionStatus: asset.inspectionStatus,
+        inspectionRemarks: asset.inspectionRemarks
+      },
+
+      specifications: asset.specifications,
+      depreciation: asset.depreciation,
+      depreciationLogs: asset.depreciationLogs,
+      warranty: asset.warranties,
+      insurance: asset.insurance,
+      insuranceClaims: asset.insuranceClaims,
+      currentLocations: asset.locations,
+      transferHistory: asset.transfers,
+      assignments: asset.assignments,
+      tickets: asset.tickets,
+      maintenanceHistory: asset.maintenanceHistory,
+      maintenanceSchedules: asset.maintenanceSchedules,
+      serviceContracts: asset.serviceContracts,
+      documents: asset.serviceDocuments,
+      calibrationSchedules: asset.calibrationSchedules,
+      calibrationHistory: asset.calibrationHistory,
+      preventiveChecklistTemplates: asset.preventiveChecklistTemplates,
+      preventiveChecklistRuns: asset.preventiveChecklistRuns,
+      pmChecklistTemplates: asset.pmChecklistTemplates,
+      pmChecklistRuns: asset.pmChecklistRuns,
+      acknowledgementTemplates: asset.acknowledgementTemplates,
+      acknowledgementRuns: asset.acknowledgementRuns,
+      supportMatrixes: asset.supportMatrixes,
+      sparePartUsages: asset.sparePartUsages,
+      qrScans: asset.qrScans,
+      scanLogs: asset.scanLogs,
+      gatePasses: asset.gatePasses,
+    };
+
+    res.json({
+      success: true,
+      message: "Asset scan details fetched successfully",
+      data: response
+    });
+  } catch (err: any) {
+    console.error("getAssetScanDetails error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching asset scan details",
+      error: err.message
+    });
   }
 };

@@ -14,6 +14,7 @@ export const addAssetLocation = async (
       floor,
       room,
       employeeResponsibleId,
+        departmentSnapshot,
       rfid
     } = req.body;
 
@@ -38,6 +39,7 @@ export const addAssetLocation = async (
           floor,
           room,
           employeeResponsibleId,
+            departmentSnapshot,
           isActive: true
         }
       });
@@ -62,91 +64,115 @@ export const addAssetLocation = async (
 };
 
 
-  export const updateCurrentLocation = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const id = Number(req.params.locationId);
-      const data = req.body;
-  
-      const updated = await prisma.assetLocation.update({
-        where: { id },
-        data: {
-          block: data.block,
-          floor: data.floor,
-          room: data.room,
-          employeeResponsibleId: data.employeeResponsibleId
-        }
-      });
-  
-      res.json(updated);
-  
-    } catch (err) {
-      console.error("Update location error:", err);
-      res.status(500).json({ message: "Failed to update location" });
+export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const locationId = Number(req.params.locationId);
+    const { assetId, branchId, block, floor, room, employeeResponsibleId,  departmentSnapshot, rfid } = req.body;
+
+    // Option A: if frontend sends assetId
+    if (!assetId) {
+       res.status(400).json({ message: "assetId is required" });
+       return;
     }
-  };
-  export const getCurrentLocation = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const assetId = Number(req.params.assetId);
-  
-      const location = await prisma.assetLocation.findFirst({
+
+    const result = await prisma.$transaction(async (tx) => {
+      // 1) deactivate current active location(s)
+      await tx.assetLocation.updateMany({
         where: { assetId, isActive: true },
+        data: { isActive: false }
+      });
+
+      // 2) create a NEW active row (history)
+      const newLocation = await tx.assetLocation.create({
+        data: {
+          assetId,
+          branchId,
+          block,
+          floor,
+          room,
+          employeeResponsibleId,
+            departmentSnapshot,
+          isActive: true
+        },
         include: { branch: true, employeeResponsible: true }
       });
-  
-      if (!location) {
-         res.status(404).json({ message: "No active location found" });
-         return;
+
+      // 3) update asset RFID if passed
+      if (rfid !== undefined) {
+        await tx.asset.update({
+          where: { id: assetId },
+          data: { rfidCode: rfid }
+        });
       }
-  
-      res.json(location);
-  
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Failed to fetch current location" });
+
+      return newLocation;
+    });
+
+    res.json(result);
+  } catch (err) {
+    console.error("Update location error:", err);
+    res.status(500).json({ message: "Failed to update location" });
+  }
+};
+export const getCurrentLocation = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    const location = await prisma.assetLocation.findFirst({
+      where: { assetId, isActive: true },
+      include: { branch: true, employeeResponsible: true },
+      orderBy: { createdAt: "desc" }
+    });
+
+    if (!location) {
+      res.status(404).json({ message: "No active location found" });
+      return;
     }
-  };
-  export const getLocationHistory = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const assetId = Number(req.params.assetId);
-  
-      const history = await prisma.assetLocation.findMany({
-        where: { assetId },
-        include: { branch: true, employeeResponsible: true },
-        orderBy: { createdAt: "desc" }
-      });
-  
-      res.json(history);
-  
-    } catch (err) {
-      console.error("Location history error:", err);
-      res.status(500).json({ message: "Failed to fetch history" });
-    }
-  };
-  export const createBranch = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      if (req.user.role !== "superadmin") {
-         res.status(403).json({ message: "Admins only" });
-         return
-      }
-  
-      const branch = await prisma.branch.create({
-        data: { name: req.body.name }
-      });
-  
-      res.status(201).json(branch);
-  
-    } catch (err) {
-      console.error(err);
-      res.status(500).json({ message: "Failed to create branch" });
-    }
-  };
-  export const getBranches = async (req:AuthenticatedRequest, res: Response) => {
-    try {
-      const branches = await prisma.branch.findMany();
-      res.json(branches);
-  
-    } catch (err) {
-      res.status(500).json({ message: "Failed to fetch branches" });
-    }
-  };
-            
+
+    res.json(location);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch current location" });
+  }
+};
+export const getLocationHistory = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const assetId = Number(req.params.assetId);
+
+    const history = await prisma.assetLocation.findMany({
+      where: { assetId },
+      include: { branch: true, employeeResponsible: true },
+      orderBy: { createdAt: "desc" }
+    });
+
+    res.json(history);
+
+  } catch (err) {
+    console.error("Location history error:", err);
+    res.status(500).json({ message: "Failed to fetch history" });
+  }
+};
+export const createBranch = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+
+    const branch = await prisma.branch.create({
+      data: { name: req.body.name }
+    });
+
+    res.status(201).json(branch);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create branch" });
+  }
+};
+export const getBranches = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const branches = await prisma.branch.findMany();
+    res.json(branches);
+
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch branches" });
+  }
+};

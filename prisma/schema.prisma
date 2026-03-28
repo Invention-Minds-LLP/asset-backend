@@ -13,6 +13,97 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum AssignmentStatus {
+  PENDING
+  ACKNOWLEDGED
+  REJECTED
+  RETURNED
+}
+
+enum AssignmentAction {
+  CREATED
+  ACKNOWLEDGED
+  REJECTED
+  REASSIGNED
+  RETURNED
+}
+
+enum EmployeeRole {
+  HOD
+  SUPERVISOR
+  EXECUTIVE
+}
+
+enum AssignmentStage {
+  HOD_SOURCE
+  SUPERVISOR
+  HOD_TARGET
+  END_USER
+}
+
+enum TicketStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  ON_HOLD
+  WORK_COMPLETED
+  RESOLVED
+  TERMINATED
+  CLOSED
+  REJECTED
+}
+
+enum TicketAssignmentAction {
+  ASSIGNED
+  REASSIGNED
+  UNASSIGNED
+}
+
+enum ChecklistRunStatus {
+  DUE
+  IN_PROGRESS
+  COMPLETED
+  SKIPPED
+}
+
+enum ChecklistResult {
+  PASS
+  FAIL
+  NA
+}
+
+enum TicketTransferType {
+  INTERNAL_DEPARTMENT
+  EXTERNAL_VENDOR
+  EXTERNAL_SERVICE
+}
+
+enum TicketTransferStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  COMPLETED
+}
+
+enum AssetSlaCategory {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum SlaLevel {
+  L1
+  L2
+  L3
+}
+
+enum AcknowledgementPurpose {
+  ASSIGNMENT
+  TRANSFER_RETURN
+  TRANSFER_OUT
+  MAINTENANCE
+}
+
 model Asset {
   id                Int           @id @default(autoincrement())
   assetId           String        @unique
@@ -24,31 +115,47 @@ model Asset {
   purchaseDate      DateTime?
   modeOfProcurement String        @default("PURCHASE") // PURCHASE | DONATION | LEASE | RENTAL 
 
+  manufacturer     String?
+  modelNumber      String?
+  countryOfOrigin  String?
+  regulatoryApproval String? // FDA/CE/BIS certification number
+
+  referenceCode String?  @unique
+  isBranded     Boolean? @default(false)
+  isAssembled   Boolean? @default(false)
+  isCustomized  Boolean? @default(false)
+  customDetails String?  @db.Text
+
+  hasSpecifications Boolean? @default(false)
+  physicalCondition String? // EXCELLENT | GOOD | FAIR | POOR
+
+  installedAt DateTime?
+
   // PURCHASE
   invoiceNumber     String?
   purchaseOrderNo   String?
   purchaseOrderDate DateTime?
   deliveryDate      DateTime?
-  purchaseCost      Float?
+  purchaseCost      Decimal?  @db.Decimal(12, 2)
 
   // DONATION
   donorName        String?
   donationDate     DateTime?
   assetCondition   String? // NEW / USED
-  estimatedValue   Float?
+  estimatedValue   Decimal?  @db.Decimal(12, 2)
   donationDocument String?
 
   // LEASE
   leaseStartDate   DateTime?
   leaseEndDate     DateTime?
-  leaseAmount      Float?
+  leaseAmount      Decimal?  @db.Decimal(12, 2)
   leaseRenewalDate DateTime?
   leaseContractDoc String?
 
   // RENTAL
   rentalStartDate    DateTime?
   rentalEndDate      DateTime?
-  rentalAmount       Float?
+  rentalAmount       Decimal?  @db.Decimal(12, 2)
   rentalAgreementDoc String?
 
   vendorId Int?
@@ -57,37 +164,82 @@ model Asset {
   // GRN
   grnNumber         String?
   grnDate           DateTime?
-  grnValue          Float?
+  grnValue          Decimal?  @db.Decimal(12, 2)
   inspectionStatus  String?
   inspectionRemarks String?
 
   departmentId Int?
   department   Department? @relation(fields: [departmentId], references: [id])
-  supervisorId Int?
-  supervisor   Employee?   @relation("AssetSupervisor", fields: [supervisorId], references: [id])
 
-  allottedToId       Int?
-  allottedTo         Employee? @relation("AssetEndUser", fields: [allottedToId], references: [id])
-  rfidCode           String    @unique
-  currentLocation    String?
-  fromLocation       String?
-  toLocation         String?
-  status             String
-  assetPhoto         String?
+  targetDepartmentId Int? // NEW (where end user belongs)
+  targetDepartment   Department? @relation("TargetDept", fields: [targetDepartmentId], references: [id])
+
+  supervisorId Int?
+  supervisor   Employee? @relation("AssetSupervisor", fields: [supervisorId], references: [id])
+
+  allottedToId    Int?
+  allottedTo      Employee? @relation("AssetEndUser", fields: [allottedToId], references: [id])
+  rfidCode        String?   @unique
+  qrCode          String?   @unique
+  qrGeneratedAt   DateTime?
+  qrLabelPrinted  Boolean?  @default(false)
+  currentLocation String?
+  fromLocation    String?
+  toLocation      String?
+  status          String
+  assetPhoto      String?
+
+  sourceType         String? // NEW | INVENTORY
+  sourceReference    String?
+  remarks            String?           @db.Text
+  // Hospital-critical classification (optional)
+  criticalityLevel   String? // LOW | MEDIUM | HIGH | LIFE_SUPPORT
+  riskClass          String? // CLASS_I | CLASS_II | CLASS_III
+  // Condition/health (optional)
+  workingCondition   String? // WORKING | PARTIAL | NOT_WORKING
+  healthScore        Int?
+  lastInspectionDate DateTime?
   slaExpectedValue   Int?
   slaExpectedUnit    String?
+  slaResolutionValue Int?
+  slaResolutionUnit  String?
   slaNextDueAt       DateTime?
   slaBreached        Boolean?
+  slaCategory        AssetSlaCategory?
   lastSlaServiceDate DateTime?
 
+  // Audit / verification
+  lastAuditDate DateTime?
+  auditedBy     String?
+  warrantyStatus String? // UNDER_WARRANTY | EXPIRED | NO_WARRANTY
+
+  // Retirement / disposal
   retiredDate          DateTime?
   retiredReason        String?
   expectedLifetime     Int?
   expectedLifetimeUnit String?
   retiredBy            String?
+  disposalMethod       String? // SOLD | SCRAPPED | DONATED | RETURNED_TO_VENDOR | AUCTION
+  disposalValue        Decimal? @db.Decimal(12, 2)
+  disposalDate         DateTime?
+  disposalApprovedBy   String?
+  disposalCertificate  String? // URL for certificate of destruction
+
+  // Sub-assets (optional hierarchy)
+  parentAssetId Int?
+  parentAsset   Asset?  @relation("SubAssets", fields: [parentAssetId], references: [id])
+  subAssets     Asset[] @relation("SubAssets")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  createdById Int?
+  updatedById Int?
+
+  specificationSummary String? @db.Text
+  organogramNotes      String? @db.Text
+  ticketHierarchyNotes String? @db.Text
+  pmFormatNotes        String? @db.Text
 
   depreciation AssetDepreciation?
   insurance    AssetInsurance[]
@@ -96,60 +248,194 @@ model Asset {
 
   maintenanceHistory MaintenanceHistory[]
 
-  warranty   Warranty?
-  tickets    Ticket[]
-  Employee   Employee? @relation(fields: [employeeId], references: [id])
-  employeeId Int?
+  warranties                   Warranty[]
+  tickets                      Ticket[]
+  serviceContracts             ServiceContract[]
+  serviceDocuments             Document[]
+  qrScans                      QRScanLog[]
+  gatePasses                   GatePass[]
+  scanLogs                     AssetScanLog[]
+  notifications                Notification[]
+  assignments                  AssetAssignment[]
+  specifications               AssetSpecification[]
+  employee                     Employee?                      @relation(fields: [employeeId], references: [id])
+  employeeId                   Int?
+  depreciationLogs             DepreciationLog[]
+  insuranceClaims              InsuranceClaim[]
+  maintenanceSchedules         MaintenanceSchedule[]
+  sparePartUsages              SparePartUsage[]
+  calibrationSchedules         CalibrationSchedule[]
+  calibrationHistory           CalibrationHistory[]
+  preventiveChecklistTemplates PreventiveChecklistTemplate[]
+  preventiveChecklistRuns      PreventiveChecklistRun[]
+  acknowledgementTemplates     AssetAcknowledgementTemplate[]
+  acknowledgementRuns          AssetAcknowledgementRun[]
+  pmChecklistTemplates         PMChecklistTemplate[]
+  pmChecklistRuns              PMChecklistRun[]
+  calibrationTemplates         CalibrationChecklistTemplate[]
+  supportMatrixes              AssetSupportMatrix[]
+  disposals                    AssetDisposal[]
+  auditItems                   AssetAuditItem[] @relation("AuditItems")
+
+  @@index([status])
+  @@index([assetCategoryId])
+  @@index([departmentId])
+  @@index([vendorId])
+  @@map("asset")
 }
 
 model Warranty {
   id      Int   @id @default(autoincrement())
-  assetId Int   @unique
+  assetId Int
   asset   Asset @relation(fields: [assetId], references: [id])
 
   warrantyStart   DateTime
   warrantyEnd     DateTime
   daysToExpiry    Int?
   isUnderWarranty Boolean
-  amcActive       Boolean
-  amcVendor       String?
-  amcStart        DateTime?
-  amcEnd          DateTime?
-  amcVisitsDue    Int?
-  lastServiceDate DateTime?
-  nextVisitDue    DateTime?
-  serviceReport   String?
-  alertSent       Boolean   @default(false)
+  alertSent       Boolean  @default(false)
+
+  warrantyType      String? // OEM | EXTENDED | SELLER | SERVICE | OTHER
+  warrantyProvider  String?
+  vendorId          Int?
+  vendor            Vendor? @relation(fields: [vendorId], references: [id])
+  warrantyReference String?
+  coverageDetails   String? @db.Text
+  exclusions        String? @db.Text
+  supportContact    String?
+  supportEmail      String?
+  termsUrl          String?
+  remarks           String? @db.Text
+
+  createdById Int?
+  updatedById Int?
+
+  isActive Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId])
+  @@index([assetId, isActive])
+  @@map("warranty")
 }
 
 model Ticket {
   id           Int        @id @default(autoincrement())
   ticketId     String     @unique
-  raisedBy     String
+  raisedById   Int?
+  raisedBy     Employee?  @relation("TicketRaisedBy", fields: [raisedById], references: [id])
   departmentId Int
-  department   Department @relation(fields: [departmentId], references: [id])
+  department   Department @relation("TicketDepartment", fields: [departmentId], references: [id])
   assetId      Int
   asset        Asset      @relation(fields: [assetId], references: [id])
 
   issueType    String
-  detailedDesc String  @db.Text
+  detailedDesc String       @db.Text
   priority     String
   photoOfIssue String?
   location     String
-  status       String
+  status       TicketStatus @default(OPEN)
+
+  // ✅ assignment control
+  assignedToId Int?
+  assignedTo   Employee? @relation("TicketAssignedTo", fields: [assignedToId], references: [id])
+
+  assignedById Int?
+  assignedBy   Employee? @relation("TicketAssignedBy", fields: [assignedById], references: [id])
+
+  owningDepartmentId Int?
+  owningDepartment   Department? @relation("TicketOwningDept", fields: [owningDepartmentId], references: [id])
+
+  // ✅ transfer control
+  isTransferred Boolean @default(false)
+  transferCount Int     @default(0) // optional (if you want to limit)
+
+  reassignCount  Int       @default(0) // max 2
+  lastAssignedAt DateTime?
+  assignmentNote String?   @db.Text
+
+  // ✅ termination by HOD
+  terminatedAt    DateTime?
+  terminatedById  Int?
+  terminationNote String?   @db.Text
+
+  // ✅ closing by raised person
+  closedAt     DateTime?
+  closedById   Int?
+  closeRemarks String?   @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  slaCategory     AssetSlaCategory?
+  currentSlaLevel SlaLevel?
 
   slaExpectedValue Int? // numeric value
   slaExpectedUnit  String? // e.g., "HOURS", "DAYS", "MONTHS", "YEARS"
   slaResolvedAt    DateTime?
   slaBreached      Boolean?
 
+  // Downtime (useful for hospital ops + finance reporting)
+  downtimeStart DateTime?
+  downtimeEnd   DateTime?
+
+  // Cost capture (so finance excel is possible without a ledger module)
+  serviceType String? // WARRANTY | AMC | CMC | PAID | INTERNAL
+  serviceCost Decimal? @db.Decimal(12, 2)
+  partsCost   Decimal? @db.Decimal(12, 2)
+  totalCost   Decimal? @db.Decimal(12, 2)
+
+  // Resolution knowledge
+  rootCause          String?  @db.Text
+  resolutionSummary  String?  @db.Text
+  customerSatisfaction Int?   // 1-5 feedback rating
+  followUpDate       DateTime?
+
+  // Closure / approvals (who/why)
+  approvedBy     String?
+  closedBy       String?
+  closureRemarks String?
+
+  createdById   Int?
+  updatedById   Int?
   statusHistory TicketStatusHistory[]
+
+  sparePartUsages SparePartUsage[]
+
+  notifications             Notification[]
+  ticketEscalations         TicketEscalation[]
+  ticketAssignmentHistories TicketAssignmentHistory[]
+  maintenanceHistories      MaintenanceHistory[]
+  ticketTransferHistories   TicketTransferHistory[]
+
+  @@index([assetId, createdAt])
+  @@index([departmentId, status])
+  @@map("ticket")
+}
+
+model TicketAssignmentHistory {
+  id Int @id @default(autoincrement())
+
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  fromEmployeeId Int?
+  fromEmployee   Employee? @relation("TicketAssignFrom", fields: [fromEmployeeId], references: [id])
+
+  toEmployeeId Int?
+  toEmployee   Employee? @relation("TicketAssignTo", fields: [toEmployeeId], references: [id])
+
+  action  TicketAssignmentAction
+  comment String                 @db.Text // ✅ mandatory on every assign/reassign
+
+  performedById Int?
+  performedBy   Employee? @relation("TicketAssignPerformedBy", fields: [performedById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+  @@map("ticketassignmenthistory")
 }
 
 model MaintenanceHistory {
@@ -157,15 +443,35 @@ model MaintenanceHistory {
   assetId Int
   asset   Asset @relation(fields: [assetId], references: [id])
 
+  serviceContractId Int?
+  serviceContract   ServiceContract? @relation(fields: [serviceContractId], references: [id])
+
   scheduledDue  DateTime
-  actualDoneAt  DateTime
+  actualDoneAt  DateTime?
   wasLate       Boolean
   performedBy   String
   notes         String?
   serviceReport String?
+  // Cost capture for finance excel
+  serviceType   String? // WARRANTY | AMC | CMC | PAID | INTERNAL
+  serviceCost   Decimal?  @db.Decimal(12, 2)
+  partsCost     Decimal?  @db.Decimal(12, 2)
+  totalCost     Decimal?  @db.Decimal(12, 2)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  createdById Int?
+  updatedById Int?
+
+  ticketId Int?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id])
+
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @default(now()) @updatedAt
+  preventiveChecklistRuns PreventiveChecklistRun[]
+
+  pmChecklistRuns PMChecklistRun[]
+
+  @@index([assetId, actualDoneAt])
+  @@map("maintenancehistory")
 }
 
 model User {
@@ -181,6 +487,8 @@ model User {
   loginHistory LoginHistory[]
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @default(now()) @updatedAt
+
+  @@map("users")
 }
 
 model LoginHistory {
@@ -194,61 +502,178 @@ model LoginHistory {
   success     Boolean
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
+
+  @@map("loginhistory")
 }
 
 model AssetCategory {
-  id        Int      @id @default(autoincrement())
-  name      String   @unique
-  assets    Asset[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  id                            Int                            @id @default(autoincrement())
+  name                          String                         @unique
+  code                          String?                        @unique
+  description                   String?
+  isActive                      Boolean                        @default(true)
+  assets                        Asset[]
+  createdById                   Int?
+  updatedById                   Int?
+  createdAt                     DateTime                       @default(now())
+  updatedAt                     DateTime                       @default(now()) @updatedAt
+  escalationMatrixes            EscalationMatrix[]
+  preventiveChecklistTemplates  PreventiveChecklistTemplate[]
+  acknowledgementTemplates      AssetAcknowledgementTemplate[]
+  pmChecklistTemplates          PMChecklistTemplate[]
+  calibrationChecklistTemplates CalibrationChecklistTemplate[]
+  supportMatrixes               AssetSupportMatrix[]
+  assetSlaMatrices              AssetSlaMatrix[]
+
+  @@map("assetcategory")
 }
 
 model Department {
-  id        Int        @id @default(autoincrement())
-  name      String     @unique
-  assets    Asset[]
-  tickets   Ticket[]
-  employees Employee[]
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @default(now()) @updatedAt
+  id                 Int                     @id @default(autoincrement())
+  name               String                  @unique
+  code               String?                 @unique // Short code like ICU, OT, RADIOLOGY
+  parentDepartmentId Int?
+  parentDepartment   Department?             @relation("DeptHierarchy", fields: [parentDepartmentId], references: [id])
+  childDepartments   Department[]            @relation("DeptHierarchy")
+  isActive           Boolean                 @default(true)
+  assets             Asset[]
+  tickets            Ticket[]                @relation("TicketDepartment")
+  employees          Employee[]
+  createdById        Int?
+  updatedById        Int?
+  createdAt          DateTime                @default(now())
+  updatedAt          DateTime                @default(now()) @updatedAt
+  escalationMatrixes EscalationMatrix[]
+  targetAssets       Asset[]                 @relation("TargetDept")
+  ownedTickets       Ticket[]                @relation("TicketOwningDept")
+  transferFrom       TicketTransferHistory[] @relation("TicketTransferFromDept")
+  transferTo         TicketTransferHistory[] @relation("TicketTransferToDept")
+
+  @@map("department")
 }
 
 model Employee {
   id               Int             @id @default(autoincrement())
   name             String
   employeeID       String          @unique
+  email            String?
+  phone            String?
+  designation      String?
   departmentId     Int?
   department       Department?     @relation(fields: [departmentId], references: [id])
+  reportingToId    Int?
+  reportingTo      Employee?       @relation("EmployeeReporting", fields: [reportingToId], references: [id])
+  directReports    Employee[]      @relation("EmployeeReporting")
+  isActive         Boolean         @default(true)
   assets           Asset[]
   user             User?
+  role             EmployeeRole    @default(EXECUTIVE)
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @default(now()) @updatedAt
   AssetLocation    AssetLocation[]
   supervisedAssets Asset[]         @relation("AssetSupervisor")
   allocatedAssets  Asset[]         @relation("AssetEndUser")
+
+  qrScans       QRScanLog[]
+  assetScanLogs AssetScanLog[]
+
+  notificationsCreated Notification[] @relation("NotificationCreatedBy")
+  notificationsLinked  Notification[] @relation("NotificationEmployee")
+
+  assignedAssets              AssetAssignment[]    @relation("AssignedTo")
+  assignedByAssets            AssetAssignment[]    @relation("AssignedBy")
+  calibrationHistoriesCreated CalibrationHistory[] @relation("EmployeeCreatedCalibrationHistory")
+
+  notificationRecipients   NotificationRecipient[]
+  depreciationLogs         DepreciationLog[]
+  sparePartUsages          SparePartUsage[]
+  inventoryTransactions    InventoryTransaction[]
+  documents                Document[]
+  assetAssignments         AssetAssignment[]
+  assetAssignmentHistories AssetAssignmentHistory[]
+  escalationMatrixes       EscalationMatrix[]
+  ticketEscalations        TicketEscalation[]
+  preventiveChecklistRuns  PreventiveChecklistRun[]
+  // Ticket reverse relations
+  raisedTickets            Ticket[]                 @relation("TicketRaisedBy")
+  assignedTickets          Ticket[]                 @relation("TicketAssignedTo")
+  assignedByMe             Ticket[]                 @relation("TicketAssignedBy")
+
+  // History reverse relations
+  ticketAssignedFrom      TicketAssignmentHistory[] @relation("TicketAssignFrom")
+  ticketAssignedTo        TicketAssignmentHistory[] @relation("TicketAssignTo")
+  ticketAssignActions     TicketAssignmentHistory[] @relation("TicketAssignPerformedBy")
+  ticketStatusChanges     TicketStatusHistory[]     @relation("TicketStatusChangedBy")
+  ticketTransferRequested TicketTransferHistory[]   @relation("TicketTransferRequestedBy")
+  ticketTransferApproved  TicketTransferHistory[]   @relation("TicketTransferApprovedBy")
+
+  assetAcknowledgementRuns AssetAcknowledgementRun[]
+  assetSupportMatrixes     AssetSupportMatrix[]
+  transferRequests         AssetTransferHistory[]    @relation("TransferRequestedBy")
+  transferApprovals        AssetTransferHistory[]    @relation("TransferApprovedBy")
+  locationRequests         AssetLocation[]           @relation("LocationRequestedBy")
+  locationApprovals        AssetLocation[]           @relation("LocationApprovedBy")
+  locationRejections       AssetLocation[]           @relation("LocationRejectedBy")
+  modulePermissions        ModulePermission[]
+  notificationPreference   NotificationPreference?
+
+  @@map("employee")
 }
 
 model Vendor {
-  id        Int      @id @default(autoincrement())
-  name      String   @unique
-  contact   String
-  email     String?
-  assets    Asset[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  id             Int      @id @default(autoincrement())
+  name           String   @unique
+  contact        String
+  email          String?
+  contactPerson  String?
+  alternatePhone String?
+  address        String?  @db.Text
+  city           String?
+  state          String?
+  pincode        String?
+  gstNumber      String?
+  panNumber      String?
+  vendorType     String?  // OEM | DISTRIBUTOR | SERVICE_PROVIDER | RESELLER
+  rating         Int?     // 1-5 performance rating
+  isActive       Boolean  @default(true)
+  bankName       String?
+  bankAccount    String?
+  bankIfsc       String?
+  assets         Asset[]
+  createdById    Int?
+  updatedById    Int?
+  notes          String?  @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @default(now()) @updatedAt
+
+  serviceContracts ServiceContract[]
+  spareParts       SparePart[]
+
+  calibrationSchedules    CalibrationSchedule[]   @relation("VendorCalibrationSchedule")
+  calibrationHistories    CalibrationHistory[]    @relation("VendorCalibrationHistory")
+  ticketTransferHistories TicketTransferHistory[]
+  warranties              Warranty[]
+
+  @@map("vendor")
 }
 
 model TicketStatusHistory {
-  id        Int      @id @default(autoincrement())
+  id        Int          @id @default(autoincrement())
   ticketId  Int
-  ticket    Ticket   @relation(fields: [ticketId], references: [id])
-  status    String
-  changedAt DateTime @default(now())
+  ticket    Ticket       @relation(fields: [ticketId], references: [id])
+  status    TicketStatus
+  changedAt DateTime     @default(now())
   changedBy String
+
+  note String? @db.Text
+
+  changedById       Int?
+  changedByEmployee Employee? @relation("TicketStatusChangedBy", fields: [changedById], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("ticketstatushistory")
 }
 
 model AssetDepreciation {
@@ -257,14 +682,46 @@ model AssetDepreciation {
   asset   Asset @relation(fields: [assetId], references: [id])
 
   depreciationMethod String // SL | DB | OTHER
-  depreciationRate   Float
+  depreciationRate   Decimal   @db.Decimal(12, 2)
   expectedLifeYears  Int
-  salvageValue       Float?
+  salvageValue       Decimal?  @db.Decimal(12, 2)
   depreciationStart  DateTime
   lastCalculatedAt   DateTime?
 
+  // Added for finance reporting
+  accumulatedDepreciation Decimal? @db.Decimal(12, 2)
+  currentBookValue        Decimal? @db.Decimal(12, 2)
+  depreciationFrequency   String? // MONTHLY | YEARLY
+  isActive                Boolean? @default(true)
+
+  createdById Int?
+  updatedById Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("assetdepreciation")
+}
+
+model DepreciationLog {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  periodStart        DateTime
+  periodEnd          DateTime
+  depreciationAmount Decimal  @db.Decimal(12, 2)
+  bookValueAfter     Decimal  @db.Decimal(12, 2)
+
+  doneById Int?
+  doneBy   Employee? @relation(fields: [doneById], references: [id])
+
+  reason String?
+
+  createdAt DateTime @default(now())
+
+  @@index([assetId, periodEnd])
+  @@map("depreciationlog")
 }
 
 model AssetInsurance {
@@ -274,29 +731,86 @@ model AssetInsurance {
 
   provider       String?
   policyNumber   String?
-  coverageAmount Float?
-  premiumAmount  Float?
+  coverageAmount Decimal?  @db.Decimal(12, 2)
+  premiumAmount  Decimal?  @db.Decimal(12, 2)
   startDate      DateTime?
   endDate        DateTime?
   isActive       Boolean   @default(true)
 
+  // Added fields for hospital finance
+  policyType          String? // COMPREHENSIVE | FIRE | THEFT | DAMAGE | LIABILITY
+  policyStatus        String? // ACTIVE | EXPIRED | CLAIMED | CANCELLED
+  renewalReminderDays Int?    @default(30)
+
   document String?
   notes    String?
 
+  claims        InsuranceClaim[]
+  notifications Notification[]
+
+  createdById Int?
+  updatedById Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, endDate])
+  @@map("assetinsurance")
+}
+
+model InsuranceClaim {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  insuranceId Int
+  insurance   AssetInsurance @relation(fields: [insuranceId], references: [id])
+
+  claimNumber    String
+  claimDate      DateTime
+  claimAmount    Decimal  @db.Decimal(12, 2)
+  approvedAmount Decimal? @db.Decimal(12, 2)
+  claimStatus    String? // SUBMITTED | IN_PROGRESS | APPROVED | REJECTED | SETTLED
+
+  reason    String?
+  claimedBy String?
+  documents String?
+  settledAt DateTime?
+
+  notifications Notification[]
+
+  createdById Int?
+  updatedById Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([insuranceId, claimNumber])
+  @@map("insuranceclaim")
 }
 
 model Branch {
-  id   Int    @id @default(autoincrement())
-  name String @unique
+  id      Int    @id @default(autoincrement())
+  name    String @unique
+  code    String? @unique
+  address String? @db.Text
+  city    String?
+  state   String?
+  pincode String?
+  phone   String?
+  isActive Boolean @default(true)
 
   locations     AssetLocation[]
   transfersFrom AssetTransferHistory[] @relation("FromBranch")
   transfersTo   AssetTransferHistory[] @relation("ToBranch")
 
+  createdById Int?
+  updatedById Int?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("branch")
 }
 
 model AssetLocation {
@@ -307,16 +821,41 @@ model AssetLocation {
   branchId Int
   branch   Branch @relation(fields: [branchId], references: [id])
 
-  block String?
-  floor String?
-  room  String?
+  block              String?
+  floor              String?
+  room               String?
+  departmentSnapshot String?
 
   employeeResponsibleId Int?
   employeeResponsible   Employee? @relation(fields: [employeeResponsibleId], references: [id])
 
   isActive Boolean @default(true)
+  status   String  @default("REQUESTED") // REQUESTED | APPROVED | REJECTED
+
+  requestedById Int?
+  requestedBy   Employee? @relation("LocationRequestedBy", fields: [requestedById], references: [id])
+
+  approvedById Int?
+  approvedBy   Employee? @relation("LocationApprovedBy", fields: [approvedById], references: [id])
+
+  rejectedById Int?
+  rejectedBy   Employee? @relation("LocationRejectedBy", fields: [rejectedById], references: [id])
+
+  requestReason   String?
+  approvalReason  String?
+  rejectionReason String?
+
+  requestedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  rejectedAt  DateTime?
+
+  createdById Int?
+  updatedById Int?
 
   createdAt DateTime @default(now())
+
+  @@index([assetId, isActive])
+  @@map("assetlocation")
 }
 
 model AssetTransferHistory {
@@ -342,10 +881,1273 @@ model AssetTransferHistory {
   toBranchId Int?
   toBranch   Branch? @relation("ToBranch", fields: [toBranchId], references: [id])
 
-  temporary    Boolean   @default(false)
-  expiresAt    DateTime?
-  approvedBy   String
-  transferDate DateTime  @default(now())
+  destinationType          String? // BRANCH | VENDOR | SERVICE_CENTER | EVENT | CAMP | PATIENT_HOME | OTHER
+  destinationName          String?
+  destinationAddress       String?
+  destinationContactPerson String?
+  destinationContactNumber String?
+
+  temporary Boolean   @default(false)
+  expiresAt DateTime?
+
+  transferDate DateTime? @default(now())
+
+  status String @default("REQUESTED")
+
+  requestedById Int?
+  requestedBy   Employee? @relation("TransferRequestedBy", fields: [requestedById], references: [id])
+
+  approvedById Int?
+  approvedBy   Employee? @relation("TransferApprovedBy", fields: [approvedById], references: [id])
+
+  requestedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  rejectedAt  DateTime?
+  returnedAt  DateTime?
+
+  approvalReason  String? @db.Text
+  rejectionReason String? @db.Text
+  returnReason    String? @db.Text
+  reason          String?
+
+  parentTransferId Int?
+  parentTransfer   AssetTransferHistory?  @relation("TransferParent", fields: [parentTransferId], references: [id])
+  returnEntries    AssetTransferHistory[] @relation("TransferParent")
+
+  createdAt                DateTime                  @default(now())
+  assetAcknowledgementRuns AssetAcknowledgementRun[] @relation("TransferAcknowledgementRuns")
+
+  @@map("assettransferhistory")
+}
+
+/**
+ * =========================
+ * NEW: Maintenance schedule automation
+ * =========================
+ */
+model MaintenanceSchedule {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  frequencyValue Int
+  frequencyUnit  String // DAYS | MONTHS | YEARS
+
+  nextDueAt DateTime
+  isActive  Boolean  @default(true)
+
+  createdBy String?
+  reason    String?
+
+  reminderDays Int? @default(7)
 
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, nextDueAt])
+  @@map("maintenanceschedule")
+}
+
+/**
+ * =========================
+ * NEW: AMC/CMC contracts
+ * =========================
+ */
+model ServiceContract {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  contractType   String // AMC | CMC
+  contractNumber String?
+
+  startDate DateTime
+  endDate   DateTime
+
+  includesParts Boolean? // typically false for AMC, true for CMC
+  includesLabor Boolean?
+
+  visitsPerYear Int?
+  cost          Decimal? @db.Decimal(12, 2) // If free/warranty, keep null or 0
+  currency      String?
+
+  document String?
+  terms    String? @db.Text
+
+  status String? // ACTIVE | EXPIRED | TERMINATED
+
+  createdBy String?
+  reason    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  maintenanceHistories MaintenanceHistory[]
+
+  @@index([assetId, endDate])
+  @@map("servicecontract")
+}
+
+/**
+ * =========================
+ * NEW: Gate Pass
+ * =========================
+ */
+model GatePass {
+  id         Int    @id @default(autoincrement())
+  gatePassNo String @unique
+
+  type   String // RETURNABLE | NON_RETURNABLE
+  status String // ISSUED | RETURNED | CLOSED | CANCELLED
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  description String?
+  quantity    Int?
+
+  issuedTo           String
+  purpose            String
+  expectedReturnDate DateTime?
+
+  courierDetails String?
+  vehicleNo      String?
+
+  approvedBy String?
+  issuedBy   String?
+
+  reason String?
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @default(now()) @updatedAt
+  notifications Notification[]
+
+  @@index([assetId, createdAt])
+  @@map("gatepass")
+}
+
+/**
+ * =========================
+ * NEW: Spares + Consumables
+ * =========================
+ */
+model SparePart {
+  id   Int    @id @default(autoincrement())
+  name String
+
+  partNumber String?
+  model      String?
+  category   String? // e.g., MONITOR, VENTILATOR, GENERAL
+
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  stockQuantity Int      @default(0)
+  reorderLevel  Int?     @default(0)
+  cost          Decimal? @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  createdById Int?
+  updatedById Int?
+
+  usages       SparePartUsage[]
+  transactions InventoryTransaction[]
+
+  @@index([vendorId])
+  @@map("sparepart")
+}
+
+model SparePartUsage {
+  id Int @id @default(autoincrement())
+
+  sparePartId Int
+  sparePart   SparePart @relation(fields: [sparePartId], references: [id])
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  ticketId Int?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id])
+
+  quantity  Int
+  costAtUse Decimal? @db.Decimal(12, 2)
+
+  usedById Int?
+  usedBy   Employee? @relation(fields: [usedById], references: [id])
+
+  reason String?
+
+  usedAt DateTime @default(now())
+
+  @@index([assetId, usedAt])
+  @@map("sparepartusage")
+}
+
+model Consumable {
+  id   Int     @id @default(autoincrement())
+  name String
+  unit String? // e.g., ML, PCS, BOX
+
+  stockQuantity Decimal  @default(0) @db.Decimal(12, 2)
+  reorderLevel  Decimal? @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  createdById Int?
+  updatedById Int?
+
+  batches      ConsumableBatch[]
+  transactions InventoryTransaction[]
+
+  @@unique([name])
+  @@map("consumable")
+}
+
+model ConsumableBatch {
+  id Int @id @default(autoincrement())
+
+  consumableId Int
+  consumable   Consumable @relation(fields: [consumableId], references: [id])
+
+  batchNumber String?
+  expiryDate  DateTime?
+
+  quantity Decimal @db.Decimal(12, 2)
+
+  remainingQuantity Decimal @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([consumableId, expiryDate])
+  @@map("consumablebatch")
+}
+
+model InventoryTransaction {
+  id Int @id @default(autoincrement())
+
+  type String // IN | OUT | ADJUSTMENT
+
+  sparePartId Int?
+  sparePart   SparePart? @relation(fields: [sparePartId], references: [id])
+
+  consumableId Int?
+  consumable   Consumable? @relation(fields: [consumableId], references: [id])
+
+  quantity Decimal @db.Decimal(12, 2)
+
+  referenceType String? // PURCHASE | TICKET | MANUAL | RETURN
+  referenceId   Int?
+
+  performedById Int?
+  performedBy   Employee? @relation(fields: [performedById], references: [id])
+
+  notes String?
+
+  createdAt DateTime @default(now())
+
+  @@index([sparePartId])
+  @@index([consumableId])
+  @@map("inventorytransaction")
+}
+
+/**
+ * =========================
+ * NEW: Document vault (service file)
+ * =========================
+ */
+model Document {
+  id Int @id @default(autoincrement())
+
+  entityType String // ASSET | TICKET | INSURANCE | CONTRACT | GATEPASS
+  entityId   Int
+
+  documentType String // INVOICE | PO | GRN | SERVICE_REPORT | CLAIM_DOC | CERTIFICATE
+  title        String?
+  fileUrl      String
+
+  uploadedById Int?
+  uploadedBy   Employee? @relation(fields: [uploadedById], references: [id])
+
+  reason     String?
+  uploadedAt DateTime @default(now())
+  asset      Asset?   @relation(fields: [assetId], references: [id])
+  assetId    Int?
+
+  @@index([entityType, entityId])
+  @@map("document")
+}
+
+/**
+ * =========================
+ * NEW: QR Scan log + general asset scans
+ * =========================
+ */
+model QRScanLog {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  scannedById Int?
+  scannedBy   Employee? @relation(fields: [scannedById], references: [id])
+
+  location String?
+  action   String? // VIEW | TRANSFER | VERIFY
+
+  scannedAt DateTime @default(now())
+
+  @@index([assetId, scannedAt])
+  @@map("qrscanlog")
+}
+
+model AssetScanLog {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  scannedById Int?
+  scannedBy   Employee? @relation(fields: [scannedById], references: [id])
+
+  scanType String? // RFID | QR | MANUAL
+  location String?
+  notes    String?
+
+  scannedAt DateTime @default(now())
+
+  @@index([assetId, scannedAt])
+  @@map("assetscanlog")
+}
+
+model Notification {
+  id Int @id @default(autoincrement())
+
+  // What the notification is about (optional links)
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  ticketId Int?
+  ticket   Ticket? @relation(fields: [ticketId], references: [id])
+
+  gatePassId Int?
+  gatePass   GatePass? @relation(fields: [gatePassId], references: [id])
+
+  insuranceId Int?
+  insurance   AssetInsurance? @relation(fields: [insuranceId], references: [id])
+
+  claimId Int?
+  claim   InsuranceClaim? @relation(fields: [claimId], references: [id])
+
+  // Type + content
+  type    String // WARRANTY_EXPIRY | INSURANCE_EXPIRY | AMC_CMC_EXPIRY | MAINTENANCE_DUE | SLA_BREACH | LOW_STOCK | GATEPASS_OVERDUE | OTHER
+  title   String?
+  message String  @db.Text
+
+  // ✅ Relation 1: who created it
+  createdById Int?
+  createdBy   Employee? @relation("NotificationCreatedBy", fields: [createdById], references: [id])
+
+  // ✅ Relation 2: direct employee link (optional “about/for” employee)
+  employeeId Int?
+  employee   Employee? @relation("NotificationEmployee", fields: [employeeId], references: [id])
+
+  // Optional delivery metadata (still works even if you don’t implement channels now)
+  priority String? // LOW | MEDIUM | HIGH | CRITICAL
+  channel  String? // IN_APP | EMAIL | SMS | WHATSAPP
+
+  // Helps you avoid duplicates from cron jobs
+  dedupeKey String? @unique
+
+  createdAt DateTime @default(now())
+
+  recipients NotificationRecipient[]
+
+  @@index([assetId, createdAt])
+  @@index([ticketId, createdAt])
+  @@map("notification")
+}
+
+model NotificationRecipient {
+  id Int @id @default(autoincrement())
+
+  notificationId Int
+  notification   Notification @relation(fields: [notificationId], references: [id])
+
+  employeeId Int
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  // Read / action tracking per employee
+  isRead Boolean   @default(false)
+  readAt DateTime?
+
+  // Optional: delivery tracking (good for hospitals)
+  deliveryStatus String? // PENDING | SENT | FAILED
+  deliveredAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([notificationId, employeeId])
+  @@index([employeeId, isRead, createdAt])
+  @@map("notificationrecipient")
+}
+
+model NotificationPreference {
+  id         Int @id @default(autoincrement())
+  employeeId Int @unique
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  warrantyExpiry    Boolean @default(true)
+  insuranceExpiry   Boolean @default(true)
+  amcCmcExpiry      Boolean @default(true)
+  maintenanceDue    Boolean @default(true)
+  slaBreach         Boolean @default(true)
+  lowStock          Boolean @default(true)
+  gatepassOverdue   Boolean @default(true)
+  ticketUpdates     Boolean @default(true)
+  assetTransfer     Boolean @default(true)
+
+  channelInApp    Boolean @default(true)
+  channelEmail    Boolean @default(false)
+  channelSms      Boolean @default(false)
+  channelWhatsapp Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("notificationpreference")
+}
+
+model EmailTemplate {
+  id   Int    @id @default(autoincrement())
+  code String @unique // WARRANTY_EXPIRY | INSURANCE_EXPIRY | SLA_BREACH | etc.
+  name String
+
+  subject  String
+  bodyHtml String @db.Text
+  bodyText String? @db.Text
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("emailtemplate")
+}
+
+model SmtpConfig {
+  id       Int    @id @default(autoincrement())
+  host     String
+  port     Int
+  secure   Boolean @default(true)
+  username String
+  password String
+  fromName String  @default("Smart Assets")
+  fromEmail String
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("smtpconfig")
+}
+
+model AssetAssignment {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  assignedToId Int
+  assignedTo   Employee @relation("AssignedTo", fields: [assignedToId], references: [id])
+
+  assignedById Int?
+  assignedBy   Employee? @relation("AssignedBy", fields: [assignedById], references: [id])
+
+  status AssignmentStatus @default(PENDING)
+
+  stage AssignmentStage
+
+  acknowledgedAt DateTime?
+
+  rejectedAt      DateTime?
+  rejectionReason String?
+
+  acknowledgementNote String?
+  digitalSignature    String? @db.LongText
+  photoProof          String?
+
+  conditionAtHandover String?
+
+  assignedAt DateTime  @default(now())
+  returnedAt DateTime?
+
+  isActive Boolean @default(true)
+
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @default(now()) @updatedAt
+  assetAssignmentHistories AssetAssignmentHistory[]
+  employee                 Employee?                 @relation(fields: [employeeId], references: [id])
+  employeeId               Int?
+  assetAcknowledgementRuns AssetAcknowledgementRun[]
+
+  @@index([assetId, isActive])
+}
+
+model AssetAssignmentHistory {
+  id Int @id @default(autoincrement())
+
+  assignmentId Int
+  assignment   AssetAssignment @relation(fields: [assignmentId], references: [id])
+
+  action AssignmentAction
+
+  performedById Int?
+  performedBy   Employee? @relation(fields: [performedById], references: [id])
+
+  notes String?
+
+  createdAt DateTime @default(now())
+}
+
+model AssetSpecification {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  key   String
+  value String
+
+  specificationGroup String? // GENERAL | ELECTRICAL | MECHANICAL | SOFTWARE | ACCESSORY | SUB_ASSET
+  valueType          String? // TEXT | NUMBER | BOOLEAN | DATE | JSON
+  unit               String?
+  sortOrder          Int?     @default(0)
+  isMandatory        Boolean? @default(false)
+  source             String? // OEM | CLIENT | TECHNICIAN | IMPORT
+  remarks            String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([assetId])
+}
+
+model EscalationMatrix {
+  id Int @id @default(autoincrement())
+
+  // Scope (where this rule applies)
+  departmentId Int?
+  department   Department? @relation(fields: [departmentId], references: [id])
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  priority String // LOW | MEDIUM | HIGH | CRITICAL
+
+  level Int // 1, 2, 3...
+
+  escalateAfterValue Int
+  escalateAfterUnit  String // MINUTES | HOURS
+
+  notifyRole       String? // e.g., TECHNICIAN, HOD, ADMIN
+  notifyEmployeeId Int?
+  notifyEmployee   Employee? @relation(fields: [notifyEmployeeId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([departmentId, assetCategoryId, priority])
+}
+
+model TicketEscalation {
+  id Int @id @default(autoincrement())
+
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  level Int
+
+  escalatedAt DateTime @default(now())
+
+  notifiedEmployeeId Int?
+  notifiedEmployee   Employee? @relation(fields: [notifiedEmployeeId], references: [id])
+
+  message String?
+
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, level])
+}
+
+enum CalibrationResult {
+  PASS
+  FAIL
+  NA
+}
+
+model CalibrationSchedule {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  frequencyValue Int
+  frequencyUnit  String // DAYS | MONTHS | YEARS
+
+  nextDueAt        DateTime
+  lastCalibratedAt DateTime?
+
+  isActive Boolean @default(true)
+
+  // Optional for hospitals
+  standardProcedure String? // SOP name / standard reference
+  vendorId          Int?
+  vendor            Vendor? @relation("VendorCalibrationSchedule", fields: [vendorId], references: [id])
+
+  reminderDays Int?    @default(7) // remind before due date
+  notes        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  histories CalibrationHistory[]
+
+  @@index([assetId, nextDueAt])
+  @@map("calibrationschedule")
+}
+
+model CalibrationHistory {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  scheduleId Int?
+  schedule   CalibrationSchedule? @relation(fields: [scheduleId], references: [id])
+
+  calibratedAt DateTime  @default(now())
+  dueAt        DateTime?
+
+  calibratedByType String? // INTERNAL | VENDOR
+  calibratedByName String?
+  vendorId         Int?
+  vendor           Vendor? @relation("VendorCalibrationHistory", fields: [vendorId], references: [id])
+
+  result CalibrationResult @default(NA)
+
+  certificateNo  String?
+  certificateUrl String?
+  remarks        String? @db.Text
+
+  createdById Int?
+  createdBy   Employee? @relation("EmployeeCreatedCalibrationHistory", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([assetId, calibratedAt])
+  @@map("calibrationhistory")
+}
+
+model PreventiveChecklistTemplate {
+  id Int @id @default(autoincrement())
+
+  name        String
+  description String? @db.Text
+
+  // template can be by category OR specific asset
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  isActive Boolean @default(true)
+
+  items PreventiveChecklistItem[]
+  runs  PreventiveChecklistRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetCategoryId])
+  @@index([assetId])
+  @@map("preventivechecklisttemplate")
+}
+
+model PreventiveChecklistItem {
+  id Int @id @default(autoincrement())
+
+  templateId Int
+  template   PreventiveChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  title       String
+  description String? @db.Text
+  sortOrder   Int     @default(0)
+  isRequired  Boolean @default(true)
+
+  results PreventiveChecklistResultRow[]
+
+  @@index([templateId, sortOrder])
+  @@map("preventivechecklistitem")
+}
+
+model PreventiveChecklistRun {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  templateId Int
+  template   PreventiveChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  // link to maintenance record when completed
+  maintenanceHistoryId Int?
+  maintenanceHistory   MaintenanceHistory? @relation(fields: [maintenanceHistoryId], references: [id])
+
+  scheduledDue  DateTime
+  performedAt   DateTime?
+  performedById Int?
+  performedBy   Employee? @relation(fields: [performedById], references: [id])
+
+  status ChecklistRunStatus @default(DUE)
+
+  results PreventiveChecklistResultRow[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, scheduledDue])
+  @@index([templateId, scheduledDue])
+  @@map("preventivechecklistrun")
+}
+
+model PreventiveChecklistResultRow {
+  id Int @id @default(autoincrement())
+
+  runId Int
+  run   PreventiveChecklistRun @relation(fields: [runId], references: [id])
+
+  itemId Int
+  item   PreventiveChecklistItem @relation(fields: [itemId], references: [id])
+
+  result     ChecklistResult
+  remarks    String?         @db.Text
+  photoProof String?
+
+  checkedAt DateTime @default(now())
+
+  @@unique([runId, itemId])
+  @@index([runId])
+  @@map("preventivechecklistresult")
+}
+
+model TicketTransferHistory {
+  id Int @id @default(autoincrement())
+
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  transferType TicketTransferType
+  status       TicketTransferStatus @default(REQUESTED)
+
+  // INTERNAL DEPT transfer
+  fromDepartmentId Int?
+  fromDepartment   Department? @relation("TicketTransferFromDept", fields: [fromDepartmentId], references: [id])
+
+  toDepartmentId Int?
+  toDepartment   Department? @relation("TicketTransferToDept", fields: [toDepartmentId], references: [id])
+
+  // EXTERNAL transfer
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  comment       String    @db.Text // ✅ mandatory
+  requestedById Int?
+  requestedBy   Employee? @relation("TicketTransferRequestedBy", fields: [requestedById], references: [id])
+
+  approvedById Int?
+  approvedBy   Employee? @relation("TicketTransferApprovedBy", fields: [approvedById], references: [id])
+
+  rejectionReason String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([ticketId, createdAt])
+  @@map("tickettransferhistory")
+}
+
+model AssetAcknowledgementTemplate {
+  id Int @id @default(autoincrement())
+
+  name        String
+  description String? @db.Text
+
+  purpose AcknowledgementPurpose @default(ASSIGNMENT)
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  isActive Boolean @default(true)
+
+  items AssetAcknowledgementItem[]
+  runs  AssetAcknowledgementRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetCategoryId])
+  @@index([assetId])
+  @@map("assetacknowledgementtemplate")
+}
+
+model AssetAcknowledgementItem {
+  id Int @id @default(autoincrement())
+
+  templateId Int
+  template   AssetAcknowledgementTemplate @relation(fields: [templateId], references: [id])
+
+  title       String
+  description String? @db.Text
+  sortOrder   Int     @default(0)
+  isRequired  Boolean @default(true)
+
+  createdAt DateTime                     @default(now())
+  results   AssetAcknowledgementResult[]
+
+  @@index([templateId, sortOrder])
+  @@map("assetacknowledgementitem")
+}
+
+model AssetAcknowledgementRun {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  transferHistoryId Int?
+  transferHistory   AssetTransferHistory? @relation("TransferAcknowledgementRuns", fields: [transferHistoryId], references: [id])
+
+  assignmentId Int? // NEW
+  assignment   AssetAssignment? @relation(fields: [assignmentId], references: [id])
+
+  templateId Int?
+  template   AssetAcknowledgementTemplate? @relation(fields: [templateId], references: [id])
+
+  assignedToId Int?
+  assignedTo   Employee? @relation(fields: [assignedToId], references: [id])
+
+  acknowledgedAt   DateTime?
+  acknowledgedBy   String?
+  remarks          String?   @db.Text
+  digitalSignature String?   @db.LongText
+  photoProof       String?
+
+  rows AssetAcknowledgementResult[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, createdAt])
+  @@map("assetacknowledgementrun")
+}
+
+model AssetAcknowledgementResult {
+  id Int @id @default(autoincrement())
+
+  runId Int
+  run   AssetAcknowledgementRun @relation(fields: [runId], references: [id])
+
+  itemId Int
+  item   AssetAcknowledgementItem @relation(fields: [itemId], references: [id])
+
+  checked Boolean @default(false)
+  remarks String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@unique([runId, itemId])
+  @@map("assetacknowledgementresult")
+}
+
+model PMChecklistTemplate {
+  id Int @id @default(autoincrement())
+
+  name            String
+  description     String?        @db.Text
+  pmFormatCode    String?
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  isActive Boolean @default(true)
+
+  items PMChecklistItem[]
+  runs  PMChecklistRun[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetCategoryId])
+  @@index([assetId])
+  @@map("pmchecklisttemplate")
+}
+
+model PMChecklistItem {
+  id Int @id @default(autoincrement())
+
+  templateId Int
+  template   PMChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  title         String
+  description   String? @db.Text
+  itemType      String? // CHECK | VALUE | TEXT
+  expectedValue String?
+  unit          String?
+  sortOrder     Int     @default(0)
+  isRequired    Boolean @default(true)
+
+  results PMChecklistResult[]
+
+  @@index([templateId, sortOrder])
+  @@map("pmchecklistitem")
+}
+
+model PMChecklistRun {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  templateId Int
+  template   PMChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  maintenanceHistoryId Int?
+  maintenanceHistory   MaintenanceHistory? @relation(fields: [maintenanceHistoryId], references: [id])
+
+  scheduledDue DateTime
+  performedAt  DateTime?
+  performedBy  String?
+  resultStatus String? // PASS | FAIL | PARTIAL
+
+  notes String? @db.Text
+
+  results PMChecklistResult[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, scheduledDue])
+  @@map("pmchecklistrun")
+}
+
+model PMChecklistResult {
+  id Int @id @default(autoincrement())
+
+  runId Int
+  run   PMChecklistRun @relation(fields: [runId], references: [id])
+
+  itemId Int
+  item   PMChecklistItem @relation(fields: [itemId], references: [id])
+
+  checked    Boolean?
+  value      String?
+  remarks    String?  @db.Text
+  photoProof String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([runId, itemId])
+  @@map("pmchecklistresult")
+}
+
+model CalibrationChecklistTemplate {
+  id Int @id @default(autoincrement())
+
+  name        String
+  description String? @db.Text
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  isActive Boolean @default(true)
+
+  items CalibrationChecklistItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetCategoryId])
+  @@index([assetId])
+  @@map("calibrationchecklisttemplate")
+}
+
+model CalibrationChecklistItem {
+  id Int @id @default(autoincrement())
+
+  templateId Int
+  template   CalibrationChecklistTemplate @relation(fields: [templateId], references: [id])
+
+  title         String
+  description   String? @db.Text
+  expectedValue String?
+  unit          String?
+  sortOrder     Int     @default(0)
+  isRequired    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@index([templateId, sortOrder])
+  @@map("calibrationchecklistitem")
+}
+
+model AssetSupportMatrix {
+  id Int @id @default(autoincrement())
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  levelNo        Int
+  roleName       String?
+  personName     String?
+  employeeId     Int?
+  employee       Employee? @relation(fields: [employeeId], references: [id])
+  contactNumber  String?
+  email          String?
+  escalationTime Int?
+  escalationUnit String? // MINUTES | HOURS | DAYS
+  notes          String?   @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([assetCategoryId, assetId, levelNo])
+  @@map("assetsupportmatrix")
+}
+
+model AssetSlaMatrix {
+  id Int @id @default(autoincrement())
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  slaCategory AssetSlaCategory
+  level       SlaLevel
+
+  responseTimeValue Int
+  responseTimeUnit  String
+
+  resolutionTimeValue Int
+  resolutionTimeUnit  String
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("assetslamatrix")
+}
+
+// ─── Module Access Control ────────────────────────────────────────────────────
+
+model AppModule {
+  id    Int    @id @default(autoincrement())
+  name  String @unique // e.g. "assets", "tickets", "calibration"
+  label String          // Display name e.g. "Assets Master"
+  icon  String?         // PrimeNG icon class e.g. "pi pi-database"
+  path  String?         // Route path e.g. "/assets/view"
+  sortOrder Int?        @default(0)
+  isActive  Boolean     @default(true)
+
+  subItems    AppModuleItem[]
+  permissions ModulePermission[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("appmodule")
+}
+
+model AppModuleItem {
+  id       Int       @id @default(autoincrement())
+  moduleId Int
+  module   AppModule @relation(fields: [moduleId], references: [id])
+
+  name      String  // e.g. "view", "create", "edit", "delete"
+  label     String  // Display name e.g. "View Assets"
+  path      String? // Sub-route e.g. "/assets/view"
+  icon      String?
+  sortOrder Int?    @default(0)
+  isActive  Boolean @default(true)
+
+  permissions ModulePermission[]
+
+  @@unique([moduleId, name])
+  @@map("appmoduleitem")
+}
+
+model ModulePermission {
+  id           Int            @id @default(autoincrement())
+
+  moduleId     Int?
+  module       AppModule?     @relation(fields: [moduleId], references: [id])
+
+  moduleItemId Int?
+  moduleItem   AppModuleItem? @relation(fields: [moduleItemId], references: [id])
+
+  // Either role-based OR employee-specific (not both required)
+  role         String?        // HOD | SUPERVISOR | EXECUTIVE | ADMIN
+  employeeId   Int?
+  employee     Employee?      @relation(fields: [employeeId], references: [id])
+
+  canAccess    Boolean @default(true)
+
+  createdById  Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@unique([moduleId, moduleItemId, role, employeeId])
+  @@index([role])
+  @@index([employeeId])
+  @@map("modulepermission")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Audit Log — tracks all important actions across the application
+// ═══════════════════════════════════════════════════════════════════════════════
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+
+  entityType  String   // ASSET | TICKET | EMPLOYEE | VENDOR | DEPARTMENT | WARRANTY | INSURANCE | TRANSFER | ASSIGNMENT | GATE_PASS | SERVICE_CONTRACT
+  entityId    Int
+  action      String   // CREATE | UPDATE | DELETE | STATUS_CHANGE | ASSIGN | TRANSFER | APPROVE | REJECT | LOGIN | LOGOUT
+
+  description String?  @db.Text
+  oldValue    String?  @db.LongText // JSON of previous state
+  newValue    String?  @db.LongText // JSON of new state
+
+  performedBy   String?
+  performedById Int?
+  ipAddress     String?
+  userAgent     String?
+
+  createdAt   DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([performedById, createdAt])
+  @@index([action, createdAt])
+  @@map("auditlog")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Asset Disposal — formal condemnation/disposal workflow
+// ═══════════════════════════════════════════════════════════════════════════════
+model AssetDisposal {
+  id       Int   @id @default(autoincrement())
+  assetId  Int
+  asset    Asset @relation(fields: [assetId], references: [id])
+
+  disposalType   String   // CONDEMN | AUCTION | SCRAP | DONATE | RETURN_TO_VENDOR
+  reason         String   @db.Text
+  status         String   @default("REQUESTED") // REQUESTED | COMMITTEE_REVIEW | APPROVED | REJECTED | COMPLETED
+
+  estimatedScrapValue Decimal? @db.Decimal(12, 2)
+  actualSaleValue     Decimal? @db.Decimal(12, 2)
+  buyerName           String?
+  buyerContact        String?
+
+  // Committee approval
+  committeeMembers   String?  @db.Text // JSON array of approver names/IDs
+  committeeRemarks   String?  @db.Text
+  committeeApprovalDate DateTime?
+
+  requestedById   Int?
+  approvedById    Int?
+  completedById   Int?
+
+  certificateUrl  String?  // Certificate of destruction / disposal proof
+  documents       String?  @db.Text // JSON array of document URLs
+
+  requestedAt   DateTime  @default(now())
+  approvedAt    DateTime?
+  completedAt   DateTime?
+  rejectedAt    DateTime?
+  rejectionReason String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId])
+  @@index([status])
+  @@map("assetdisposal")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Asset Verification / Physical Audit
+// ═══════════════════════════════════════════════════════════════════════════════
+model AssetAudit {
+  id        Int      @id @default(autoincrement())
+  auditName String
+  auditDate DateTime
+  status    String   @default("PLANNED") // PLANNED | IN_PROGRESS | COMPLETED
+
+  departmentId Int?
+  branchId     Int?
+
+  conductedById Int?
+  remarks       String? @db.Text
+
+  totalAssets     Int @default(0)
+  verifiedCount   Int @default(0)
+  missingCount    Int @default(0)
+  mismatchCount   Int @default(0)
+
+  completedAt DateTime?
+
+  items AssetAuditItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("assetaudit")
+}
+
+model AssetAuditItem {
+  id       Int        @id @default(autoincrement())
+  auditId  Int
+  audit    AssetAudit @relation(fields: [auditId], references: [id])
+
+  assetId  Int
+  asset    Asset    @relation("AuditItems", fields: [assetId], references: [id])
+  status   String   @default("PENDING") // PENDING | VERIFIED | MISSING | MISMATCH
+  scannedAt DateTime?
+
+  locationMatch     Boolean?
+  conditionMatch    Boolean?
+  actualLocation    String?
+  actualCondition   String?
+  remarks           String?
+
+  verifiedById Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([auditId, status])
+  @@index([assetId])
+  @@map("assetaudititem")
 }

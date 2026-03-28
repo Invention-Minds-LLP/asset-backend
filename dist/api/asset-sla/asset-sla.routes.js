@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const asset_sla_controller_1 = require("./asset-sla.controller");
+const router = (0, express_1.Router)();
+router.get("/", asset_sla_controller_1.getAllAssetSlaMatrix);
+router.post("/", asset_sla_controller_1.createAssetSlaMatrix);
+router.get("/category/:assetCategoryId", asset_sla_controller_1.getAssetSlaMatrixByCategory);
+router.get("/category/:assetCategoryId/sla/:slaCategory", asset_sla_controller_1.getAssetSlaMatrixByCategoryAndSla);
+router.put("/:id", asset_sla_controller_1.updateAssetSlaMatrix);
+router.delete("/:id", asset_sla_controller_1.deleteAssetSlaMatrix);
+exports.default = router;
