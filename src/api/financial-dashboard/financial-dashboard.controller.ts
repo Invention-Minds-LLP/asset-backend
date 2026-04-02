@@ -476,3 +476,69 @@ export const getCostTrend = async (req: AuthenticatedRequest, res: Response) => 
     res.status(500).json({ message: err.message });
   }
 };
+
+// ─── 6. Month Drill-Down: category-wise + department-wise breakdown ────────────
+// GET /api/financial-dashboard/month-breakdown?year=2025&month=11
+export const getMonthBreakdown = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const year  = Number(req.query.year);
+    const month = Number(req.query.month); // 1-12
+
+    if (!year || !month || month < 1 || month > 12) {
+      res.status(400).json({ message: "year and month (1-12) required" });
+      return;
+    }
+
+    const start = new Date(year, month - 1, 1);
+    const end   = new Date(year, month, 1);
+
+    // Category-wise cost
+    const categoryRaw: any[] = await prisma.$queryRaw`
+      SELECT
+        ac.name            AS categoryName,
+        COUNT(a.id)        AS assetCount,
+        COALESCE(SUM(a.purchaseCost), 0) AS totalCost
+      FROM asset a
+      LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+      WHERE a.purchaseDate >= ${start} AND a.purchaseDate < ${end}
+      GROUP BY ac.id, ac.name
+      ORDER BY totalCost DESC
+    `;
+
+    // Department-wise cost
+    const deptRaw: any[] = await prisma.$queryRaw`
+      SELECT
+        d.name             AS departmentName,
+        COUNT(a.id)        AS assetCount,
+        COALESCE(SUM(a.purchaseCost), 0) AS totalCost
+      FROM asset a
+      LEFT JOIN department d ON d.id = a.departmentId
+      WHERE a.purchaseDate >= ${start} AND a.purchaseDate < ${end}
+      GROUP BY d.id, d.name
+      ORDER BY totalCost DESC
+    `;
+
+    const totalCost = categoryRaw.reduce((s: number, r: any) => s + Number(r.totalCost), 0);
+    const totalCount = categoryRaw.reduce((s: number, r: any) => s + Number(r.assetCount), 0);
+
+    res.json({
+      year,
+      month,
+      totalCost,
+      totalAssets: totalCount,
+      byCategory: categoryRaw.map((r: any) => ({
+        category: r.categoryName || "Uncategorized",
+        assetCount: Number(r.assetCount),
+        totalCost: Number(r.totalCost),
+      })),
+      byDepartment: deptRaw.map((r: any) => ({
+        department: r.departmentName || "Unassigned",
+        assetCount: Number(r.assetCount),
+        totalCost: Number(r.totalCost),
+      })),
+    });
+  } catch (err: any) {
+    console.error("getMonthBreakdown error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};

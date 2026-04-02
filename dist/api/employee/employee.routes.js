@@ -11,4 +11,5 @@ router.get("/", authMiddleware_1.authenticateToken, employee_controller_1.getAll
 router.post("/", employee_controller_1.createEmployee);
 router.get('/:employeeID/department', employee_controller_1.getDepartmentNameByEmployeeID);
 router.delete("/:id", authMiddleware_1.authenticateToken, employee_controller_1.deleteEmployee);
+router.get("/:id/assets", authMiddleware_1.authenticateToken, employee_controller_1.getEmployeeAssets);
 exports.default = router;

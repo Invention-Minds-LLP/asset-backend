@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.uploadContractDocument = exports.expireContracts = exports.getContractsByAsset = exports.updateServiceContract = exports.createServiceContract = void 0;
+exports.approveVisitCharge = exports.getServiceVisits = exports.logServiceVisit = exports.uploadContractDocument = exports.expireContracts = exports.getServiceContractStats = exports.getAllServiceContracts = exports.getContractsByAsset = exports.updateServiceContract = exports.createServiceContract = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const asset_1 = require("../../utilis/asset");
 function mustUser(req) {
@@ -26,7 +26,11 @@ const createServiceContract = (req, res) => __awaiter(void 0, void 0, void 0, fu
         const user = mustUser(req);
         const { assetId, // ✅ STRING (Asset.assetId)
         vendorId, contractType, // AMC | CMC
-        startDate, endDate, cost, includesParts, includesLabor, visitsPerYear, document, terms, reason, currency, contractNumber, } = req.body;
+        startDate, endDate, cost, includesParts, includesLabor, visitsPerYear, document, terms, reason, currency, contractNumber, 
+        // Vendor SLA commitments
+        vendorResponseValue, vendorResponseUnit, vendorResolutionValue, vendorResolutionUnit, 
+        // Split visit counts
+        regularVisitsPerYear, emergencyVisitsPerYear, } = req.body;
         if (!assetId || !contractType || !startDate || !endDate) {
             res.status(400).json({ message: "Missing required fields" });
             return;
@@ -79,6 +83,8 @@ const createServiceContract = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 includesParts: includesParts !== null && includesParts !== void 0 ? includesParts : null,
                 includesLabor: includesLabor !== null && includesLabor !== void 0 ? includesLabor : null,
                 visitsPerYear: visitsPerYear !== null && visitsPerYear !== void 0 ? visitsPerYear : null,
+                regularVisitsPerYear: regularVisitsPerYear != null ? Number(regularVisitsPerYear) : null,
+                emergencyVisitsPerYear: emergencyVisitsPerYear != null ? Number(emergencyVisitsPerYear) : null,
                 cost: cost !== null && cost !== void 0 ? cost : null,
                 currency: currency !== null && currency !== void 0 ? currency : null,
                 document: document !== null && document !== void 0 ? document : null,
@@ -86,6 +92,10 @@ const createServiceContract = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 status: "ACTIVE",
                 createdBy: user.employeeID,
                 reason: reason || null,
+                vendorResponseValue: vendorResponseValue != null ? Number(vendorResponseValue) : null,
+                vendorResponseUnit: vendorResponseUnit !== null && vendorResponseUnit !== void 0 ? vendorResponseUnit : null,
+                vendorResolutionValue: vendorResolutionValue != null ? Number(vendorResolutionValue) : null,
+                vendorResolutionUnit: vendorResolutionUnit !== null && vendorResolutionUnit !== void 0 ? vendorResolutionUnit : null,
             },
         });
         // 🔔 Notify HOD (kept from your logic)
@@ -157,6 +167,18 @@ const updateServiceContract = (req, res) => __awaiter(void 0, void 0, void 0, fu
             data.reason = reason || null;
         if ("createdBy" in req.body)
             data.createdBy = createdBy || null;
+        if ("vendorResponseValue" in req.body)
+            data.vendorResponseValue = req.body.vendorResponseValue != null ? Number(req.body.vendorResponseValue) : null;
+        if ("vendorResponseUnit" in req.body)
+            data.vendorResponseUnit = req.body.vendorResponseUnit || null;
+        if ("vendorResolutionValue" in req.body)
+            data.vendorResolutionValue = req.body.vendorResolutionValue != null ? Number(req.body.vendorResolutionValue) : null;
+        if ("vendorResolutionUnit" in req.body)
+            data.vendorResolutionUnit = req.body.vendorResolutionUnit || null;
+        if ("regularVisitsPerYear" in req.body)
+            data.regularVisitsPerYear = req.body.regularVisitsPerYear != null ? Number(req.body.regularVisitsPerYear) : null;
+        if ("emergencyVisitsPerYear" in req.body)
+            data.emergencyVisitsPerYear = req.body.emergencyVisitsPerYear != null ? Number(req.body.emergencyVisitsPerYear) : null;
         const finalStart = (_a = data.startDate) !== null && _a !== void 0 ? _a : existing.startDate;
         const finalEnd = (_b = data.endDate) !== null && _b !== void 0 ? _b : existing.endDate;
         if (finalStart && finalEnd && finalEnd <= finalStart) {
@@ -191,6 +213,94 @@ const getContractsByAsset = (req, res) => __awaiter(void 0, void 0, void 0, func
     res.json(contracts);
 });
 exports.getContractsByAsset = getContractsByAsset;
+// GET /service-contracts/all (standalone page with filters, pagination, CSV)
+const getAllServiceContracts = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { status, contractType, vendorId, search, page = "1", limit = "25", exportCsv, expiringDays } = req.query;
+        const where = {};
+        if (status)
+            where.status = String(status);
+        if (contractType)
+            where.contractType = String(contractType);
+        if (vendorId)
+            where.vendorId = Number(vendorId);
+        if (search) {
+            where.OR = [
+                { contractNumber: { contains: String(search) } },
+                { asset: { assetName: { contains: String(search) } } },
+                { asset: { assetId: { contains: String(search) } } },
+                { vendor: { name: { contains: String(search) } } },
+            ];
+        }
+        if (expiringDays) {
+            const now = new Date();
+            const future = new Date();
+            future.setDate(now.getDate() + Number(expiringDays));
+            where.status = "ACTIVE";
+            where.endDate = { gte: now, lte: future };
+        }
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, contracts] = yield Promise.all([
+            prismaClient_1.default.serviceContract.count({ where }),
+            prismaClient_1.default.serviceContract.findMany(Object.assign({ where, include: {
+                    asset: { select: { id: true, assetId: true, assetName: true, serialNumber: true } },
+                    vendor: { select: { id: true, name: true, contact: true } },
+                }, orderBy: { endDate: "asc" } }, (exportCsv !== "true" ? { skip, take } : {}))),
+        ]);
+        if (exportCsv === "true") {
+            const csvRows = contracts.map((c) => {
+                var _a, _b, _c;
+                return ({
+                    ContractNumber: c.contractNumber || "",
+                    Type: c.contractType || "",
+                    AssetId: ((_a = c.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = c.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    Vendor: ((_c = c.vendor) === null || _c === void 0 ? void 0 : _c.name) || "",
+                    StartDate: c.startDate ? new Date(c.startDate).toISOString().split("T")[0] : "",
+                    EndDate: c.endDate ? new Date(c.endDate).toISOString().split("T")[0] : "",
+                    Cost: c.cost ? Number(c.cost) : "",
+                    Status: c.status || "",
+                    IncludesParts: c.includesParts ? "Yes" : "No",
+                    IncludesLabor: c.includesLabor ? "Yes" : "No",
+                    VisitsPerYear: c.visitsPerYear || "",
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=service-contracts.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
+        res.json({ data: contracts, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.getAllServiceContracts = getAllServiceContracts;
+// GET /service-contracts/stats
+const getServiceContractStats = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const now = new Date();
+        const thirtyDays = new Date();
+        thirtyDays.setDate(now.getDate() + 30);
+        const [total, active, expired, expiring30, amcCount, cmcCount] = yield Promise.all([
+            prismaClient_1.default.serviceContract.count(),
+            prismaClient_1.default.serviceContract.count({ where: { status: "ACTIVE" } }),
+            prismaClient_1.default.serviceContract.count({ where: { status: "EXPIRED" } }),
+            prismaClient_1.default.serviceContract.count({ where: { status: "ACTIVE", endDate: { gte: now, lte: thirtyDays } } }),
+            prismaClient_1.default.serviceContract.count({ where: { contractType: "AMC", status: "ACTIVE" } }),
+            prismaClient_1.default.serviceContract.count({ where: { contractType: "CMC", status: "ACTIVE" } }),
+        ]);
+        res.json({ total, active, expired, expiring30, amcCount, cmcCount });
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.getServiceContractStats = getServiceContractStats;
 const expireContracts = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const now = new Date();
     const expired = yield prismaClient_1.default.serviceContract.updateMany({
@@ -257,3 +367,152 @@ const uploadContractDocument = (req, res) => __awaiter(void 0, void 0, void 0, f
     }));
 });
 exports.uploadContractDocument = uploadContractDocument;
+// ── Service Visit Logging ─────────────────────────────────────────────────────
+// POST /service-contracts/:contractId/visits
+// Log a service visit (PM or Repair) with chargeable rules:
+//   - No active warranty + no active contract → chargeable
+//   - Amount ≤ 1000 → direct approval (auto-approved)
+//   - Amount > 1000 → needs manager approval (chargeApprovalStatus = PENDING)
+const logServiceVisit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = mustUser(req);
+        const contractId = Number(req.params.contractId);
+        const contract = yield prismaClient_1.default.serviceContract.findUnique({
+            where: { id: contractId },
+            include: { asset: true },
+        });
+        if (!contract) {
+            res.status(404).json({ message: "Service contract not found" });
+            return;
+        }
+        const { visitType, // PREVENTIVE_MAINTENANCE | REPAIR
+        visitDate, visitedById, workDone, partsReplaced, outcome, chargeAmount, } = req.body;
+        if (!visitType || !visitDate) {
+            res.status(400).json({ message: "visitType and visitDate are required" });
+            return;
+        }
+        if (!["PREVENTIVE_MAINTENANCE", "REPAIR"].includes(visitType)) {
+            res.status(400).json({ message: "visitType must be PREVENTIVE_MAINTENANCE or REPAIR" });
+            return;
+        }
+        const assetId = contract.assetId;
+        const now = new Date();
+        // Chargeable determination
+        const hasActiveWarranty = yield prismaClient_1.default.warranty.findFirst({
+            where: { assetId, isUnderWarranty: true, warrantyEnd: { gte: now } },
+        });
+        const hasActiveContract = yield prismaClient_1.default.serviceContract.findFirst({
+            where: { assetId, status: "ACTIVE", endDate: { gte: now } },
+        });
+        let isChargeable = false;
+        let chargeableReason = null;
+        let chargeApprovalStatus = null;
+        const amount = chargeAmount != null ? Number(chargeAmount) : null;
+        if (!hasActiveWarranty && !hasActiveContract) {
+            isChargeable = true;
+            chargeableReason = "NO_WARRANTY_OR_CONTRACT";
+        }
+        // If chargeable: ≤1000 auto-approved, >1000 needs approval
+        if (isChargeable && amount != null) {
+            chargeApprovalStatus = amount <= 1000 ? "APPROVED" : "PENDING";
+        }
+        const visit = yield prismaClient_1.default.serviceVisit.create({
+            data: {
+                serviceContractId: contractId,
+                assetId,
+                visitType,
+                visitDate: new Date(visitDate),
+                visitedById: visitedById ? Number(visitedById) : null,
+                workDone: workDone !== null && workDone !== void 0 ? workDone : null,
+                partsReplaced: partsReplaced !== null && partsReplaced !== void 0 ? partsReplaced : null,
+                outcome: outcome !== null && outcome !== void 0 ? outcome : null,
+                isChargeable,
+                chargeableReason,
+                chargeAmount: amount,
+                chargeApprovalStatus,
+                createdById: user.employeeDbId,
+            },
+        });
+        // If charge > 1000, notify HOD/manager
+        if (isChargeable && amount != null && amount > 1000 && contract.asset.departmentId) {
+            const hod = yield prismaClient_1.default.employee.findFirst({
+                where: { departmentId: contract.asset.departmentId, role: "HOD" },
+                select: { id: true },
+            });
+            if (hod) {
+                const notif = yield prismaClient_1.default.notification.create({
+                    data: {
+                        type: "OTHER",
+                        title: `Chargeable Service Visit — Approval Required`,
+                        message: `Service visit for asset ${contract.asset.assetName} is chargeable ₹${amount}. Approval needed.`,
+                        priority: "HIGH",
+                        assetId,
+                        dedupeKey: `SVC_VISIT_CHARGE_${visit.id}`,
+                        createdById: user.employeeDbId,
+                    },
+                });
+                yield prismaClient_1.default.notificationRecipient.create({
+                    data: { notificationId: notif.id, employeeId: hod.id },
+                });
+            }
+        }
+        res.status(201).json(visit);
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message || "Failed to log service visit" });
+    }
+});
+exports.logServiceVisit = logServiceVisit;
+// GET /service-contracts/:contractId/visits
+const getServiceVisits = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const contractId = Number(req.params.contractId);
+        const visits = yield prismaClient_1.default.serviceVisit.findMany({
+            where: { serviceContractId: contractId },
+            include: {
+                visitedBy: { select: { id: true, name: true } },
+                chargeApprovedBy: { select: { id: true, name: true } },
+            },
+            orderBy: { visitDate: "desc" },
+        });
+        res.json(visits);
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message || "Failed to fetch visits" });
+    }
+});
+exports.getServiceVisits = getServiceVisits;
+// PATCH /service-contracts/visits/:visitId/approve-charge
+const approveVisitCharge = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = mustUser(req);
+        const visitId = Number(req.params.visitId);
+        const { decision, remarks } = req.body; // APPROVED | REJECTED
+        if (!["APPROVED", "REJECTED"].includes(decision)) {
+            res.status(400).json({ message: "decision must be APPROVED or REJECTED" });
+            return;
+        }
+        const visit = yield prismaClient_1.default.serviceVisit.findUnique({ where: { id: visitId } });
+        if (!visit) {
+            res.status(404).json({ message: "Service visit not found" });
+            return;
+        }
+        if (visit.chargeApprovalStatus !== "PENDING") {
+            res.status(400).json({ message: "Charge approval not pending" });
+            return;
+        }
+        const updated = yield prismaClient_1.default.serviceVisit.update({
+            where: { id: visitId },
+            data: {
+                chargeApprovalStatus: decision,
+                chargeApprovedById: user.employeeDbId,
+                chargeApprovedAt: new Date(),
+            },
+        });
+        res.json(updated);
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message || "Failed to approve charge" });
+    }
+});
+exports.approveVisitCharge = approveVisitCharge;

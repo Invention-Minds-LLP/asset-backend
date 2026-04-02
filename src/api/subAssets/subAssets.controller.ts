@@ -872,6 +872,215 @@ export const createSubAsset = async (req: Request, res: Response) => {
     return;
   }
 };
+/**
+ * POST /assets/:parentAssetId/sub-assets/:oldSubAssetId/replace
+ * Replace a sub-asset component.
+ * sourceType = "NEW" | "INVENTORY_SPARE"
+ * - NEW: creates a new Asset as the replacement child
+ * - INVENTORY_SPARE: decrement spare stock and create Asset from spare
+ * Either way the old sub-asset is marked CONDEMNED and unlinked from parent.
+ */
+export const replaceSubAsset = async (req: Request, res: Response) => {
+  try {
+    const { parentAssetId, oldSubAssetId } = req.params;
+    const {
+      sourceType,
+      sparePartId,
+      quantity,
+      reason,
+      cost,
+      replacedById,
+      notes,
+      // new-asset fields
+      assetName,
+      assetType,
+      assetCategoryId,
+      serialNumber,
+      referenceCode,
+      modeOfProcurement,
+      vendorId,
+      purchaseCost,
+      purchaseDate,
+      invoiceNumber,
+      workingCondition,
+    } = req.body;
+
+    if (!sourceType || !["NEW", "INVENTORY_SPARE"].includes(sourceType)) {
+      res.status(400).json({ message: "sourceType must be NEW or INVENTORY_SPARE" });
+      return;
+    }
+
+    const parent = await prisma.asset.findUnique({
+      where: { assetId: parentAssetId },
+      select: { id: true, assetId: true, departmentId: true, vendorId: true },
+    });
+    if (!parent) { res.status(404).json({ message: "Parent asset not found" }); return; }
+
+    const oldSub = await prisma.asset.findUnique({
+      where: { assetId: oldSubAssetId },
+      select: { id: true, assetId: true, parentAssetId: true },
+    });
+    if (!oldSub) { res.status(404).json({ message: "Sub-asset not found" }); return; }
+    if (oldSub.parentAssetId !== parent.id) {
+      res.status(400).json({ message: "Sub-asset does not belong to this parent" });
+      return;
+    }
+
+    let newSubAssetDbId: number | null = null;
+    let spareDbId: number | null = sparePartId ? Number(sparePartId) : null;
+
+    if (sourceType === "INVENTORY_SPARE") {
+      if (!sparePartId) { res.status(400).json({ message: "sparePartId is required" }); return; }
+      const qty = Number(quantity || 1);
+
+      const spare = await prisma.sparePart.findUnique({
+        where: { id: Number(sparePartId) },
+        select: { id: true, name: true, vendorId: true, stockQuantity: true, cost: true },
+      });
+      if (!spare) { res.status(404).json({ message: "Spare part not found" }); return; }
+      if (spare.stockQuantity < qty) { res.status(400).json({ message: "Insufficient spare stock" }); return; }
+
+      const requiredName  = assetName  || spare.name;
+      const requiredType  = assetType  || "COMPONENT";
+      const requiredCat   = assetCategoryId ? Number(assetCategoryId) : null;
+      const requiredSerial = serialNumber;
+
+      if (!requiredSerial || !requiredCat) {
+        res.status(400).json({ message: "serialNumber and assetCategoryId required even for spare replacements" });
+        return;
+      }
+
+      const newAssetId = await generateSubAssetId(parent);
+      const newSub = await prisma.asset.create({
+        data: {
+          assetId: newAssetId,
+          assetName: requiredName,
+          assetType: requiredType,
+          assetCategoryId: requiredCat,
+          serialNumber: requiredSerial,
+          referenceCode: referenceCode || null,
+          sourceType: "INVENTORY_SPARE",
+          modeOfProcurement: "PURCHASE",
+          status: "IN_USE",
+          parentAssetId: parent.id,
+          departmentId: parent.departmentId,
+          vendorId: spare.vendorId ?? parent.vendorId ?? null,
+          purchaseCost: cost ? Number(cost) : (spare.cost ? Number(spare.cost) : null),
+          workingCondition: workingCondition || "WORKING",
+        } as any,
+      });
+      newSubAssetDbId = newSub.id;
+
+      await prisma.sparePart.update({
+        where: { id: spare.id },
+        data: { stockQuantity: { decrement: qty } },
+      });
+
+      await prisma.inventoryTransaction.create({
+        data: {
+          type: "OUT",
+          sparePartId: spare.id,
+          quantity: qty,
+          referenceType: "REPLACEMENT",
+          referenceId: newSub.id,
+          notes: `Replacement sub-asset ${newSub.assetId} under ${parent.assetId}`,
+        },
+      });
+    } else {
+      // NEW
+      if (!assetName || !assetType || !assetCategoryId || !serialNumber || !modeOfProcurement) {
+        res.status(400).json({ message: "assetName, assetType, assetCategoryId, serialNumber, modeOfProcurement required" });
+        return;
+      }
+      const newAssetId = await generateSubAssetId(parent);
+      const newSub = await prisma.asset.create({
+        data: {
+          assetId: newAssetId,
+          assetName,
+          assetType,
+          assetCategoryId: Number(assetCategoryId),
+          serialNumber,
+          referenceCode: referenceCode || null,
+          sourceType: "NEW",
+          modeOfProcurement,
+          status: "IN_USE",
+          parentAssetId: parent.id,
+          departmentId: parent.departmentId,
+          vendorId: vendorId ? Number(vendorId) : parent.vendorId ?? null,
+          purchaseCost: purchaseCost ? Number(purchaseCost) : null,
+          purchaseDate: purchaseDate ? new Date(purchaseDate) : null,
+          invoiceNumber: invoiceNumber || null,
+          workingCondition: workingCondition || "WORKING",
+        } as any,
+      });
+      newSubAssetDbId = newSub.id;
+    }
+
+    // Mark old sub-asset as CONDEMNED, detach from parent
+    await prisma.asset.update({
+      where: { id: oldSub.id },
+      data: { status: "CONDEMNED", parentAssetId: null } as any,
+    });
+
+    // Create replacement record
+    const replacement = await (prisma as any).subAssetReplacement.create({
+      data: {
+        parentAssetId: parent.id,
+        oldSubAssetId: oldSub.id,
+        newSubAssetId: newSubAssetDbId,
+        sparePartId: spareDbId,
+        replacementDate: new Date(),
+        reason: reason || null,
+        cost: cost ? Number(cost) : null,
+        replacedById: replacedById ? Number(replacedById) : null,
+        notes: notes || null,
+      },
+      include: {
+        oldSubAsset: { select: { assetId: true, assetName: true } },
+        newSubAsset: { select: { assetId: true, assetName: true } },
+      },
+    });
+
+    res.status(201).json({ message: "Sub-asset replaced", replacement });
+  } catch (e: any) {
+    console.error("replaceSubAsset error:", e);
+    if (e?.code === "P2002") {
+      res.status(409).json({ message: "Duplicate serial number or reference code" });
+      return;
+    }
+    res.status(500).json({ message: e.message || "Failed to replace sub-asset" });
+  }
+};
+
+/**
+ * GET /assets/:parentAssetId/replacement-history
+ */
+export const getReplacementHistory = async (req: Request, res: Response) => {
+  try {
+    const { parentAssetId } = req.params;
+    const parent = await prisma.asset.findUnique({
+      where: { assetId: parentAssetId },
+      select: { id: true },
+    });
+    if (!parent) { res.status(404).json({ message: "Asset not found" }); return; }
+
+    const history = await (prisma as any).subAssetReplacement.findMany({
+      where: { parentAssetId: parent.id },
+      include: {
+        oldSubAsset: { select: { assetId: true, assetName: true } },
+        newSubAsset: { select: { assetId: true, assetName: true } },
+        sparePart:   { select: { name: true, partNumber: true } },
+        replacedBy:  { select: { name: true, employeeID: true } },
+      },
+      orderBy: { replacementDate: "desc" },
+    });
+
+    res.json(history);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to fetch replacement history" });
+  }
+};
+
 export const getSparePartOptions = async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q || "").trim();

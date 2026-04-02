@@ -56,7 +56,7 @@ async function createAssetWithGeneratedId(assetData: any) {
 
     const fyEnd = fyStart + 1;
     const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-    const prefix = `AST-${fyStr}-`;
+    const prefix = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-`;
 
     const existing = await prisma.asset.findMany({
         where: {
@@ -84,7 +84,7 @@ async function createAssetWithGeneratedId(assetData: any) {
     }
 
     for (let seq = maxSeq + 1; seq <= maxSeq + 100; seq++) {
-        const candidate = `${prefix}${String(seq).padStart(3, "0")}`;
+        const candidate = `${prefix}${String(seq).padStart(5, "0")}`;
 
         const exists = await prisma.asset.findUnique({
             where: { assetId: candidate },
@@ -118,7 +118,7 @@ async function generateAssetId(): Promise<string> {
 
     const fyEnd = fyStart + 1;
     const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-    const prefix = `AST-${fyStr}-`;
+    const prefix = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-`;
 
     const existing = await prisma.asset.findMany({
         where: {
@@ -147,7 +147,7 @@ async function generateAssetId(): Promise<string> {
         }
     }
 
-    return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
+    return `${prefix}${String(maxSeq + 1).padStart(5, "0")}`;
 }
 async function generateSubAssetId(parentAsset: any): Promise<string> {
 

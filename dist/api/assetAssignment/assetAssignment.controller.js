@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.resendAcknowledgement = exports.getAssetAssignmentState = exports.getAssetAssignmentHistory = exports.supervisorAssignEndUser = exports.targetHodAssignEndUser = exports.supervisorAssignTargetDepartment = exports.hodAssignSupervisor = exports.rejectAssignment = exports.acknowledgeAssignment = exports.getMyPendingAcknowledgements = exports.initiateDepartmentAcknowledgement = void 0;
+exports.getAssignmentChecklist = exports.resendAcknowledgement = exports.getAssetAssignmentState = exports.getAssetAssignmentHistory = exports.supervisorAssignEndUser = exports.targetHodAssignEndUser = exports.supervisorAssignTargetDepartment = exports.hodAssignSupervisor = exports.rejectAssignment = exports.acknowledgeAssignment = exports.getMyPendingAcknowledgements = exports.initiateDepartmentAcknowledgement = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
@@ -208,14 +208,64 @@ exports.getMyPendingAcknowledgements = getMyPendingAcknowledgements;
 // 3) ACKNOWLEDGE
 // POST /assignments/:assignmentId/acknowledge
 // -----------------------------
+// export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Response) => {
+//     try {
+//         const assignmentId = Number(req.params.assignmentId);
+//         const acknowledgementNote = req.body.acknowledgementNote;
+//         const digitalSignature = req.body.digitalSignature; // base64
+//         const photo = req.file?.path; // uploaded file path
+//         console.log(req.user)
+//         if (!req.user) {
+//             res.status(401).json({ message: "Unauthorized" });
+//             return;
+//         }
+//         const employeeId = req.user.employeeDbId;
+//         const assignment = await prisma.assetAssignment.findUnique({
+//             where: { id: assignmentId },
+//             include: { asset: true },
+//         });
+//         if (!assignment) {
+//             res.status(404).json({ message: "Assignment not found" });
+//             return;
+//         }
+//         if (assignment.assignedToId !== employeeId) {
+//             res.status(403).json({ message: "Not allowed" });
+//             return;
+//         }
+//         if (assignment.status !== "PENDING") {
+//             res.status(400).json({ message: "Not pending" });
+//             return;
+//         }
+//         let photoUrl: string | null = null;
+//         if (req.file?.path) {
+//             const original = req.file.originalname || `ack-${assignmentId}-${Date.now()}.jpg`;
+//             const remotePath = `/public_html/smartassets/assignment_photos/${Date.now()}-${original}`;
+//             photoUrl = await uploadToFTP(req.file.path, remotePath);
+//             // remove local temp file
+//             fs.unlinkSync(req.file.path);
+//         }
+//         const updated = await prisma.assetAssignment.update({
+//             where: { id: assignmentId },
+//             data: {
+//                 status: "ACKNOWLEDGED",
+//                 acknowledgedAt: new Date(),
+//                 acknowledgementNote: acknowledgementNote ?? null,
+//                 digitalSignature: digitalSignature ?? null,
+//                 photoProof: photoUrl ?? null,
+//             },
+//         });
+//         res.json({ message: "Acknowledged", assignment: updated });
+//     } catch (e: any) {
+//         res.status(500).json({ message: "Failed", error: e.message });
+//     }
+// };
 const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b;
+    var _a, _b, _c, _d;
     try {
         const assignmentId = Number(req.params.assignmentId);
         const acknowledgementNote = req.body.acknowledgementNote;
-        const digitalSignature = req.body.digitalSignature; // base64
-        const photo = (_a = req.file) === null || _a === void 0 ? void 0 : _a.path; // uploaded file path
-        console.log(req.user);
+        const digitalSignature = req.body.digitalSignature;
+        const checklist = req.body.checklist ? JSON.parse(req.body.checklist) : [];
         if (!req.user) {
             res.status(401).json({ message: "Unauthorized" });
             return;
@@ -223,7 +273,14 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
         const employeeId = req.user.employeeDbId;
         const assignment = yield prismaClient_1.default.assetAssignment.findUnique({
             where: { id: assignmentId },
-            include: { asset: true },
+            include: {
+                asset: {
+                    select: {
+                        id: true,
+                        assetCategoryId: true,
+                    },
+                },
+            },
         });
         if (!assignment) {
             res.status(404).json({ message: "Assignment not found" });
@@ -233,32 +290,139 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
             res.status(403).json({ message: "Not allowed" });
             return;
         }
-        if (assignment.status !== "PENDING") {
-            res.status(400).json({ message: "Not pending" });
+        if (assignment.status !== client_1.AssignmentStatus.PENDING) {
+            res.status(400).json({ message: "Assignment is not pending" });
             return;
         }
+        const template = yield prismaClient_1.default.assetAcknowledgementTemplate.findFirst({
+            where: {
+                isActive: true,
+                purpose: client_1.AcknowledgementPurpose.ASSIGNMENT,
+                OR: [
+                    { assetId: assignment.assetId },
+                    { assetCategoryId: (_a = assignment.asset.assetCategoryId) !== null && _a !== void 0 ? _a : undefined },
+                ],
+            },
+            include: {
+                items: {
+                    orderBy: { sortOrder: "asc" },
+                },
+            },
+            orderBy: [{ assetId: "desc" }, { id: "desc" }],
+        });
+        // validate required checklist items
+        if (template) {
+            const submittedMap = new Map();
+            for (const row of checklist) {
+                submittedMap.set(Number(row.itemId), {
+                    checked: !!row.checked,
+                    remarks: (_b = row.remarks) !== null && _b !== void 0 ? _b : null,
+                });
+            }
+            const missingRequired = template.items.filter((item) => { var _a; return item.isRequired && !((_a = submittedMap.get(item.id)) === null || _a === void 0 ? void 0 : _a.checked); });
+            if (missingRequired.length > 0) {
+                res.status(400).json({
+                    message: "Please complete all required checklist items before acknowledging",
+                    missingItems: missingRequired.map((x) => ({
+                        itemId: x.id,
+                        title: x.title,
+                    })),
+                });
+                return;
+            }
+        }
         let photoUrl = null;
-        if ((_b = req.file) === null || _b === void 0 ? void 0 : _b.path) {
+        if ((_c = req.file) === null || _c === void 0 ? void 0 : _c.path) {
             const original = req.file.originalname || `ack-${assignmentId}-${Date.now()}.jpg`;
             const remotePath = `/public_html/smartassets/assignment_photos/${Date.now()}-${original}`;
             photoUrl = yield uploadToFTP(req.file.path, remotePath);
-            // remove local temp file
             fs_1.default.unlinkSync(req.file.path);
         }
-        const updated = yield prismaClient_1.default.assetAssignment.update({
+        // 1. update assignment
+        const updatedAssignment = yield prismaClient_1.default.assetAssignment.update({
             where: { id: assignmentId },
             data: {
-                status: "ACKNOWLEDGED",
+                status: client_1.AssignmentStatus.ACKNOWLEDGED,
                 acknowledgedAt: new Date(),
                 acknowledgementNote: acknowledgementNote !== null && acknowledgementNote !== void 0 ? acknowledgementNote : null,
                 digitalSignature: digitalSignature !== null && digitalSignature !== void 0 ? digitalSignature : null,
                 photoProof: photoUrl !== null && photoUrl !== void 0 ? photoUrl : null,
+                stage: assignment.stage,
+                assetAssignmentHistories: {
+                    create: {
+                        action: client_1.AssignmentAction.ACKNOWLEDGED,
+                        performedById: employeeId,
+                        notes: acknowledgementNote !== null && acknowledgementNote !== void 0 ? acknowledgementNote : "Acknowledged with checklist",
+                    },
+                },
             },
         });
-        res.json({ message: "Acknowledged", assignment: updated });
+        // 2. create checklist run
+        let acknowledgementRun = null;
+        if (template) {
+            acknowledgementRun = yield prismaClient_1.default.assetAcknowledgementRun.create({
+                data: {
+                    assignmentId: updatedAssignment.id,
+                    assetId: assignment.assetId,
+                    templateId: template.id,
+                    assignedToId: employeeId,
+                    acknowledgedAt: new Date(),
+                    acknowledgedBy: (_d = req.user.employeeID) !== null && _d !== void 0 ? _d : String(employeeId),
+                    remarks: acknowledgementNote !== null && acknowledgementNote !== void 0 ? acknowledgementNote : null,
+                    digitalSignature: digitalSignature !== null && digitalSignature !== void 0 ? digitalSignature : null,
+                    photoProof: photoUrl !== null && photoUrl !== void 0 ? photoUrl : null,
+                    rows: {
+                        create: checklist.map((row) => {
+                            var _a;
+                            return ({
+                                itemId: Number(row.itemId),
+                                checked: !!row.checked,
+                                remarks: (_a = row.remarks) !== null && _a !== void 0 ? _a : null,
+                            });
+                        }),
+                    },
+                },
+            });
+        }
+        // 3. If this is the HOD of the asset's department acknowledging, issue the real Asset ID
+        let issuedAssetId = null;
+        const currentAsset = yield prismaClient_1.default.asset.findUnique({
+            where: { id: assignment.assetId },
+            select: { assetId: true, departmentId: true },
+        });
+        if ((currentAsset === null || currentAsset === void 0 ? void 0 : currentAsset.assetId.startsWith("TEMP-")) && currentAsset.departmentId) {
+            const acknowledger = yield prismaClient_1.default.employee.findUnique({
+                where: { id: employeeId },
+                select: { role: true, departmentId: true },
+            });
+            if ((acknowledger === null || acknowledger === void 0 ? void 0 : acknowledger.role) === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
+                const now = new Date();
+                const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+                const fyEnd = fyStart + 1;
+                const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
+                const latestAsset = yield prismaClient_1.default.asset.findFirst({
+                    where: { assetId: { startsWith: `AST-${fyStr}` }, parentAssetId: null },
+                    orderBy: { id: "desc" },
+                });
+                let nextSeq = 1;
+                if (latestAsset) {
+                    nextSeq = parseInt(latestAsset.assetId.split("-")[3], 10) + 1;
+                }
+                issuedAssetId = `AST-${fyStr}-${nextSeq.toString().padStart(3, "0")}`;
+                yield prismaClient_1.default.asset.update({
+                    where: { id: assignment.assetId },
+                    data: { assetId: issuedAssetId },
+                });
+            }
+        }
+        res.json(Object.assign({ message: "Acknowledged with checklist", assignment: updatedAssignment, acknowledgementRun }, (issuedAssetId ? { issuedAssetId } : {})));
     }
     catch (e) {
-        res.status(500).json({ message: "Failed", error: e.message });
+        console.error(e);
+        res.status(500).json({
+            message: "Failed to acknowledge",
+            error: e.message,
+        });
     }
 });
 exports.acknowledgeAssignment = acknowledgeAssignment;
@@ -734,3 +898,53 @@ const resendAcknowledgement = (req, res) => __awaiter(void 0, void 0, void 0, fu
     }
 });
 exports.resendAcknowledgement = resendAcknowledgement;
+const getAssignmentChecklist = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const assignmentId = Number(req.params.assignmentId);
+        const assignment = yield prismaClient_1.default.assetAssignment.findUnique({
+            where: { id: assignmentId },
+            include: {
+                asset: {
+                    select: {
+                        id: true,
+                        assetCategoryId: true,
+                    },
+                },
+            },
+        });
+        if (!assignment) {
+            res.status(404).json({ message: "Assignment not found" });
+            return;
+        }
+        const template = yield prismaClient_1.default.assetAcknowledgementTemplate.findFirst({
+            where: {
+                isActive: true,
+                purpose: client_1.AcknowledgementPurpose.ASSIGNMENT,
+                OR: [
+                    { assetId: assignment.assetId },
+                    { assetCategoryId: (_a = assignment.asset.assetCategoryId) !== null && _a !== void 0 ? _a : undefined },
+                ],
+            },
+            include: {
+                items: {
+                    orderBy: { sortOrder: "asc" },
+                },
+            },
+            orderBy: [
+                { assetId: "desc" }, // asset-specific first
+                { id: "desc" },
+            ],
+        });
+        res.json({
+            assignmentId: assignment.id,
+            assetId: assignment.assetId,
+            template: template !== null && template !== void 0 ? template : null,
+            items: (_b = template === null || template === void 0 ? void 0 : template.items) !== null && _b !== void 0 ? _b : [],
+        });
+    }
+    catch (e) {
+        res.status(500).json({ message: "Failed to fetch checklist", error: e.message });
+    }
+});
+exports.getAssignmentChecklist = getAssignmentChecklist;

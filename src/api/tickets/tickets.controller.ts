@@ -4,6 +4,8 @@ import formidable from "formidable";
 import fs from "fs";
 import path from "path";
 import { Client } from "basic-ftp";
+import { logAction } from "../audit-trail/audit-trail.controller";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 /**
  * ✅ Keep secrets in env
@@ -180,8 +182,19 @@ export const getTicketMetrics = async (req: Request, res: Response) => {
 async function detectServiceType(tx: any, assetId: number) {
   const now = new Date();
 
-  const warranty = await tx.warranty.findUnique({ where: { assetId } });
-  if (warranty?.isUnderWarranty && warranty.warrantyEnd >= now) return "WARRANTY";
+  const warranty = await tx.warranty.findFirst({
+    where: {
+      assetId,
+      isActive: true,
+    },
+    orderBy: {
+      warrantyEnd: 'desc',
+    },
+  });
+
+  if (warranty?.isUnderWarranty && warranty.warrantyEnd >= now) {
+    return "WARRANTY";
+  }
 
   const contract = await tx.serviceContract.findFirst({
     where: {
@@ -189,6 +202,9 @@ async function detectServiceType(tx: any, assetId: number) {
       status: "ACTIVE",
       startDate: { lte: now },
       endDate: { gte: now },
+    },
+    orderBy: {
+      endDate: 'desc',
     },
   });
 
@@ -530,6 +546,79 @@ export const createTicket = async (req: Request, res: Response) => {
 
     //   return ticket;
     // });
+    // ── SLA Resolution ─────────────────────────────────────────────────────
+    // 1. Internal SLA: from AssetSlaMatrix by asset category + ticket priority
+    const priority = (req.body.priority || "MEDIUM").toUpperCase() as "LOW" | "MEDIUM" | "HIGH";
+    const slaCategoryMap: Record<string, "LOW" | "MEDIUM" | "HIGH"> = {
+      LOW: "LOW", MEDIUM: "MEDIUM", HIGH: "HIGH", CRITICAL: "HIGH",
+    };
+    const slaCategory = slaCategoryMap[priority] ?? "MEDIUM";
+
+    const internalSlaRow = asset.assetCategoryId
+      ? await prisma.assetSlaMatrix.findFirst({
+        where: {
+          assetCategoryId: asset.assetCategoryId,
+          slaCategory,
+          isActive: true,
+        },
+        orderBy: { level: "asc" },
+      })
+      : null;
+
+    const internalSlaValue = internalSlaRow?.resolutionTimeValue ?? asset.slaResolutionValue ?? null;
+    const internalSlaUnit = internalSlaRow?.resolutionTimeUnit ?? asset.slaResolutionUnit ?? null;
+
+    // 2. Vendor SLA: from active AMC/CMC service contract
+    const activeContract = await prisma.serviceContract.findFirst({
+      where: {
+        assetId,
+        status: "ACTIVE",
+        contractType: { in: ["AMC", "CMC"] },
+        endDate: { gte: new Date() },
+      },
+      orderBy: { endDate: "asc" },
+    });
+
+    const vendorSlaValue = (activeContract as any)?.vendorResolutionValue ?? null;
+    const vendorSlaUnit = (activeContract as any)?.vendorResolutionUnit ?? null;
+
+    // 3. Governing SLA = strictest (smallest in hours), prefer vendor if set
+    function toHours(val: number | null, unit: string | null): number {
+      if (!val || !unit) return Infinity;
+      if (unit === "HOURS") return val;
+      if (unit === "DAYS") return val * 24;
+      if (unit === "MINUTES") return val / 60;
+      return Infinity;
+    }
+
+    let slaExpectedValue: number | null = null;
+    let slaExpectedUnit: string | null = null;
+    let slaSource: string | null = null;
+
+    const internalHrs = toHours(internalSlaValue, internalSlaUnit);
+    const vendorHrs = toHours(vendorSlaValue, vendorSlaUnit);
+
+    if (internalSlaValue && vendorSlaValue) {
+      slaSource = "BOTH";
+      // Use stricter (smaller) SLA as governing
+      if (vendorHrs <= internalHrs) {
+        slaExpectedValue = vendorSlaValue;
+        slaExpectedUnit = vendorSlaUnit;
+      } else {
+        slaExpectedValue = internalSlaValue;
+        slaExpectedUnit = internalSlaUnit;
+      }
+    } else if (vendorSlaValue) {
+      slaSource = "VENDOR";
+      slaExpectedValue = vendorSlaValue;
+      slaExpectedUnit = vendorSlaUnit;
+    } else if (internalSlaValue) {
+      slaSource = "INTERNAL";
+      slaExpectedValue = internalSlaValue;
+      slaExpectedUnit = internalSlaUnit;
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     // 1) create ticket
     const created = await prisma.ticket.create({
       data: {
@@ -547,10 +636,17 @@ export const createTicket = async (req: Request, res: Response) => {
         assignedBy: supervisor?.id ? { connect: { id: hod?.id ?? user.employeeDbId } } : undefined,
         lastAssignedAt: supervisor?.id ? new Date() : null,
         assignmentNote: supervisor?.id ? "Auto-assigned to department supervisor" : null,
-        slaExpectedValue: asset.slaResolutionValue ?? null,
-        slaExpectedUnit: asset.slaResolutionUnit ?? null,
+        slaCategory,
+        slaSource,
+        slaExpectedValue,
+        slaExpectedUnit,
+        internalSlaValue,
+        internalSlaUnit,
+        vendorSlaValue,
+        vendorSlaUnit,
+        workCategory: req.body.workCategory ?? null,
       },
-    });
+    } as any);
 
     // 2) status history
     await prisma.ticketStatusHistory.create({
@@ -596,6 +692,21 @@ export const createTicket = async (req: Request, res: Response) => {
       data: recipients.map(empId => ({ notificationId: notif.id, employeeId: empId })),
       skipDuplicates: true,
     });
+
+    // Auto-update asset status for breakdown/corrective tickets
+    if (created.workCategory === 'BREAKDOWN' || created.workCategory === 'CORRECTIVE') {
+      await prisma.asset.update({
+        where: { id: created.assetId },
+        data: { status: 'UNDER_OBSERVATION' },
+      });
+    }
+
+    logAction({ entityType: "TICKET", entityId: created.id, action: "CREATE", description: `Ticket ${newTicketId} created for asset ${asset.assetId}`, performedById: user.employeeDbId });
+
+    // Notify HOD about new ticket
+    const hodIds = await getDepartmentHODs(created.departmentId);
+    const isHighPriority = ["HIGH", "CRITICAL"].includes(created.priority || "");
+    notify({ type: "TICKET_UPDATE", title: "New Ticket Raised", message: `Ticket ${created.ticketId} raised: ${created.issueType}`, recipientIds: hodIds, assetId: created.assetId, ticketId: created.id, createdById: user.employeeDbId, ...(isHighPriority ? { channel: "BOTH" } : {}), templateCode: "TICKET_RAISED", templateData: { ticketId: created.ticketId, issueType: created.issueType || '', assetName: asset.assetName || asset.assetId, priority: created.priority || '', description: created.detailedDesc || '' } });
 
     res.status(201).json(created);
   } catch (error) {
@@ -659,12 +770,76 @@ export const updateTicket = async (req: any, res: Response) => {
       return updated;
     });
 
+    if (status && status !== existingTicket.status) {
+      logAction({ entityType: "TICKET", entityId: id, action: "STATUS_CHANGE", description: `Ticket status changed from ${existingTicket.status} to ${status}`, performedById: user.employeeDbId });
+    } else {
+      logAction({ entityType: "TICKET", entityId: id, action: "UPDATE", description: `Ticket updated`, performedById: user.employeeDbId });
+    }
+
     res.json(updatedTicket);
   } catch (error) {
     console.error("Error updating ticket:", error);
     res.status(500).json({ message: "Failed to update ticket" });
   }
 };
+
+// export const assignTicket = async (req: any, res: Response) => {
+//   try {
+//     const user = mustUser(req);
+//     const ticketId = Number(req.params.id);
+//     const toEmployeeId = Number(req.body.toEmployeeId);
+//     const comment = String(req.body.comment || "").trim();
+
+//     if (!toEmployeeId) {
+//       res.status(400).json({ message: "toEmployeeId required" });
+//       return;
+//     }
+//     if (!comment) {
+//       res.status(400).json({ message: "comment required" });
+//       return;
+//     }
+
+//     const ticket = await requireAssetDeptHod(user, ticketId);
+
+//     const updated = await prisma.$transaction(async (tx) => {
+//       const upd = await tx.ticket.update({
+//         where: { id: ticketId },
+//         data: {
+//           assignedTo: { connect: { id: toEmployeeId } },
+//           assignedBy: { connect: { id: user.employeeDbId } },
+//           lastAssignedAt: new Date(),
+//           assignmentNote: comment,
+//           status: "ASSIGNED",
+//         },
+//       });
+
+//       await tx.ticketAssignmentHistory.create({
+//         data: {
+//           ticketId,
+//           fromEmployeeId: ticket.assignedToId ?? null,
+//           toEmployeeId,
+//           action: "ASSIGNED",
+//           comment,
+//           performedById: user.employeeDbId,
+//         },
+//       });
+
+//       await createStatusHistory(tx, {
+//         ticketDbId: ticketId,
+//         status: "ASSIGNED",
+//         changedBy: user.employeeID ?? user.name ?? "system",
+//         changedById: user.employeeDbId ?? null,
+//         note: comment,
+//       });
+
+//       return upd;
+//     });
+
+//     res.json(updated);
+//   } catch (e: any) {
+//     res.status(400).json({ message: e.message || "Failed to assign" });
+//   }
+// };
 
 export const assignTicket = async (req: any, res: Response) => {
   try {
@@ -675,56 +850,64 @@ export const assignTicket = async (req: any, res: Response) => {
 
     if (!toEmployeeId) {
       res.status(400).json({ message: "toEmployeeId required" });
+
       return;
     }
+
     if (!comment) {
       res.status(400).json({ message: "comment required" });
+
       return;
     }
 
     const ticket = await requireAssetDeptHod(user, ticketId);
 
-    const updated = await prisma.$transaction(async (tx) => {
-      const upd = await tx.ticket.update({
-        where: { id: ticketId },
-        data: {
-          assignedTo: { connect: { id: toEmployeeId } },
-          assignedBy: { connect: { id: user.employeeDbId } },
-          lastAssignedAt: new Date(),
-          assignmentNote: comment,
-          status: "ASSIGNED",
-        },
-      });
-
-      await tx.ticketAssignmentHistory.create({
-        data: {
-          ticketId,
-          fromEmployeeId: ticket.assignedToId ?? null,
-          toEmployeeId,
-          action: "ASSIGNED",
-          comment,
-          performedById: user.employeeDbId,
-        },
-      });
-
-      await createStatusHistory(tx, {
-        ticketDbId: ticketId,
+    // ✅ 1. Update ticket
+    const updated = await prisma.ticket.update({
+      where: { id: ticketId },
+      data: {
+        assignedTo: { connect: { id: toEmployeeId } },
+        assignedBy: { connect: { id: user.employeeDbId } },
+        lastAssignedAt: new Date(),
+        assignmentNote: comment,
         status: "ASSIGNED",
-        changedBy: user.employeeID ?? user.name ?? "system",
-        changedById: user.employeeDbId ?? null,
-        note: comment,
-      });
-
-      return upd;
+      },
     });
 
+    // ✅ 2. Save assignment history
+    await prisma.ticketAssignmentHistory.create({
+      data: {
+        ticketId,
+        fromEmployeeId: ticket.assignedToId ?? null,
+        toEmployeeId,
+        action: "ASSIGNED",
+        comment,
+        performedById: user.employeeDbId,
+      },
+    });
+
+    // ✅ 3. Save status history
+    await createStatusHistory(prisma, {
+      ticketDbId: ticketId,
+      status: "ASSIGNED",
+      changedBy: user.employeeID ?? user.name ?? "system",
+      changedById: user.employeeDbId ?? null,
+      note: comment,
+    });
+
+    logAction({ entityType: "TICKET", entityId: ticketId, action: "UPDATE", description: `Ticket assigned to employee #${toEmployeeId}`, performedById: user.employeeDbId });
+
+    // Notify assigned employee
+    notify({ type: "TICKET_UPDATE", title: "Ticket Assigned", message: `Ticket ${ticket.ticketId} assigned to you`, recipientIds: [toEmployeeId], ticketId: ticket.id, channel: "BOTH", templateCode: "TICKET_ASSIGNED", templateData: { ticketId: ticket.ticketId, assetName: '', issueType: ticket.issueType || '' } });
+
     res.json(updated);
+    return;
+
   } catch (e: any) {
     res.status(400).json({ message: e.message || "Failed to assign" });
+    return;
   }
 };
-
-
 export const reassignTicket = async (req: any, res: Response) => {
   try {
     const user = mustUser(req);
@@ -872,8 +1055,19 @@ export const closeTicket = async (req: any, res: Response) => {
         note: remarks || null,
       });
 
+      // Auto-update asset status back to ACTIVE
+      await tx.asset.update({
+        where: { id: ticket.assetId },
+        data: { status: 'ACTIVE' },
+      });
+
       return u;
     });
+
+    logAction({ entityType: "TICKET", entityId: ticketId, action: "STATUS_CHANGE", description: `Ticket closed`, performedById: user.employeeDbId });
+
+    // Notify raiser when ticket closed
+    if (ticket.raisedById) notify({ type: "TICKET_UPDATE", title: "Ticket Closed", message: `Ticket ${ticket.ticketId} has been closed`, recipientIds: [ticket.raisedById], ticketId: ticket.id });
 
     res.json(upd);
   } catch (e: any) {
@@ -981,131 +1175,150 @@ export const uploadTicketImage = async (req: any, res: Response) => {
   }
 };
 
-export const requestTicketTransfer = async (req: any, res: Response) => {
-  try {
-    const user = mustUser(req);
-    const ticketId = Number(req.params.id);
+// export const requestTicketTransfer = async (req: any, res: Response) => {
+//   try {
+//     const user = mustUser(req);
+//     const ticketId = Number(req.params.id);
 
-    const { transferType, toDepartmentId, vendorId, comment } = req.body;
+//     const { transferType, toDepartmentId, vendorId, comment, serviceCenterName, expectedReturnDate } = req.body;
 
-    if (!comment) {
-      res.status(400).json({ message: "comment is required" });
-      return;
-    }
+//     if (!comment) {
+//       res.status(400).json({ message: "comment is required" });
+//       return;
+//     }
 
-    const ticket = await prisma.ticket.findUnique({
-      where: { id: ticketId },
-    });
+//     const ticket = await prisma.ticket.findUnique({
+//       where: { id: ticketId },
+//     });
 
-    if (!ticket) {
-      res.status(404).json({ message: "Ticket not found" });
-      return;
-    }
+//     if (!ticket) {
+//       res.status(404).json({ message: "Ticket not found" });
+//       return;
+//     }
 
-    const existingPending = await prisma.ticketTransferHistory.findFirst({
-      where: { ticketId, status: "REQUESTED" },
-      orderBy: { createdAt: "desc" },
-    });
-    if (existingPending) {
-      res.status(400).json({ message: "A transfer request is already pending for this ticket" });
-      return;
-    }
+//     const existingPending = await prisma.ticketTransferHistory.findFirst({
+//       where: { ticketId, status: "REQUESTED" },
+//       orderBy: { createdAt: "desc" },
+//     });
+//     if (existingPending) {
+//       res.status(400).json({ message: "A transfer request is already pending for this ticket" });
+//       return;
+//     }
 
-    if (transferType !== "INTERNAL_DEPARTMENT" && !vendorId) {
-      res.status(400).json({ message: "vendorId required for external transfer" });
-      return;
-    }
+//     // EXTERNAL_VENDOR requires a vendor; EXTERNAL_SERVICE uses serviceCenterName instead
+//     if (transferType === "EXTERNAL_VENDOR" && !vendorId) {
+//       res.status(400).json({ message: "vendorId is required for EXTERNAL_VENDOR transfer" });
+//       return;
+//     }
+//     if (transferType === "EXTERNAL_SERVICE" && !serviceCenterName) {
+//       res.status(400).json({ message: "serviceCenterName is required for EXTERNAL_SERVICE transfer" });
+//       return;
+//     }
 
-    //  Get TARGET HOD
-    let targetHod: any = null;
-    if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
-      targetHod = await prisma.employee.findFirst({
-        where: { departmentId: toDepartmentId, role: "HOD" },
-      });
-    }
+//     //  Get TARGET HOD
+//     let targetHod: any = null;
+//     if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
+//       targetHod = await prisma.employee.findFirst({
+//         where: { departmentId: toDepartmentId, role: "HOD" },
+//       });
+//     }
 
-    // const result = await prisma.$transaction(async (tx) => {
-    //   const transfer = await tx.ticketTransferHistory.create({
-    //     data: {
-    //       ticketId,
-    //       transferType,
-    //       fromDepartmentId: ticket.departmentId,
-    //       toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
-    //       vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
-    //       comment,
-    //       requestedById: user.employeeDbId,
-    //     },
-    //   });
+//     // const result = await prisma.$transaction(async (tx) => {
+//     //   const transfer = await tx.ticketTransferHistory.create({
+//     //     data: {
+//     //       ticketId,
+//     //       transferType,
+//     //       fromDepartmentId: ticket.departmentId,
+//     //       toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+//     //       vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
+//     //       comment,
+//     //       requestedById: user.employeeDbId,
+//     //     },
+//     //   });
 
-    //   // 🔔 Notify target HOD
-    //   if (targetHod?.id) {
-    //     await createNotificationWithRecipients(tx, {
-    //       title: "Ticket Transfer Request",
-    //       message: `Ticket ${ticket.ticketId} transfer requested`,
-    //       ticketId: ticket.id,
-    //       createdById: user.employeeDbId,
-    //       recipients: [targetHod.id],
-    //     });
-    //   }
+//     //   // 🔔 Notify target HOD
+//     //   if (targetHod?.id) {
+//     //     await createNotificationWithRecipients(tx, {
+//     //       title: "Ticket Transfer Request",
+//     //       message: `Ticket ${ticket.ticketId} transfer requested`,
+//     //       ticketId: ticket.id,
+//     //       createdById: user.employeeDbId,
+//     //       recipients: [targetHod.id],
+//     //     });
+//     //   }
 
-    //   return transfer;
-    // });
-    const result = await prisma.$transaction(async (tx) => {
-      const transfer = await tx.ticketTransferHistory.create({
-        data: {
-          ticketId,
-          transferType,
-          fromDepartmentId: ticket.departmentId,
-          toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
-          vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
-          comment,
-          requestedById: user.employeeDbId,
-          status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED", // ✅ auto approve external
-          approvedById: transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId, // ✅
-        },
-      });
+//     //   return transfer;
+//     // });
+//     const result = await prisma.$transaction(async (tx) => {
+//       const transfer = await tx.ticketTransferHistory.create({
+//         data: {
+//           ticketId,
+//           transferType,
+//           fromDepartmentId: ticket.departmentId,
+//           toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+//           vendorId: transferType === "EXTERNAL_VENDOR" ? vendorId : null,
+//           serviceCenterName: transferType === "EXTERNAL_SERVICE" ? (serviceCenterName || null) : null,
+//           expectedReturnDate: transferType === "EXTERNAL_SERVICE" && expectedReturnDate ? new Date(expectedReturnDate) : null,
+//           comment,
+//           requestedById: user.employeeDbId,
+//           status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED",
+//           approvedById: transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId,
+//         } as any,
+//       });
 
-      // ✅ If EXTERNAL, update ticket immediately
-      if (transferType !== "INTERNAL_DEPARTMENT") {
-        const serviceType = await detectServiceType(tx, ticket.assetId);
+//       // ✅ If EXTERNAL, update ticket + asset status immediately
+//       if (transferType !== "INTERNAL_DEPARTMENT") {
+//         const serviceType = await detectServiceType(tx, ticket.assetId);
 
-        await tx.ticket.update({
-          where: { id: ticketId },
-          data: {
-            status: "ON_HOLD",
-            serviceType, // WARRANTY | AMC | CMC | PAID
-            assignmentNote: `Sent to external service (${serviceType})`,
-          },
-        });
+//         await tx.ticket.update({
+//           where: { id: ticketId },
+//           data: {
+//             status: "ON_HOLD",
+//             serviceType,
+//             assignmentNote: `Sent to external service (${serviceType})`,
+//           },
+//         });
 
-        await createStatusHistory(tx, {
-          ticketDbId: ticketId,
-          status: "ON_HOLD",
-          changedBy: user.employeeID ?? user.name ?? "system",
-          changedById: user.employeeDbId,
-          note: `External transfer approved (${serviceType}). ${comment}`,
-        });
-      }
+//         await createStatusHistory(tx, {
+//           ticketDbId: ticketId,
+//           status: "ON_HOLD",
+//           changedBy: user.employeeID ?? user.name ?? "system",
+//           changedById: user.employeeDbId,
+//           note: `External transfer approved (${serviceType}). ${comment}`,
+//         });
 
-      // 🔔 Notify target HOD ONLY for internal
-      if (transferType === "INTERNAL_DEPARTMENT" && targetHod?.id) {
-        await createNotificationWithRecipients(tx, {
-          title: "Ticket Transfer Request",
-          message: `Ticket ${ticket.ticketId} transfer requested`,
-          ticketId: ticket.id,
-          createdById: user.employeeDbId,
-          recipients: [targetHod.id],
-        });
-      }
+//         // Auto-set asset status to UNDER_MAINTENANCE when sent to service center
+//         await tx.asset.update({
+//           where: { id: ticket.assetId },
+//           data: { status: "UNDER_MAINTENANCE" },
+//         });
+//       }
 
-      return transfer;
-    });
+//       // 🔔 Notify target HOD ONLY for internal
+//       if (transferType === "INTERNAL_DEPARTMENT" && targetHod?.id) {
+//         await createNotificationWithRecipients(tx, {
+//           title: "Ticket Transfer Request",
+//           message: `Ticket ${ticket.ticketId} transfer requested`,
+//           ticketId: ticket.id,
+//           createdById: user.employeeDbId,
+//           recipients: [targetHod.id],
+//         });
+//       }
 
-    res.json({ message: "Transfer requested", result });
-  } catch (err) {
-    res.status(500).json({ message: "Failed to request transfer" });
-  }
-};
+//       return transfer;
+//     });
+
+//     res.json({ message: "Transfer requested", result });
+//   }
+//   catch (err: any) {
+//     console.error("requestTicketTransfer error:", err);
+//     res.status(500).json({
+//       message: "Failed to request transfer",
+//       error: err?.message || err,
+//     });
+
+//   }
+// };
 // export const approveTicketTransfer = async (req: any, res: Response) => {
 //   try {
 //     const user = mustUser(req);
@@ -1238,6 +1451,156 @@ export const requestTicketTransfer = async (req: any, res: Response) => {
 //     res.status(500).json({ message: err.message || "Failed to approve transfer" });
 //   }
 // };
+export const requestTicketTransfer = async (req: any, res: Response) => {
+  try {
+    const user = mustUser(req);
+    const ticketId = Number(req.params.id);
+
+    const {
+      transferType,
+      toDepartmentId,
+      vendorId,
+      comment,
+      serviceCenterName,
+      expectedReturnDate,
+    } = req.body;
+
+    if (!comment) {
+      res.status(400).json({ message: "comment is required" });
+      return;
+    }
+
+    const ticket = await prisma.ticket.findUnique({
+      where: { id: ticketId },
+    });
+
+    if (!ticket) {
+      res.status(404).json({ message: "Ticket not found" });
+      return;
+    }
+
+    const existingPending = await prisma.ticketTransferHistory.findFirst({
+      where: { ticketId, status: "REQUESTED" },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (existingPending) {
+      res.status(400).json({
+        message: "A transfer request is already pending for this ticket",
+      });
+      return;
+    }
+
+    if (transferType === "EXTERNAL_VENDOR" && !vendorId) {
+      res.status(400).json({
+        message: "vendorId is required for EXTERNAL_VENDOR transfer",
+      });
+      return;
+    }
+
+    if (transferType === "EXTERNAL_SERVICE" && !serviceCenterName) {
+      res.status(400).json({
+        message: "serviceCenterName is required for EXTERNAL_SERVICE transfer",
+      });
+      return;
+    }
+
+    let targetHod: any = null;
+    if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
+      targetHod = await prisma.employee.findFirst({
+        where: { departmentId: toDepartmentId, role: "HOD" },
+      });
+    }
+
+    const transfer = await prisma.ticketTransferHistory.create({
+      data: {
+        ticketId,
+        transferType,
+        fromDepartmentId: ticket.departmentId,
+        toDepartmentId:
+          transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+        vendorId: transferType === "EXTERNAL_VENDOR" ? vendorId : null,
+        serviceCenterName:
+          transferType === "EXTERNAL_SERVICE" ? serviceCenterName || null : null,
+        expectedReturnDate:
+          transferType === "EXTERNAL_SERVICE" && expectedReturnDate
+            ? new Date(expectedReturnDate)
+            : null,
+        comment,
+        requestedById: user.employeeDbId,
+        status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED",
+        approvedById:
+          transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId,
+      } as any,
+    });
+
+    if (transferType !== "INTERNAL_DEPARTMENT") {
+      const serviceType = await detectServiceType(prisma, ticket.assetId);
+
+      await prisma.ticket.update({
+        where: { id: ticketId },
+        data: {
+          status: "ON_HOLD",
+          serviceType,
+          assignmentNote: `Sent to external service (${serviceType})`,
+        },
+      });
+
+      await createStatusHistory(prisma, {
+        ticketDbId: ticketId,
+        status: "ON_HOLD",
+        changedBy: user.employeeID ?? user.name ?? "system",
+        changedById: user.employeeDbId,
+        note: `External transfer approved (${serviceType}). ${comment}`,
+      });
+
+      await prisma.asset.update({
+        where: { id: ticket.assetId },
+        data: { status: "UNDER_MAINTENANCE" },
+      });
+
+      // Auto-create and auto-approve asset transfer for external ticket transfers
+      const destinationType = transferType === "EXTERNAL_VENDOR" ? "VENDOR" : "SERVICE_CENTER";
+      const destinationName = transferType === "EXTERNAL_VENDOR"
+        ? (await (prisma as any).vendor.findUnique({ where: { id: Number(vendorId) }, select: { name: true } }))?.name ?? null
+        : serviceCenterName ?? null;
+
+      await (prisma as any).assetTransferHistory.create({
+        data: {
+          assetId: ticket.assetId,
+          transferType: "EXTERNAL",
+          externalType: "SERVICE",
+          destinationType,
+          destinationName,
+          temporary: true,
+          expiresAt: expectedReturnDate ? new Date(expectedReturnDate) : null,
+          status: "APPROVED",
+          requestedById: user.employeeDbId,
+          approvedById: user.employeeDbId,
+          transferDate: new Date(),
+        },
+      });
+    }
+
+    if (transferType === "INTERNAL_DEPARTMENT" && targetHod?.id) {
+      await createNotificationWithRecipients(prisma, {
+        title: "Ticket Transfer Request",
+        message: `Ticket ${ticket.ticketId} transfer requested`,
+        ticketId: ticket.id,
+        createdById: user.employeeDbId,
+        recipients: [targetHod.id],
+      });
+    }
+
+    res.json({ message: "Transfer requested", result: transfer });
+  } catch (err: any) {
+    console.error("requestTicketTransfer error:", err);
+    res.status(500).json({
+      message: "Failed to request transfer",
+      error: err?.message || err,
+    });
+  }
+};
 export const approveTicketTransfer = async (req: any, res: Response) => {
   try {
     const user = mustUser(req);
@@ -1305,7 +1668,22 @@ export const approveTicketTransfer = async (req: any, res: Response) => {
       },
     });
 
-    // 5) Assignment history (optional)
+    // 5) Auto-create approved asset transfer for internal department transfer
+    await (prisma as any).assetTransferHistory.create({
+      data: {
+        assetId: oldTicket.assetId,
+        transferType: "INTERNAL",
+        fromDepartmentId: transfer.fromDepartmentId ?? null,
+        toDepartmentId: transfer.toDepartmentId ?? null,
+        temporary: false,
+        status: "APPROVED",
+        requestedById: transfer.requestedById ?? null,
+        approvedById: user.employeeDbId,
+        transferDate: new Date(),
+      },
+    });
+
+    // 6) Assignment history (optional)
     if (targetSupervisor?.id) {
       await prisma.ticketAssignmentHistory.create({
         data: {
@@ -1319,7 +1697,7 @@ export const approveTicketTransfer = async (req: any, res: Response) => {
       });
     }
 
-    // 6) Status history
+    // 7) Status history
     await createStatusHistory(prisma, {
       ticketDbId: ticket.id,
       status: "ASSIGNED",
@@ -1328,7 +1706,7 @@ export const approveTicketTransfer = async (req: any, res: Response) => {
       note: "Ticket transferred and assigned to target department",
     });
 
-    // 7) Notify requester + source HOD + target supervisor
+    // 8) Notify requester + source HOD + target supervisor
     const sourceHod = transfer.fromDepartmentId
       ? await prisma.employee.findFirst({
         where: { departmentId: transfer.fromDepartmentId, role: "HOD" },
@@ -1615,6 +1993,12 @@ export const startWork = async (req: any, res: Response) => {
         note: "Work started",
       });
 
+      // Auto-update asset status to IN_MAINTENANCE
+      await tx.asset.update({
+        where: { id: ticket.assetId },
+        data: { status: 'IN_MAINTENANCE' },
+      });
+
       return u;
     });
 
@@ -1735,8 +2119,17 @@ export const resolveTicket = async (req: any, res: Response) => {
         note: note || "Resolved by HOD after review",
       });
 
+      // Auto-update asset status back to ACTIVE
+      await tx.asset.update({
+        where: { id: ticket.assetId },
+        data: { status: 'ACTIVE' },
+      });
+
       return u;
     });
+
+    // Notify raiser when ticket resolved
+    if (ticket.raisedById) notify({ type: "TICKET_UPDATE", title: "Ticket Resolved", message: `Ticket ${ticket.ticketId} has been resolved`, recipientIds: [ticket.raisedById], ticketId: ticket.id, channel: "BOTH", templateCode: "TICKET_RESOLVED", templateData: { ticketId: ticket.ticketId, resolution: '' } });
 
     res.json(upd);
   } catch (e: any) {
@@ -1779,6 +2172,8 @@ export const completeTicketWork = async (req: any, res: Response) => {
     const user = mustUser(req);
     const ticketId = Number(req.params.id);
     const note = String(req.body.note || "").trim();
+    const rootCause = String(req.body.rootCause || "").trim() || null;
+    const resolutionSummary = String(req.body.resolutionSummary || "").trim() || null;
 
     if (!note) {
       res.status(400).json({ message: "Completion note required" });
@@ -1794,6 +2189,8 @@ export const completeTicketWork = async (req: any, res: Response) => {
         data: {
           status: "WORK_COMPLETED",
           closureRemarks: note,
+          rootCause: rootCause ?? undefined,
+          resolutionSummary: resolutionSummary ?? undefined,
         },
       });
 
@@ -1811,5 +2208,54 @@ export const completeTicketWork = async (req: any, res: Response) => {
     res.json(upd);
   } catch (e: any) {
     res.status(400).json({ message: e.message || "Failed to mark work completed" });
+  }
+};
+
+// POST /api/tickets/:id/collection-note
+// Ticket raiser records that supervisor collected the asset
+export const addCollectionNote = async (req: any, res: Response) => {
+  try {
+    const user = mustUser(req);
+    const ticketId = Number(req.params.id);
+
+    const ticket = await prisma.ticket.findUnique({ where: { id: ticketId } });
+    if (!ticket) {
+      res.status(404).json({ message: "Ticket not found" });
+      return;
+    }
+
+    // Only the raiser can log collection
+    if (ticket.raisedById !== user.employeeDbId) {
+      res.status(403).json({ message: "Only the ticket raiser can log collection" });
+      return;
+    }
+
+    const { collectionNotes, collectionHandoverRemarks, collectedById } = req.body;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const u = await tx.ticket.update({
+        where: { id: ticketId },
+        data: {
+          collectionNotes: collectionNotes ?? null,
+          collectionHandoverRemarks: collectionHandoverRemarks ?? null,
+          collectedAt: new Date(),
+          collectedById: collectedById ? Number(collectedById) : null,
+        } as any,
+      });
+
+      await createStatusHistory(tx, {
+        ticketDbId: ticketId,
+        status: ticket.status,
+        changedBy: user.employeeID ?? user.name ?? "system",
+        changedById: user.employeeDbId,
+        note: collectionNotes || "Asset collection logged by raiser",
+      });
+
+      return u;
+    });
+
+    res.json(updated);
+  } catch (e: any) {
+    res.status(400).json({ message: e.message || "Failed to log collection note" });
   }
 };

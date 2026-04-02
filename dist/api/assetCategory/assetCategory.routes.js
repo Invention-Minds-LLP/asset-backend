@@ -9,5 +9,6 @@ const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = express_1.default.Router();
 router.get("/", authMiddleware_1.authenticateToken, assetCategory_controller_1.getAllCategories);
 router.post("/", authMiddleware_1.authenticateToken, assetCategory_controller_1.createCategory);
+router.put("/:id", authMiddleware_1.authenticateToken, assetCategory_controller_1.updateCategory);
 router.delete("/:id", authMiddleware_1.authenticateToken, assetCategory_controller_1.deleteCategory);
 exports.default = router;

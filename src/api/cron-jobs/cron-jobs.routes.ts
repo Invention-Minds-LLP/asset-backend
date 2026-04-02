@@ -4,6 +4,7 @@ import {
   checkWarrantyExpiry,
   checkInsuranceExpiry,
   checkSLABreach,
+  checkMaintenanceSLABreach,
   checkContractExpiry,
   runAllChecks,
 } from "./cron-jobs.controller";
@@ -13,6 +14,7 @@ const router = express.Router();
 router.post("/warranty-expiry", authenticateToken, checkWarrantyExpiry);
 router.post("/insurance-expiry", authenticateToken, checkInsuranceExpiry);
 router.post("/sla-breach", authenticateToken, checkSLABreach);
+router.post("/maintenance-sla-breach", authenticateToken, checkMaintenanceSLABreach);
 router.post("/contract-expiry", authenticateToken, checkContractExpiry);
 router.post("/run-all", authenticateToken, runAllChecks);
 

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 // ─── Calibration Schedules ─────────────────────────────────────────────────────
 
@@ -34,10 +35,21 @@ export const createCalibrationSchedule = async (req: AuthenticatedRequest, res: 
         notes,
       },
       include: {
-        asset: { select: { assetId: true, assetName: true } },
+        asset: { select: { assetId: true, assetName: true, departmentId: true } },
         vendor: { select: { name: true } },
       },
     });
+
+    // Fire-and-forget: notify department HODs about new calibration schedule
+    getDepartmentHODs((schedule as any).asset?.departmentId).then(hodIds =>
+      notify({
+        type: "CALIBRATION",
+        title: "Calibration Schedule Created",
+        message: `Calibration schedule created for asset ${(schedule as any).asset?.assetName}, next due ${new Date(nextDueAt).toLocaleDateString()}`,
+        recipientIds: hodIds,
+        createdById: (req as any).user?.employeeDbId,
+      })
+    ).catch(() => {});
 
     res.status(201).json(schedule);
   } catch (error) {
@@ -48,8 +60,23 @@ export const createCalibrationSchedule = async (req: AuthenticatedRequest, res: 
 
 export const getAllCalibrationSchedules = async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
     const { assetId, isActive } = req.query;
+
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
+    }
+
     const where: any = {};
+    if (scopedAssetIds) {
+      where.assetId = { in: scopedAssetIds };
+    }
     if (assetId) where.assetId = Number(assetId);
     if (isActive !== undefined) where.isActive = isActive === "true";
 
@@ -217,6 +244,20 @@ export const logCalibrationHistory = async (req: AuthenticatedRequest, res: Resp
           data: { nextDueAt: nextDue, lastCalibratedAt: base },
         });
       }
+    }
+
+    // Fire-and-forget: notify department HODs about calibration record
+    const asset = await prisma.asset.findUnique({ where: { id: Number(assetId) }, select: { assetName: true, departmentId: true } });
+    if (asset) {
+      getDepartmentHODs(asset.departmentId).then(hodIds =>
+        notify({
+          type: "CALIBRATION",
+          title: "Calibration Record Logged",
+          message: `Calibration recorded for asset ${asset.assetName}, result: ${result ?? "NA"}`,
+          recipientIds: hodIds,
+          createdById: req.user?.employeeDbId,
+        })
+      ).catch(() => {});
     }
 
     res.status(201).json(history);

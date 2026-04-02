@@ -20,6 +20,9 @@ router.post("/:ticketId/upload-image", authMiddleware_1.authenticateToken, ticke
 router.get("/:id/assignment-history", authMiddleware_1.authenticateToken, tickets_controller_1.getAssignmentHistory);
 router.post("/:id/assign", authMiddleware_1.authenticateToken, tickets_controller_1.assignTicket);
 router.post("/:id/reassign", authMiddleware_1.authenticateToken, tickets_controller_1.reassignTicket);
+router.patch('/:id/complete-work', authMiddleware_1.authenticateToken, tickets_controller_1.completeTicketWork);
+router.patch('/:id/resolve', authMiddleware_1.authenticateToken, tickets_controller_1.resolveTicket);
+router.post('/:id/collection-note', authMiddleware_1.authenticateToken, tickets_controller_1.addCollectionNote);
 // Terminate / Close
 router.post("/:id/terminate", authMiddleware_1.authenticateToken, tickets_controller_1.terminateTicket);
 router.post("/:id/close", authMiddleware_1.authenticateToken, tickets_controller_1.closeTicket);

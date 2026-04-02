@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.runDepreciationForAsset = exports.calculateDepreciation = exports.updateDepreciation = exports.addDepreciation = void 0;
+exports.getDepreciationLogs = exports.getAllDepreciations = exports.runBatchDepreciation = exports.batchDepreciationPreview = exports.runDepreciationForAsset = exports.calculateDepreciation = exports.updateDepreciation = exports.addDepreciation = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const addDepreciation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b;
@@ -291,3 +291,264 @@ const runDepreciationForAsset = (req, res) => __awaiter(void 0, void 0, void 0, 
     }
 });
 exports.runDepreciationForAsset = runDepreciationForAsset;
+// ─── Batch Depreciation Preview ──────────────────────────────────────────────
+// Shows what would happen if batch depreciation runs, without applying changes
+const batchDepreciationPreview = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e;
+    try {
+        const depreciations = yield prismaClient_1.default.assetDepreciation.findMany({
+            where: { isActive: true },
+            include: { asset: { select: { id: true, assetId: true, assetName: true, purchaseCost: true, estimatedValue: true } } },
+        });
+        const today = new Date();
+        const preview = [];
+        for (const dep of depreciations) {
+            const cost = Number((_b = (_a = dep.asset.purchaseCost) !== null && _a !== void 0 ? _a : dep.asset.estimatedValue) !== null && _b !== void 0 ? _b : 0);
+            const salvage = Number((_c = dep.salvageValue) !== null && _c !== void 0 ? _c : 0);
+            const lifeYears = dep.expectedLifeYears;
+            const rate = Number((_d = dep.depreciationRate) !== null && _d !== void 0 ? _d : 0);
+            const method = dep.depreciationMethod;
+            const last = dep.lastCalculatedAt ? new Date(dep.lastCalculatedAt) : new Date(dep.depreciationStart);
+            let periodEnd;
+            if ((dep.depreciationFrequency || "YEARLY") === "MONTHLY") {
+                periodEnd = new Date(last);
+                periodEnd.setMonth(periodEnd.getMonth() + 1);
+            }
+            else {
+                periodEnd = new Date(last);
+                periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+            }
+            // Skip if period not reached
+            if (periodEnd > today)
+                continue;
+            const prevBook = Number((_e = dep.currentBookValue) !== null && _e !== void 0 ? _e : cost);
+            let depreciationAmount = 0;
+            if (method === "SL") {
+                const annual = (cost - salvage) / lifeYears;
+                depreciationAmount = dep.depreciationFrequency === "MONTHLY" ? annual / 12 : annual;
+            }
+            else if (method === "DB") {
+                const periodRate = dep.depreciationFrequency === "MONTHLY" ? (rate / 100) / 12 : (rate / 100);
+                depreciationAmount = prevBook * periodRate;
+            }
+            const maxAllowed = Math.max(0, prevBook - salvage);
+            depreciationAmount = Math.min(depreciationAmount, maxAllowed);
+            if (depreciationAmount <= 0)
+                continue;
+            const newBook = Number((prevBook - depreciationAmount).toFixed(2));
+            preview.push({
+                assetId: dep.asset.id,
+                assetCode: dep.asset.assetId,
+                assetName: dep.asset.assetName,
+                method,
+                frequency: dep.depreciationFrequency || "YEARLY",
+                previousBookValue: prevBook,
+                depreciationAmount: Number(depreciationAmount.toFixed(2)),
+                newBookValue: newBook,
+                salvageValue: salvage,
+                periodStart: last,
+                periodEnd,
+            });
+        }
+        res.json({
+            message: `${preview.length} assets eligible for depreciation`,
+            totalDepreciation: Number(preview.reduce((sum, p) => sum + p.depreciationAmount, 0).toFixed(2)),
+            preview,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to generate preview" });
+    }
+});
+exports.batchDepreciationPreview = batchDepreciationPreview;
+// ─── Batch Depreciation Run (all eligible assets) ────────────────────────────
+const runBatchDepreciation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f;
+    try {
+        if (!req.user) {
+            res.status(401).json({ message: "Unauthorized" });
+            return;
+        }
+        const employeeId = req.user.employeeDbId;
+        const depreciations = yield prismaClient_1.default.assetDepreciation.findMany({
+            where: { isActive: true },
+            include: { asset: { select: { id: true, assetId: true, assetName: true, purchaseCost: true, estimatedValue: true } } },
+        });
+        const today = new Date();
+        const results = [];
+        const errors = [];
+        for (const dep of depreciations) {
+            try {
+                const cost = Number((_b = (_a = dep.asset.purchaseCost) !== null && _a !== void 0 ? _a : dep.asset.estimatedValue) !== null && _b !== void 0 ? _b : 0);
+                const salvage = Number((_c = dep.salvageValue) !== null && _c !== void 0 ? _c : 0);
+                const lifeYears = dep.expectedLifeYears;
+                const rate = Number((_d = dep.depreciationRate) !== null && _d !== void 0 ? _d : 0);
+                const method = dep.depreciationMethod;
+                const last = dep.lastCalculatedAt ? new Date(dep.lastCalculatedAt) : new Date(dep.depreciationStart);
+                let periodEnd;
+                if ((dep.depreciationFrequency || "YEARLY") === "MONTHLY") {
+                    periodEnd = new Date(last);
+                    periodEnd.setMonth(periodEnd.getMonth() + 1);
+                }
+                else {
+                    periodEnd = new Date(last);
+                    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+                }
+                if (periodEnd > today)
+                    continue;
+                const prevBook = Number((_e = dep.currentBookValue) !== null && _e !== void 0 ? _e : cost);
+                const prevAccum = Number((_f = dep.accumulatedDepreciation) !== null && _f !== void 0 ? _f : 0);
+                let depreciationAmount = 0;
+                if (method === "SL") {
+                    const annual = (cost - salvage) / lifeYears;
+                    depreciationAmount = dep.depreciationFrequency === "MONTHLY" ? annual / 12 : annual;
+                }
+                else if (method === "DB") {
+                    const periodRate = dep.depreciationFrequency === "MONTHLY" ? (rate / 100) / 12 : (rate / 100);
+                    depreciationAmount = prevBook * periodRate;
+                }
+                else {
+                    continue;
+                }
+                const maxAllowed = Math.max(0, prevBook - salvage);
+                depreciationAmount = Math.min(depreciationAmount, maxAllowed);
+                if (depreciationAmount <= 0)
+                    continue;
+                const newBook = Number((prevBook - depreciationAmount).toFixed(2));
+                const newAccum = Number((prevAccum + depreciationAmount).toFixed(2));
+                yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+                    yield tx.depreciationLog.create({
+                        data: {
+                            assetId: dep.asset.id,
+                            periodStart: last,
+                            periodEnd,
+                            depreciationAmount: String(depreciationAmount.toFixed(2)),
+                            bookValueAfter: String(newBook.toFixed(2)),
+                            doneById: employeeId,
+                            reason: "BATCH_RUN",
+                        },
+                    });
+                    yield tx.assetDepreciation.update({
+                        where: { id: dep.id },
+                        data: {
+                            accumulatedDepreciation: String(newAccum.toFixed(2)),
+                            currentBookValue: String(newBook.toFixed(2)),
+                            lastCalculatedAt: periodEnd,
+                            updatedById: employeeId,
+                        },
+                    });
+                }));
+                results.push({
+                    assetId: dep.asset.assetId,
+                    assetName: dep.asset.assetName,
+                    depreciationAmount: Number(depreciationAmount.toFixed(2)),
+                    newBookValue: newBook,
+                });
+            }
+            catch (assetErr) {
+                errors.push({ assetId: dep.asset.assetId, error: assetErr.message });
+            }
+        }
+        res.json({
+            message: `Batch depreciation completed. ${results.length} assets processed.`,
+            totalDepreciation: Number(results.reduce((sum, r) => sum + r.depreciationAmount, 0).toFixed(2)),
+            processed: results.length,
+            errors: errors.length,
+            results,
+            errorDetails: errors,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to run batch depreciation" });
+    }
+});
+exports.runBatchDepreciation = runBatchDepreciation;
+// ─── Get All Depreciations (standalone page) ─────────────────────────────────
+const getAllDepreciations = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { method, frequency, page = "1", limit = "25", search, exportCsv } = req.query;
+        const where = {};
+        if (method)
+            where.depreciationMethod = String(method);
+        if (frequency)
+            where.depreciationFrequency = String(frequency);
+        if (search) {
+            where.asset = {
+                OR: [
+                    { assetId: { contains: String(search) } },
+                    { assetName: { contains: String(search) } },
+                ],
+            };
+        }
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, depreciations] = yield Promise.all([
+            prismaClient_1.default.assetDepreciation.count({ where }),
+            prismaClient_1.default.assetDepreciation.findMany(Object.assign({ where, include: {
+                    asset: { select: { id: true, assetId: true, assetName: true, purchaseCost: true, estimatedValue: true, status: true } },
+                }, orderBy: { createdAt: "desc" } }, (exportCsv !== "true" ? { skip, take } : {}))),
+        ]);
+        if (exportCsv === "true") {
+            const csvRows = depreciations.map((d) => {
+                var _a, _b;
+                return ({
+                    AssetId: ((_a = d.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = d.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    Method: d.depreciationMethod,
+                    Rate: Number(d.depreciationRate),
+                    LifeYears: d.expectedLifeYears,
+                    SalvageValue: d.salvageValue ? Number(d.salvageValue) : "",
+                    AccumulatedDepreciation: d.accumulatedDepreciation ? Number(d.accumulatedDepreciation) : "",
+                    CurrentBookValue: d.currentBookValue ? Number(d.currentBookValue) : "",
+                    Frequency: d.depreciationFrequency || "",
+                    LastCalculated: d.lastCalculatedAt ? new Date(d.lastCalculatedAt).toISOString().split("T")[0] : "",
+                    IsActive: d.isActive ? "Yes" : "No",
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=depreciations.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
+        res.json({ data: depreciations, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch depreciations" });
+    }
+});
+exports.getAllDepreciations = getAllDepreciations;
+// ─── Get Depreciation Logs ───────────────────────────────────────────────────
+const getDepreciationLogs = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { assetId, page = "1", limit = "25" } = req.query;
+        const where = {};
+        if (assetId)
+            where.assetId = Number(assetId);
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, logs] = yield Promise.all([
+            prismaClient_1.default.depreciationLog.count({ where }),
+            prismaClient_1.default.depreciationLog.findMany({
+                where,
+                include: {
+                    asset: { select: { assetId: true, assetName: true } },
+                    doneBy: { select: { name: true, employeeID: true } },
+                },
+                orderBy: { createdAt: "desc" },
+                skip,
+                take,
+            }),
+        ]);
+        res.json({ data: logs, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch depreciation logs" });
+    }
+});
+exports.getDepreciationLogs = getDepreciationLogs;

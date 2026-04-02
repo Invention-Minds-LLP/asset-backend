@@ -1,6 +1,8 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { Prisma } from "@prisma/client";
+import { logAction } from "../audit-trail/audit-trail.controller";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 /** =========================
  * Helpers
@@ -65,27 +67,54 @@ export const createSchedule = async (req: any, res: Response) => {
             assetId,
             frequencyValue,
             frequencyUnit,
+            startDate,
             nextDueAt,
             reminderDays,
             reason,
+            description,
         } = req.body;
 
-        if (!assetId || !frequencyValue || !frequencyUnit || !nextDueAt) {
-             res.status(400).json({ message: "Missing required fields" });
+        if (!assetId || !frequencyValue || !frequencyUnit) {
+             res.status(400).json({ message: "assetId, frequencyValue, and frequencyUnit are required" });
              return;
+        }
+
+        // Calculate nextDueAt: if startDate given, first due = startDate + frequency
+        // If nextDueAt given explicitly, use that instead
+        let computedNextDueAt: Date;
+        if (nextDueAt) {
+            computedNextDueAt = new Date(nextDueAt);
+        } else if (startDate) {
+            const start = new Date(startDate);
+            computedNextDueAt = new Date(start);
+            if (frequencyUnit === "DAYS") computedNextDueAt.setDate(start.getDate() + Number(frequencyValue));
+            else if (frequencyUnit === "MONTHS") computedNextDueAt.setMonth(start.getMonth() + Number(frequencyValue));
+            else if (frequencyUnit === "YEARS") computedNextDueAt.setFullYear(start.getFullYear() + Number(frequencyValue));
+            else computedNextDueAt.setDate(start.getDate() + Number(frequencyValue));
+        } else {
+            // Default: first due date = today + frequency
+            computedNextDueAt = new Date();
+            if (frequencyUnit === "DAYS") computedNextDueAt.setDate(computedNextDueAt.getDate() + Number(frequencyValue));
+            else if (frequencyUnit === "MONTHS") computedNextDueAt.setMonth(computedNextDueAt.getMonth() + Number(frequencyValue));
+            else if (frequencyUnit === "YEARS") computedNextDueAt.setFullYear(computedNextDueAt.getFullYear() + Number(frequencyValue));
         }
 
         const schedule = await prisma.maintenanceSchedule.create({
             data: {
-                assetId,
-                frequencyValue,
+                assetId: Number(assetId),
+                frequencyValue: Number(frequencyValue),
                 frequencyUnit,
-                nextDueAt: new Date(nextDueAt),
-                reminderDays,
-                reason,
+                startDate: startDate ? new Date(startDate) : new Date(),
+                nextDueAt: computedNextDueAt,
+                reminderDays: reminderDays ? Number(reminderDays) : 7,
+                reason: reason || null,
+                description: description || null,
                 createdBy: user.employeeID,
+                createdById: user.employeeDbId,
             },
         });
+
+        logAction({ entityType: "MAINTENANCE_SCHEDULE", entityId: schedule.id, action: "CREATE", description: `PM schedule created for asset #${assetId} (every ${frequencyValue} ${frequencyUnit})`, performedById: user.employeeDbId });
 
         res.status(201).json(schedule);
     } catch (e: any) {
@@ -97,7 +126,25 @@ export const createSchedule = async (req: any, res: Response) => {
  * 2. Get All Schedules
  * ========================= */
 export const getAllSchedules = async (_req: Request, res: Response) => {
+    const user = (_req as any).user;
+
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
+    }
+
+    const where: any = {};
+    if (scopedAssetIds) {
+      where.assetId = { in: scopedAssetIds };
+    }
+
     const data = await prisma.maintenanceSchedule.findMany({
+        where,
         include: { asset: true },
         orderBy: { nextDueAt: "asc" },
     });
@@ -277,6 +324,14 @@ export const executeMaintenance = async (req: any, res: Response) => {
       return history; // ✅ FIXED
     });
 
+    logAction({ entityType: "MAINTENANCE_SCHEDULE", entityId: result.id, action: "UPDATE", description: `Maintenance executed for asset #${assetId}${scheduleId ? `, schedule #${scheduleId}` : ""}`, performedById: user.employeeDbId });
+
+    // Notify HOD about maintenance completion via SSE + helper
+    if (asset.departmentId) {
+      const hodIds = await getDepartmentHODs(asset.departmentId);
+      notify({ type: "PM_DUE", title: "Maintenance Completed", message: `Preventive maintenance completed for asset ${asset.assetName}`, recipientIds: hodIds, assetId: asset.id, createdById: user.employeeDbId });
+    }
+
     res.json(result);
   } catch (e: any) {
     console.error("executeMaintenance error:", e);
@@ -324,9 +379,20 @@ export const getServiceContract = async (req: Request, res: Response) => {
  * ========================= */
 export const getCalendarView = async (req: Request, res: Response) => {
     try {
+        const user = (req as any).user;
         const { month, year } = req.query;
         const m = Number(month) || new Date().getMonth() + 1;
         const y = Number(year) || new Date().getFullYear();
+
+        // Department scoping: non-admin sees only their department's assets
+        let scopedAssetIds: number[] | undefined;
+        if (user?.role !== "ADMIN" && user?.departmentId) {
+          const deptAssets = await prisma.asset.findMany({
+            where: { departmentId: Number(user.departmentId) },
+            select: { id: true },
+          });
+          scopedAssetIds = deptAssets.map(a => a.id);
+        }
 
         const startDate = new Date(y, m - 1, 1);
         const endDate = new Date(y, m, 0, 23, 59, 59);
@@ -335,6 +401,7 @@ export const getCalendarView = async (req: Request, res: Response) => {
             where: {
                 nextDueAt: { gte: startDate, lte: endDate },
                 isActive: true,
+                ...(scopedAssetIds ? { assetId: { in: scopedAssetIds } } : {}),
             },
             include: {
                 asset: {
@@ -416,6 +483,8 @@ export const rescheduleMaintenance = async (req: any, res: Response) => {
             },
         });
 
+        logAction({ entityType: "MAINTENANCE_SCHEDULE", entityId: id, action: "UPDATE", description: `PM schedule #${id} rescheduled to ${newDueDate}`, performedById: user.employeeDbId });
+
         res.json(updated);
     } catch (e: any) {
         res.status(500).json({ message: e.message });
@@ -454,9 +523,23 @@ export const updateSchedule = async (req: any, res: Response) => {
  * ========================= */
 export const getAllMaintenanceHistory = async (req: Request, res: Response) => {
     try {
+        const user = (req as any).user;
         const { assetId, serviceType, page = "1", limit = "25", search, exportCsv } = req.query;
 
+        // Department scoping: non-admin sees only their department's assets
+        let scopedAssetIds: number[] | undefined;
+        if (user?.role !== "ADMIN" && user?.departmentId) {
+          const deptAssets = await prisma.asset.findMany({
+            where: { departmentId: Number(user.departmentId) },
+            select: { id: true },
+          });
+          scopedAssetIds = deptAssets.map(a => a.id);
+        }
+
         const where: any = {};
+        if (scopedAssetIds) {
+          where.assetId = { in: scopedAssetIds };
+        }
         if (assetId) where.assetId = Number(assetId);
         if (serviceType) where.serviceType = String(serviceType);
         if (search) {

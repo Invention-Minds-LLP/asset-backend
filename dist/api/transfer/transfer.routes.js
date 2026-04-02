@@ -5,10 +5,21 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const authMiddleware_1 = require("../../middleware/authMiddleware");
-const router = express_1.default.Router();
+const multer_1 = __importDefault(require("multer"));
+const upload = (0, multer_1.default)({ dest: "uploads/" });
 const transfer_controller_1 = require("./transfer.controller");
-router.post("/assets/transfer", authMiddleware_1.authenticateToken, transfer_controller_1.transferAsset);
+const router = express_1.default.Router();
+router.post("/assets/transfer/request", authMiddleware_1.authenticateToken, transfer_controller_1.requestAssetTransfer);
+router.post("/assets/transfer/:id/management-approve", authMiddleware_1.authenticateToken, transfer_controller_1.managementApproveTransfer);
+router.post("/assets/transfer/:id/approve", authMiddleware_1.authenticateToken, transfer_controller_1.approveAssetTransfer);
+router.post("/assets/transfer/:id/reject", authMiddleware_1.authenticateToken, transfer_controller_1.rejectAssetTransfer);
+router.post("/assets/transfer/:id/return", authMiddleware_1.authenticateToken, transfer_controller_1.requestTransferredAssetReturn);
 router.get("/assets/:assetId/transfer-history", authMiddleware_1.authenticateToken, transfer_controller_1.getTransferHistory);
-// CRON or manual trigger
-// router.post("/assets/transfer/auto-expire", authenticateToken, autoExpireTransfers);
+router.get("/assets/transfer/pending", authMiddleware_1.authenticateToken, transfer_controller_1.getPendingTransferRequests);
+router.get("/assets/transfer/my-pending-approvals", authMiddleware_1.authenticateToken, transfer_controller_1.getMyPendingTransferApprovals);
+router.get("/assets/transfer/pending-mgmt-approvals", authMiddleware_1.authenticateToken, transfer_controller_1.getPendingMgmtApprovals);
+router.post("/assets/transfer/:id/return", authMiddleware_1.authenticateToken, transfer_controller_1.requestTransferredAssetReturn);
+router.post("/assets/transfer/:id/approve-return", authMiddleware_1.authenticateToken, transfer_controller_1.approveTransferredAssetReturn);
+router.get("/assets/transfer/:id/return-checklist", authMiddleware_1.authenticateToken, transfer_controller_1.getTransferredAssetReturnChecklist);
+router.post("/assets/transfer/:id/complete-return", authMiddleware_1.authenticateToken, upload.single("photo"), transfer_controller_1.completeTransferredAssetReturn);
 exports.default = router;

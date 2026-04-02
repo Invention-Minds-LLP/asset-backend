@@ -20,44 +20,64 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       assetWhere = { supervisorId: Number(employeeDbId) };
     }
 
+    // Get asset IDs for department-scoped queries on related models
+    let scopedAssetIds: number[] | null = null; // null = no filter (ADMIN sees all)
+    if (Object.keys(assetWhere).length > 0) {
+      const scopedAssets = await prisma.asset.findMany({
+        where: assetWhere,
+        select: { id: true },
+      });
+      scopedAssetIds = scopedAssets.map(a => a.id);
+    }
+
+    // Build where clauses for related models (scoped by department's assets)
+    const warrantyWhere = scopedAssetIds ? { assetId: { in: scopedAssetIds } } : {};
+    const contractWhere = scopedAssetIds ? { assetId: { in: scopedAssetIds } } : {};
+    const calibrationWhere = scopedAssetIds ? { assetId: { in: scopedAssetIds } } : {};
+    const pmWhere = scopedAssetIds ? { assetId: { in: scopedAssetIds } } : {};
+
     const [
       totalAssets,
       activeAssets,
+      inStoreAssets,
+      inMaintenanceAssets,
       retiredAssets,
+      disposedAssets,
       openTickets,
       inProgressTickets,
       resolvedTickets,
       pendingAssignments,
       expiredWarranties,
-      activeInsurances,
+      expiredContracts,
       activeContracts,
-      lowStockParts,
       dueCalibrations,
       duePMSchedules,
       totalVendors,
       totalEmployees,
       totalDepartments,
-      slaBreachedAssets,
       slaBreachedTickets,
     ] = await Promise.all([
       prisma.asset.count({ where: assetWhere }),
       prisma.asset.count({ where: { ...assetWhere, status: "ACTIVE" } }),
+      prisma.asset.count({ where: { ...assetWhere, status: "IN_STORE" } }),
+      prisma.asset.count({ where: { ...assetWhere, status: "IN_MAINTENANCE" } }),
       prisma.asset.count({ where: { ...assetWhere, status: "RETIRED" } }),
+      prisma.asset.count({ where: { ...assetWhere, status: { in: ["DISPOSED", "SCRAPPED"] } } }),
       prisma.ticket.count({ where: { ...ticketWhere, status: "OPEN" } }),
       prisma.ticket.count({ where: { ...ticketWhere, status: "IN_PROGRESS" } }),
       prisma.ticket.count({ where: { ...ticketWhere, status: "RESOLVED" } }),
-      prisma.assetAssignment.count({ where: { status: "PENDING", isActive: true } }),
-      prisma.warranty.count({ where: { isUnderWarranty: false, isActive: true } }),
-      prisma.assetInsurance.count({ where: { isActive: true } }),
-      prisma.serviceContract.count({ where: { status: "ACTIVE" } }),
-      prisma.sparePart.count({ where: { stockQuantity: { lte: prisma.sparePart.fields.reorderLevel as any } } }).catch(() => 0),
-      prisma.calibrationSchedule.count({ where: { nextDueAt: { lte: new Date() }, isActive: true } }),
-      prisma.maintenanceSchedule.count({ where: { nextDueAt: { lte: new Date() }, isActive: true } }),
+      scopedAssetIds
+        ? prisma.assetAssignment.count({ where: { status: "PENDING", isActive: true, asset: { id: { in: scopedAssetIds } } } })
+        : prisma.assetAssignment.count({ where: { status: "PENDING", isActive: true } }),
+      prisma.warranty.count({ where: { ...warrantyWhere, isUnderWarranty: false, isActive: true } }),
+      prisma.serviceContract.count({ where: { ...contractWhere, status: "EXPIRED" } }),
+      prisma.serviceContract.count({ where: { ...contractWhere, status: "ACTIVE" } }),
+      prisma.calibrationSchedule.count({ where: { ...calibrationWhere, nextDueAt: { lte: new Date() }, isActive: true } }),
+      prisma.maintenanceSchedule.count({ where: { ...pmWhere, nextDueAt: { lte: new Date() }, isActive: true } }),
       prisma.vendor.count(),
       prisma.employee.count(),
       prisma.department.count(),
-      prisma.asset.count({ where: { ...assetWhere, slaBreached: true } }),
-      prisma.ticket.count({ where: { ...ticketWhere, slaBreached: true } }),
+      prisma.ticket.count({ where: { ...ticketWhere, slaBreached: true, status: { notIn: ["CLOSED", "RESOLVED"] } } }),
     ]);
 
     // Ticket status breakdown
@@ -83,19 +103,20 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       count: row._count.id,
     }));
 
-    // Recent tickets
+    // Recent tickets (configurable limit)
+    const recentLimit = Math.min(Number(req.query.recentLimit) || 5, 25);
     const recentTickets = await prisma.ticket.findMany({
       where: ticketWhere,
       orderBy: { createdAt: "desc" },
-      take: 5,
+      take: recentLimit,
       include: { asset: { select: { assetName: true, assetId: true } }, department: { select: { name: true } } },
     });
 
-    // Recent assets
+    // Recent assets (configurable limit)
     const recentAssets = await prisma.asset.findMany({
       where: assetWhere,
       orderBy: { createdAt: "desc" },
-      take: 5,
+      take: recentLimit,
       include: { assetCategory: { select: { name: true } }, department: { select: { name: true } } },
     });
 
@@ -103,21 +124,22 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       summary: {
         totalAssets,
         activeAssets,
+        inStoreAssets,
+        inMaintenanceAssets,
         retiredAssets,
+        disposedAssets,
         openTickets,
         inProgressTickets,
         resolvedTickets,
         pendingAssignments,
         expiredWarranties,
-        activeInsurances,
+        expiredContracts,
         activeContracts,
-        lowStockParts,
         dueCalibrations,
         duePMSchedules,
         totalVendors,
         totalEmployees,
         totalDepartments,
-        slaBreachedAssets,
         slaBreachedTickets,
       },
       ticketStatusBreakdown: ticketStatusBreakdown.map((t) => ({

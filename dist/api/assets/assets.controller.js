@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAssetScanDetails = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.createAsset = exports.getAssetById = exports.getAllAssets = void 0;
+exports.getAssetScanDetails = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.hodApproveAsset = exports.createAsset = exports.getAssetById = exports.getAllAssets = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
@@ -39,7 +39,7 @@ const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* (
         const employeeDbId = (user === null || user === void 0 ? void 0 : user.employeeDbId) || (user === null || user === void 0 ? void 0 : user.employeeId) || (user === null || user === void 0 ? void 0 : user.id);
         console.log(user);
         let where = {};
-        if (role === 'ADMIN') {
+        if (role === 'ADMIN' || departmentId === 5) {
             where = {};
         }
         else if (role === 'HOD') {
@@ -139,45 +139,53 @@ exports.getAssetById = getAssetById;
 //     res.status(201).json(asset);
 // };
 const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
     try {
-        // if (req.user.role !== "store_user" && req.user.role !== "superadmin") {
-        //   res.status(403).json({ message: "Only store users can create assets" });
-        //   return
-        // }
-        // Financial Year ID (AST-FY2025-26-001)
-        const now = new Date();
-        const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-        const fyEnd = fyStart + 1;
-        const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-        const latest = yield prismaClient_1.default.asset.findFirst({
-            where: {
-                assetId: { startsWith: `AST-${fyStr}` },
-                parentAssetId: null
-            },
-            orderBy: { id: "desc" }
-        });
-        console.log(latest);
-        let next = 1;
-        if (latest) {
-            next = parseInt(latest.assetId.split("-")[3], 10) + 1;
-        }
-        const assetId = `AST-${fyStr}-${next.toString().padStart(3, "0")}`;
         const data = req.body;
+        // ── 7-year lifetime guard ────────────────────────────────────────────────
+        if (data.expectedLifetime && data.expectedLifetimeUnit) {
+            let lifetimeYears = Number(data.expectedLifetime);
+            if (data.expectedLifetimeUnit === "MONTHS")
+                lifetimeYears = lifetimeYears / 12;
+            if (lifetimeYears > 7) {
+                res.status(400).json({ message: "Asset expected lifetime cannot exceed 7 years as per hospital policy." });
+                return;
+            }
+        }
+        // ── Temp Asset ID — real ID issued when HOD acknowledges the assignment ──
+        const newAssetId = `TEMP-${Date.now()}`;
+        // Auto-assign supervisor for department
+        let supervisorId = null;
+        if (data.departmentId) {
+            const supervisor = yield prismaClient_1.default.employee.findFirst({
+                where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
+            });
+            supervisorId = (_a = supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) !== null && _a !== void 0 ? _a : null;
+        }
+        // For DONATION / LEASE / RENTAL, inspection checklist must be completed first
+        const requiresInspection = ["DONATION", "LEASE", "RENTAL"].includes(data.modeOfProcurement || "PURCHASE");
+        if (requiresInspection) {
+            if (!data.physicalInspectionStatus) {
+                res.status(400).json({ message: "Physical inspection status is required for Donation, Lease, and Rental assets." });
+                return;
+            }
+            if (!data.functionalInspectionStatus) {
+                res.status(400).json({ message: "Functional inspection status is required for Donation, Lease, and Rental assets." });
+                return;
+            }
+        }
         const asset = yield prismaClient_1.default.asset.create({
             data: {
-                assetId,
+                assetId: newAssetId,
                 assetName: data.assetName,
                 assetType: data.assetType,
                 assetCategoryId: data.assetCategoryId,
-                // rfidCode: data.rfidCode ?? null,
-                rfidCode: data.rfidCode && String(data.rfidCode).trim() !== ""
-                    ? String(data.rfidCode).trim()
-                    : null,
+                rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
                 referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
                 serialNumber: data.serialNumber,
-                assetPhoto: (_a = data.assetPhoto) !== null && _a !== void 0 ? _a : null,
-                modeOfProcurement: data.modeOfProcurement,
+                assetPhoto: (_b = data.assetPhoto) !== null && _b !== void 0 ? _b : null,
+                modeOfProcurement: (_c = data.modeOfProcurement) !== null && _c !== void 0 ? _c : "PURCHASE",
+                serviceCoverageType: (_d = data.serviceCoverageType) !== null && _d !== void 0 ? _d : null,
                 // PURCHASE
                 invoiceNumber: data.invoiceNumber,
                 purchaseOrderNo: data.purchaseOrderNo,
@@ -203,14 +211,25 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 rentalEndDate: data.rentalEndDate ? new Date(data.rentalEndDate) : null,
                 rentalAmount: data.rentalAmount,
                 rentalAgreementDoc: data.rentalAgreementDoc,
+                // Inspection (for Donation / Lease / Rental)
+                inspectionDoneBy: (_e = data.inspectionDoneBy) !== null && _e !== void 0 ? _e : null,
+                inspectionCondition: (_f = data.inspectionCondition) !== null && _f !== void 0 ? _f : null,
+                inspectionRemark: (_g = data.inspectionRemark) !== null && _g !== void 0 ? _g : null,
+                physicalInspectionStatus: (_h = data.physicalInspectionStatus) !== null && _h !== void 0 ? _h : null,
+                physicalInspectionDate: data.physicalInspectionDate ? new Date(data.physicalInspectionDate) : null,
+                functionalInspectionStatus: (_j = data.functionalInspectionStatus) !== null && _j !== void 0 ? _j : null,
+                functionalInspectionDate: data.functionalInspectionDate ? new Date(data.functionalInspectionDate) : null,
+                functionalTestNotes: (_k = data.functionalTestNotes) !== null && _k !== void 0 ? _k : null,
                 // GRN
                 grnNumber: data.grnNumber,
                 grnDate: data.grnDate ? new Date(data.grnDate) : null,
                 grnValue: data.grnValue,
                 inspectionStatus: data.inspectionStatus,
-                inspectionRemarks: data.inspectionRemarks,
                 departmentId: data.departmentId ? Number(data.departmentId) : null,
-                status: "PENDING_COMPLETION"
+                supervisorId: supervisorId,
+                expectedLifetime: data.expectedLifetime ? Number(data.expectedLifetime) : null,
+                expectedLifetimeUnit: (_l = data.expectedLifetimeUnit) !== null && _l !== void 0 ? _l : null,
+                status: "IN_STORE",
             }
         });
         res.status(201).json(asset);
@@ -222,6 +241,79 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
     }
 });
 exports.createAsset = createAsset;
+// ── HOD Approve / Reject Asset (issues the real Asset ID on approval) ─────────
+const hodApproveAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c;
+    try {
+        const id = Number(req.params.id);
+        const { action, remarks } = req.body; // action: APPROVED | REJECTED
+        const user = req.user;
+        const asset = yield prismaClient_1.default.asset.findUnique({ where: { id } });
+        if (!asset) {
+            res.status(404).json({ message: "Asset not found" });
+            return;
+        }
+        if (asset.hodApprovalStatus !== "PENDING") {
+            res.status(400).json({ message: "Asset is not pending HOD approval" });
+            return;
+        }
+        if (action === "APPROVED") {
+            // Now generate the real Asset ID
+            const now = new Date();
+            const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+            const fyEnd = fyStart + 1;
+            const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
+            const latest = yield prismaClient_1.default.asset.findFirst({
+                where: { assetId: { startsWith: `AST-${fyStr}` }, parentAssetId: null },
+                orderBy: { id: "desc" }
+            });
+            let next = 1;
+            if (latest && !latest.assetId.startsWith("TEMP-")) {
+                next = parseInt(latest.assetId.split("-")[3], 10) + 1;
+            }
+            const newAssetId = `AST-${fyStr}-${next.toString().padStart(3, "0")}`;
+            // Auto-assign supervisor for location
+            let supervisorId = asset.supervisorId;
+            if (!supervisorId && asset.departmentId) {
+                const supervisor = yield prismaClient_1.default.employee.findFirst({
+                    where: { departmentId: asset.departmentId, role: "SUPERVISOR" }
+                });
+                supervisorId = (_a = supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) !== null && _a !== void 0 ? _a : null;
+            }
+            const updated = yield prismaClient_1.default.asset.update({
+                where: { id },
+                data: {
+                    assetId: newAssetId,
+                    hodApprovalStatus: "APPROVED",
+                    hodApprovalById: (_b = user === null || user === void 0 ? void 0 : user.employeeDbId) !== null && _b !== void 0 ? _b : null,
+                    hodApprovalAt: new Date(),
+                    hodApprovalRemarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                    supervisorId,
+                    status: "IN_STORE",
+                }
+            });
+            res.json({ message: "Asset approved and Asset ID issued", asset: updated });
+        }
+        else {
+            const updated = yield prismaClient_1.default.asset.update({
+                where: { id },
+                data: {
+                    hodApprovalStatus: "REJECTED",
+                    hodApprovalById: (_c = user === null || user === void 0 ? void 0 : user.employeeDbId) !== null && _c !== void 0 ? _c : null,
+                    hodApprovalAt: new Date(),
+                    hodApprovalRemarks: remarks !== null && remarks !== void 0 ? remarks : null,
+                    status: "REJECTED",
+                }
+            });
+            res.json({ message: "Asset rejected", asset: updated });
+        }
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to process HOD approval" });
+    }
+});
+exports.hodApproveAsset = hodApproveAsset;
 // export const completeAssetDetails = async (req: AuthenticatedRequest, res: Response) => {
 //   try {
 //     if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
@@ -366,6 +458,8 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             // SLA
             slaExpectedValue: data.slaExpectedValue ? Number(data.slaExpectedValue) : null,
             slaExpectedUnit: data.slaExpectedUnit || null,
+            slaResolutionValue: data.slaResolutionValue ? Number(data.slaResolutionValue) : null,
+            slaResolutionUnit: data.slaResolutionUnit || null,
             // slaDetails: data.slaDetails,
             status: data.status,
         };
@@ -722,7 +816,7 @@ const getAssetScanDetails = (req, res) => __awaiter(void 0, void 0, void 0, func
                 employee: true,
                 // core details
                 depreciation: true,
-                warranty: {
+                warranties: {
                     include: {
                         vendor: true
                     }
@@ -1083,6 +1177,8 @@ const getAssetScanDetails = (req, res) => __awaiter(void 0, void 0, void 0, func
                 lastInspectionDate: asset.lastInspectionDate,
                 slaExpectedValue: asset.slaExpectedValue,
                 slaExpectedUnit: asset.slaExpectedUnit,
+                slaResolutionValue: asset.slaResolutionValue,
+                slaResolutionUnit: asset.slaResolutionUnit,
                 slaNextDueAt: asset.slaNextDueAt,
                 slaBreached: asset.slaBreached,
                 lastSlaServiceDate: asset.lastSlaServiceDate,
@@ -1133,7 +1229,7 @@ const getAssetScanDetails = (req, res) => __awaiter(void 0, void 0, void 0, func
             specifications: asset.specifications,
             depreciation: asset.depreciation,
             depreciationLogs: asset.depreciationLogs,
-            warranty: asset.warranty,
+            warranty: asset.warranties,
             insurance: asset.insurance,
             insuranceClaims: asset.insuranceClaims,
             currentLocations: asset.locations,

@@ -300,6 +300,7 @@ export const runAllChecks = async (req: Request, res: Response) => {
     try { results.warranty = await checkWarrantyExpiryInternal(); } catch (e) { results.warranty = { error: true }; }
     try { results.insurance = await checkInsuranceExpiryInternal(); } catch (e) { results.insurance = { error: true }; }
     try { results.sla = await checkSLABreachInternal(); } catch (e) { results.sla = { error: true }; }
+    try { results.maintenanceSla = await checkMaintenanceSLABreachInternal(); } catch (e) { results.maintenanceSla = { error: true }; }
     try { results.contract = await checkContractExpiryInternal(); } catch (e) { results.contract = { error: true }; }
 
     res.json({ message: "All checks completed", results });
@@ -341,6 +342,68 @@ async function checkSLABreachInternal() {
 
   return { type: "sla", breachedCount: count };
 }
+
+// ─── Maintenance SLA Breach (internal helper) ────────────────────────────────
+// Checks PreventiveChecklistRuns where scheduledDue is overdue beyond template.slaOverdueDays
+async function checkMaintenanceSLABreachInternal() {
+  const now = new Date();
+
+  const overdueRuns = await prisma.preventiveChecklistRun.findMany({
+    where: {
+      status: { in: ["DUE"] },
+    },
+    include: {
+      template: { select: { slaOverdueDays: true, name: true } as any },
+      asset: { select: { id: true, assetName: true, assetId: true, departmentId: true } },
+    },
+  });
+
+  let breachCount = 0;
+
+  for (const run of overdueRuns) {
+    const template = run.template as any;
+    const overdueDays = template?.slaOverdueDays ?? 3;
+    const deadline = new Date(run.scheduledDue);
+    deadline.setDate(deadline.getDate() + overdueDays);
+
+    if (now > deadline) {
+      // Mark as overdue
+      await prisma.preventiveChecklistRun.update({
+        where: { id: run.id },
+        data: { status: "OVERDUE" as any },
+      });
+
+      // Create notification
+      await (prisma.notification as any).upsert({
+        where: { dedupeKey: `pm-sla-breach-${run.id}` },
+        create: {
+          type: "SLA_BREACH",
+          title: "Preventive Maintenance Overdue",
+          message: `PM schedule "${template?.name}" for asset ${run.asset.assetName} is overdue by more than ${overdueDays} day(s).`,
+          assetId: run.asset.id,
+          priority: "HIGH",
+          dedupeKey: `pm-sla-breach-${run.id}`,
+        },
+        update: {},
+      }).catch(() => null);
+
+      breachCount++;
+    }
+  }
+
+  return { type: "maintenanceSla", overdueCount: breachCount };
+}
+
+// ─── Exported endpoint for maintenance SLA breach check ──────────────────────
+export const checkMaintenanceSLABreach = async (_req: Request, res: Response) => {
+  try {
+    const result = await checkMaintenanceSLABreachInternal();
+    res.json({ message: `${result.overdueCount} maintenance SLA breaches detected`, count: result.overdueCount });
+  } catch (error) {
+    console.error("checkMaintenanceSLABreach error:", error);
+    res.status(500).json({ message: "Failed to check maintenance SLA breach" });
+  }
+};
 
 async function checkContractExpiryInternal() {
   const now = new Date();

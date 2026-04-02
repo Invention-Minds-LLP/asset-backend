@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 // Generate unique gate pass number: GP-YYYYMMDD-NNNN
 async function generateGatePassNo(): Promise<string> {
@@ -25,6 +26,7 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
       expectedReturnDate,
       courierDetails,
       vehicleNo,
+      vehicleType,
       approvedBy,
       issuedBy,
       reason,
@@ -50,12 +52,27 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
         expectedReturnDate: expectedReturnDate ? new Date(expectedReturnDate) : undefined,
         courierDetails,
         vehicleNo,
+        vehicleType: vehicleType ?? null,
         approvedBy,
         issuedBy,
         reason,
-      },
-      include: { asset: { select: { assetId: true, assetName: true } } },
+      } as any,
+      include: { asset: { select: { assetId: true, assetName: true, departmentId: true } } },
     });
+
+    // Fire-and-forget: notify department HODs about new gate pass
+    const deptId = (gatePass as any).asset?.departmentId;
+    if (deptId) {
+      getDepartmentHODs(deptId).then(hodIds =>
+        notify({
+          type: "OTHER",
+          title: "Gate Pass Created",
+          message: `Gate pass ${gatePassNo} (${type}) issued to ${issuedTo} — ${purpose}`,
+          recipientIds: hodIds,
+          createdById: (req as any).user?.employeeDbId,
+        })
+      ).catch(() => {});
+    }
 
     res.status(201).json(gatePass);
   } catch (error) {

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { sendEmail } from "../../utilis/notificationHelper";
 
 // ─── Create Notification ───────────────────────────────────────────────────────
 export const createNotification = async (req: AuthenticatedRequest, res: Response) => {
@@ -362,6 +363,47 @@ export const upsertEmailTemplate = async (req: Request, res: Response) => {
   }
 };
 
+// ─── Seed Default Email Templates ───────────────────────────────────────────
+export const seedEmailTemplates = async (_req: Request, res: Response) => {
+  try {
+    const templates = [
+      { code: "TICKET_RAISED", name: "Ticket Raised", subject: "New Ticket: {{ticketId}} — {{issueType}}", bodyHtml: "<h3>New Ticket Raised</h3><p>Hi {{name}},</p><p>A new ticket <strong>{{ticketId}}</strong> has been raised for <strong>{{assetName}}</strong>.</p><p><strong>Issue:</strong> {{issueType}}</p><p><strong>Priority:</strong> {{priority}}</p><p><strong>Description:</strong> {{description}}</p><p>Please take necessary action.</p><p>— Smart Assets</p>" },
+      { code: "TICKET_ASSIGNED", name: "Ticket Assigned", subject: "Ticket {{ticketId}} Assigned to You", bodyHtml: "<h3>Ticket Assigned</h3><p>Hi {{name}},</p><p>Ticket <strong>{{ticketId}}</strong> has been assigned to you.</p><p><strong>Asset:</strong> {{assetName}}</p><p><strong>Issue:</strong> {{issueType}}</p><p>Please review and take action.</p><p>— Smart Assets</p>" },
+      { code: "TICKET_RESOLVED", name: "Ticket Resolved", subject: "Ticket {{ticketId}} Resolved", bodyHtml: "<h3>Ticket Resolved</h3><p>Hi {{name}},</p><p>Your ticket <strong>{{ticketId}}</strong> has been resolved.</p><p><strong>Resolution:</strong> {{resolution}}</p><p>If you're satisfied, please close the ticket.</p><p>— Smart Assets</p>" },
+      { code: "TICKET_SLA_BREACH", name: "SLA Breach Alert", subject: "⚠️ SLA Breach: Ticket {{ticketId}}", bodyHtml: "<h3 style='color:#dc2626'>SLA Breach Alert</h3><p>Hi {{name}},</p><p>Ticket <strong>{{ticketId}}</strong> has breached its SLA.</p><p><strong>Asset:</strong> {{assetName}}</p><p><strong>Expected Resolution:</strong> {{slaHours}} hours</p><p>Immediate action required.</p><p>— Smart Assets</p>" },
+      { code: "PO_APPROVAL", name: "PO Pending Approval", subject: "PO {{poNumber}} Pending Your Approval", bodyHtml: "<h3>Purchase Order Approval Required</h3><p>Hi {{name}},</p><p>Purchase Order <strong>{{poNumber}}</strong> of amount <strong>{{amount}}</strong> requires your approval.</p><p><strong>Vendor:</strong> {{vendorName}}</p><p><strong>Department:</strong> {{department}}</p><p>Please review and approve.</p><p>— Smart Assets</p>" },
+      { code: "PO_APPROVED", name: "PO Approved", subject: "PO {{poNumber}} Approved", bodyHtml: "<h3>PO Approved</h3><p>Hi {{name}},</p><p>Your Purchase Order <strong>{{poNumber}}</strong> has been approved and sent to vendor.</p><p><strong>Amount:</strong> {{amount}}</p><p>— Smart Assets</p>" },
+      { code: "GRA_ACCEPTED", name: "GRA Accepted", subject: "GRA {{grnNumber}} Accepted — Assets Created", bodyHtml: "<h3>Goods Receipt Accepted</h3><p>Hi {{name}},</p><p>GRA <strong>{{grnNumber}}</strong> has been accepted.</p><p>{{assetsCreated}}</p><p>Please verify the received items in the system.</p><p>— Smart Assets</p>" },
+      { code: "WO_ASSIGNED", name: "Work Order Assigned", subject: "Work Order {{woNumber}} Assigned to You", bodyHtml: "<h3>Work Order Assigned</h3><p>Hi {{name}},</p><p>Work Order <strong>{{woNumber}}</strong> ({{woType}}) has been approved and assigned to you.</p><p><strong>Asset:</strong> {{assetName}}</p><p><strong>Description:</strong> {{description}}</p><p>You can now start the work.</p><p>— Smart Assets</p>" },
+      { code: "WO_COMPLETED", name: "Work Order Completed", subject: "Work Order {{woNumber}} Completed", bodyHtml: "<h3>Work Order Completed</h3><p>Hi {{name}},</p><p>Work Order <strong>{{woNumber}}</strong> has been completed.</p><p><strong>Actual Cost:</strong> {{actualCost}}</p><p>Pending WCC issuance.</p><p>— Smart Assets</p>" },
+      { code: "WCC_ISSUED", name: "WCC Issued", subject: "WCC {{wccNumber}} Issued for {{woNumber}}", bodyHtml: "<h3>Work Completion Certificate Issued</h3><p>Hi {{name}},</p><p>WCC <strong>{{wccNumber}}</strong> has been issued for Work Order <strong>{{woNumber}}</strong>.</p><p><strong>Total Cost:</strong> {{totalCost}}</p><p><strong>Quality Check:</strong> {{qualityStatus}}</p><p>— Smart Assets</p>" },
+      { code: "WARRANTY_EXPIRY", name: "Warranty Expiring", subject: "⚠️ Warranty Expiring: {{assetName}}", bodyHtml: "<h3 style='color:#d97706'>Warranty Expiry Alert</h3><p>Hi {{name}},</p><p>The warranty for <strong>{{assetName}}</strong> ({{assetId}}) is expiring on <strong>{{expiryDate}}</strong>.</p><p><strong>Days Left:</strong> {{daysLeft}}</p><p>Please take action to renew if needed.</p><p>— Smart Assets</p>" },
+      { code: "INSURANCE_EXPIRY", name: "Insurance Expiring", subject: "⚠️ Insurance Expiring: {{assetName}}", bodyHtml: "<h3 style='color:#d97706'>Insurance Expiry Alert</h3><p>Hi {{name}},</p><p>Insurance policy for <strong>{{assetName}}</strong> is expiring on <strong>{{expiryDate}}</strong>.</p><p><strong>Policy:</strong> {{policyNumber}}</p><p>Please renew the policy.</p><p>— Smart Assets</p>" },
+      { code: "PM_OVERDUE", name: "PM Overdue", subject: "⚠️ Preventive Maintenance Overdue: {{assetName}}", bodyHtml: "<h3 style='color:#dc2626'>PM Overdue Alert</h3><p>Hi {{name}},</p><p>Preventive maintenance for <strong>{{assetName}}</strong> is overdue.</p><p><strong>Was Due:</strong> {{dueDate}}</p><p><strong>Days Overdue:</strong> {{daysOverdue}}</p><p>Please schedule maintenance immediately.</p><p>— Smart Assets</p>" },
+      { code: "INDENT_APPROVED", name: "Indent Approved", subject: "Asset Indent {{indentNumber}} Approved", bodyHtml: "<h3>Indent Approved</h3><p>Hi {{name}},</p><p>Your asset indent <strong>{{indentNumber}}</strong> for <strong>{{assetName}}</strong> has been approved.</p><p>A purchase order will be created shortly.</p><p>— Smart Assets</p>" },
+      { code: "INDENT_REJECTED", name: "Indent Rejected", subject: "Asset Indent {{indentNumber}} Rejected", bodyHtml: "<h3>Indent Rejected</h3><p>Hi {{name}},</p><p>Your asset indent <strong>{{indentNumber}}</strong> for <strong>{{assetName}}</strong> has been rejected.</p><p><strong>Reason:</strong> {{reason}}</p><p>— Smart Assets</p>" },
+      { code: "DISPOSAL_APPROVED", name: "Disposal Approved", subject: "Asset Disposal Approved", bodyHtml: "<h3>Disposal Approved</h3><p>Hi {{name}},</p><p>The disposal request for asset <strong>{{assetName}}</strong> has been approved.</p><p>Please proceed with the disposal process.</p><p>— Smart Assets</p>" },
+      { code: "TRANSFER_REQUEST", name: "Transfer Request", subject: "Asset Transfer Request: {{assetName}}", bodyHtml: "<h3>Transfer Request</h3><p>Hi {{name}},</p><p>A transfer request has been submitted for <strong>{{assetName}}</strong>.</p><p><strong>Type:</strong> {{transferType}}</p><p>Please review and approve.</p><p>— Smart Assets</p>" },
+      { code: "GENERAL", name: "General Notification", subject: "{{title}}", bodyHtml: "<h3>{{title}}</h3><p>Hi {{name}},</p><p>{{message}}</p><p>— Smart Assets</p>" },
+    ];
+
+    const results = [];
+    for (const t of templates) {
+      const result = await prisma.emailTemplate.upsert({
+        where: { code: t.code },
+        update: {},
+        create: { code: t.code, name: t.name, subject: t.subject, bodyHtml: t.bodyHtml, isActive: true },
+      });
+      results.push(result);
+    }
+
+    res.json({ message: `${results.length} email templates seeded`, data: results });
+  } catch (error) {
+    console.error("seedEmailTemplates error:", error);
+    res.status(500).json({ message: "Failed to seed email templates" });
+  }
+};
+
 // ─── Admin: Get/Update SMTP Config ───────────────────────────────────────────
 export const getSmtpConfig = async (_req: Request, res: Response) => {
   try {
@@ -406,5 +448,80 @@ export const upsertSmtpConfig = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("upsertSmtpConfig error:", error);
     res.status(500).json({ message: "Failed to save SMTP config" });
+  }
+};
+
+// ─── Send Manual Email (with template + CC/BCC) ────────────────────────────
+export const sendManualEmail = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const {
+      to,              // string[] — primary recipients (emails or employeeIds)
+      cc,              // string[] — CC emails
+      bcc,             // string[] — BCC emails
+      subject,         // string (overrides template subject if provided)
+      body,            // string (HTML body, overrides template if provided)
+      templateCode,    // string — use a saved template
+      templateData,    // Record<string, string> — placeholder values
+      employeeIds,     // number[] — resolve employee emails as "to"
+      ccEmployeeIds,   // number[] — resolve employee emails as "cc"
+      bccEmployeeIds,  // number[] — resolve employee emails as "bcc"
+    } = req.body;
+
+    if (!to?.length && !employeeIds?.length) {
+      res.status(400).json({ message: "At least one recipient (to or employeeIds) is required" });
+      return;
+    }
+    if (!subject && !templateCode) {
+      res.status(400).json({ message: "subject or templateCode is required" });
+      return;
+    }
+
+    // Resolve employee IDs to emails
+    const resolveEmails = async (ids: number[]): Promise<string[]> => {
+      if (!ids?.length) return [];
+      const employees = await prisma.employee.findMany({
+        where: { id: { in: ids } },
+        select: { email: true, name: true },
+      });
+      return employees.map(e => e.email).filter(Boolean) as string[];
+    };
+
+    const toEmails = [
+      ...(to || []),
+      ...(await resolveEmails(employeeIds || [])),
+    ];
+    const ccEmails = [
+      ...(cc || []),
+      ...(await resolveEmails(ccEmployeeIds || [])),
+    ];
+    const bccEmails = [
+      ...(bcc || []),
+      ...(await resolveEmails(bccEmployeeIds || [])),
+    ];
+
+    if (toEmails.length === 0) {
+      res.status(400).json({ message: "No valid recipient emails found" });
+      return;
+    }
+
+    await sendEmail({
+      to: toEmails,
+      cc: ccEmails.length > 0 ? ccEmails : undefined,
+      bcc: bccEmails.length > 0 ? bccEmails : undefined,
+      subject: subject || "Notification",
+      html: body || `<p>${subject || ''}</p>`,
+      templateCode,
+      templateData,
+    });
+
+    res.json({
+      message: "Email sent successfully",
+      sentTo: toEmails.length,
+      cc: ccEmails.length,
+      bcc: bccEmails.length,
+    });
+  } catch (error: any) {
+    console.error("sendManualEmail error:", error);
+    res.status(500).json({ message: "Failed to send email", error: error.message });
   }
 };

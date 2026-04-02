@@ -39,24 +39,34 @@ export const getVendorPerformance = async (req: Request, res: Response) => {
     const performanceData = await Promise.all(
       vendors.map(async (vendor) => {
         // Tickets resolved by this vendor's assets
-        const ticketWhere: any = {
+        const allTicketWhere: any = {
+          asset: { vendorId: vendor.id },
+        };
+        if (dateFrom || dateTo) allTicketWhere.createdAt = dateFilter;
+
+        const resolvedTicketWhere: any = {
           asset: { vendorId: vendor.id },
           status: { in: ["RESOLVED", "CLOSED"] },
         };
-        if (dateFrom || dateTo) ticketWhere.createdAt = dateFilter;
+        if (dateFrom || dateTo) resolvedTicketWhere.createdAt = dateFilter;
 
-        const resolvedTickets = await prisma.ticket.findMany({
-          where: ticketWhere,
-          select: {
-            id: true,
-            createdAt: true,
-            slaResolvedAt: true,
-            slaBreached: true,
-            serviceCost: true,
-            partsCost: true,
-            totalCost: true,
-          },
-        });
+        const [totalTickets, resolvedTickets] = await Promise.all([
+          prisma.ticket.count({
+            where: allTicketWhere,
+          }),
+          prisma.ticket.findMany({
+            where: resolvedTicketWhere,
+            select: {
+              id: true,
+              createdAt: true,
+              slaResolvedAt: true,
+              slaBreached: true,
+              serviceCost: true,
+              partsCost: true,
+              totalCost: true,
+            },
+          }),
+        ]);
 
         // Calculate response time (avg days from created to resolved)
         let totalResponseDays = 0;
@@ -87,6 +97,8 @@ export const getVendorPerformance = async (req: Request, res: Response) => {
           activeContracts,
           totalContractValue,
           totalTicketsResolved: resolvedCount,
+          totalTickets,
+          ticketSummary: `${resolvedCount}/${totalTickets}`,
           avgResponseDays: resolvedCount > 0 ? Number((totalResponseDays / resolvedCount).toFixed(1)) : null,
           slaBreachCount,
           slaComplianceRate: resolvedTickets.length > 0

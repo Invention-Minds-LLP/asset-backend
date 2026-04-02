@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { requireAssetByAssetId } from "../../utilis/asset";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 function mustUser(req: any) {
   if (!req.user?.employeeDbId) throw new Error("Unauthorized");
@@ -26,6 +27,14 @@ export const createServiceContract = async (req: any, res: Response) => {
       reason,
       currency,
       contractNumber,
+      // Vendor SLA commitments
+      vendorResponseValue,
+      vendorResponseUnit,
+      vendorResolutionValue,
+      vendorResolutionUnit,
+      // Split visit counts
+      regularVisitsPerYear,
+      emergencyVisitsPerYear,
     } = req.body;
 
     if (!assetId || !contractType || !startDate || !endDate) {
@@ -86,6 +95,8 @@ export const createServiceContract = async (req: any, res: Response) => {
         includesParts: includesParts ?? null,
         includesLabor: includesLabor ?? null,
         visitsPerYear: visitsPerYear ?? null,
+        regularVisitsPerYear: regularVisitsPerYear != null ? Number(regularVisitsPerYear) : null,
+        emergencyVisitsPerYear: emergencyVisitsPerYear != null ? Number(emergencyVisitsPerYear) : null,
         cost: cost ?? null,
         currency: currency ?? null,
         document: document ?? null,
@@ -93,8 +104,23 @@ export const createServiceContract = async (req: any, res: Response) => {
         status: "ACTIVE",
         createdBy: user.employeeID,
         reason: reason || null,
-      },
+        vendorResponseValue: vendorResponseValue != null ? Number(vendorResponseValue) : null,
+        vendorResponseUnit: vendorResponseUnit ?? null,
+        vendorResolutionValue: vendorResolutionValue != null ? Number(vendorResolutionValue) : null,
+        vendorResolutionUnit: vendorResolutionUnit ?? null,
+      } as any,
     });
+
+    // Fire-and-forget: notify admins about new service contract
+    getAdminIds().then(adminIds =>
+      notify({
+        type: "AMC_CMC_EXPIRY",
+        title: "New Service Contract Created",
+        message: `${contract.contractType} contract created for asset ${asset.assetName}`,
+        recipientIds: adminIds,
+        createdById: user.employeeDbId,
+      })
+    ).catch(() => {});
 
     // 🔔 Notify HOD (kept from your logic)
     if (asset.departmentId) {
@@ -171,6 +197,12 @@ export const updateServiceContract = async (req: Request, res: Response) => {
     if ("status" in req.body) data.status = status || null;
     if ("reason" in req.body) data.reason = reason || null;
     if ("createdBy" in req.body) data.createdBy = createdBy || null;
+    if ("vendorResponseValue" in req.body) data.vendorResponseValue = req.body.vendorResponseValue != null ? Number(req.body.vendorResponseValue) : null;
+    if ("vendorResponseUnit" in req.body) data.vendorResponseUnit = req.body.vendorResponseUnit || null;
+    if ("vendorResolutionValue" in req.body) data.vendorResolutionValue = req.body.vendorResolutionValue != null ? Number(req.body.vendorResolutionValue) : null;
+    if ("vendorResolutionUnit" in req.body) data.vendorResolutionUnit = req.body.vendorResolutionUnit || null;
+    if ("regularVisitsPerYear" in req.body) data.regularVisitsPerYear = req.body.regularVisitsPerYear != null ? Number(req.body.regularVisitsPerYear) : null;
+    if ("emergencyVisitsPerYear" in req.body) data.emergencyVisitsPerYear = req.body.emergencyVisitsPerYear != null ? Number(req.body.emergencyVisitsPerYear) : null;
 
     const finalStart = data.startDate ?? existing.startDate;
     const finalEnd = data.endDate ?? existing.endDate;
@@ -214,9 +246,23 @@ export const getContractsByAsset = async (req: Request, res: Response) => {
 // GET /service-contracts/all (standalone page with filters, pagination, CSV)
 export const getAllServiceContracts = async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
     const { status, contractType, vendorId, search, page = "1", limit = "25", exportCsv, expiringDays } = req.query;
 
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
+    }
+
     const where: any = {};
+    if (scopedAssetIds) {
+      where.assetId = { in: scopedAssetIds };
+    }
     if (status) where.status = String(status);
     if (contractType) where.contractType = String(contractType);
     if (vendorId) where.vendorId = Number(vendorId);
@@ -285,17 +331,25 @@ export const getAllServiceContracts = async (req: Request, res: Response) => {
 // GET /service-contracts/stats
 export const getServiceContractStats = async (_req: Request, res: Response) => {
   try {
+    const user = (_req as any).user;
     const now = new Date();
     const thirtyDays = new Date();
     thirtyDays.setDate(now.getDate() + 30);
 
+    // Department scoping
+    let scope: any = {};
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
+      scope = { assetId: { in: deptAssets.map(a => a.id) } };
+    }
+
     const [total, active, expired, expiring30, amcCount, cmcCount] = await Promise.all([
-      prisma.serviceContract.count(),
-      prisma.serviceContract.count({ where: { status: "ACTIVE" } }),
-      prisma.serviceContract.count({ where: { status: "EXPIRED" } }),
-      prisma.serviceContract.count({ where: { status: "ACTIVE", endDate: { gte: now, lte: thirtyDays } } }),
-      prisma.serviceContract.count({ where: { contractType: "AMC", status: "ACTIVE" } }),
-      prisma.serviceContract.count({ where: { contractType: "CMC", status: "ACTIVE" } }),
+      prisma.serviceContract.count({ where: { ...scope } }),
+      prisma.serviceContract.count({ where: { status: "ACTIVE", ...scope } }),
+      prisma.serviceContract.count({ where: { status: "EXPIRED", ...scope } }),
+      prisma.serviceContract.count({ where: { status: "ACTIVE", endDate: { gte: now, lte: thirtyDays }, ...scope } }),
+      prisma.serviceContract.count({ where: { contractType: "AMC", status: "ACTIVE", ...scope } }),
+      prisma.serviceContract.count({ where: { contractType: "CMC", status: "ACTIVE", ...scope } }),
     ]);
 
     res.json({ total, active, expired, expiring30, amcCount, cmcCount });
@@ -373,4 +427,184 @@ export const uploadContractDocument = async (req: Request, res: Response) => {
       res.status(500).json({ error: "FTP upload failed" });
     }
   });
+};
+
+// ── Service Visit Logging ─────────────────────────────────────────────────────
+
+// POST /service-contracts/:contractId/visits
+// Log a service visit (PM or Repair) with chargeable rules:
+//   - No active warranty + no active contract → chargeable
+//   - Amount ≤ 1000 → direct approval (auto-approved)
+//   - Amount > 1000 → needs manager approval (chargeApprovalStatus = PENDING)
+export const logServiceVisit = async (req: any, res: Response) => {
+  try {
+    const user = mustUser(req);
+    const contractId = Number(req.params.contractId);
+
+    const contract = await prisma.serviceContract.findUnique({
+      where: { id: contractId },
+      include: { asset: true },
+    });
+    if (!contract) {
+      res.status(404).json({ message: "Service contract not found" });
+      return;
+    }
+
+    const {
+      visitType,   // PREVENTIVE_MAINTENANCE | REPAIR
+      visitDate,
+      visitedById,
+      workDone,
+      partsReplaced,
+      outcome,
+      chargeAmount,
+    } = req.body;
+
+    if (!visitType || !visitDate) {
+      res.status(400).json({ message: "visitType and visitDate are required" });
+      return;
+    }
+    if (!["PREVENTIVE_MAINTENANCE", "REPAIR"].includes(visitType)) {
+      res.status(400).json({ message: "visitType must be PREVENTIVE_MAINTENANCE or REPAIR" });
+      return;
+    }
+
+    const assetId = contract.assetId;
+    const now = new Date();
+
+    // Chargeable determination
+    const hasActiveWarranty = await prisma.warranty.findFirst({
+      where: { assetId, isUnderWarranty: true, warrantyEnd: { gte: now } },
+    });
+    const hasActiveContract = await prisma.serviceContract.findFirst({
+      where: { assetId, status: "ACTIVE", endDate: { gte: now } },
+    });
+
+    let isChargeable = false;
+    let chargeableReason: string | null = null;
+    let chargeApprovalStatus: string | null = null;
+    const amount = chargeAmount != null ? Number(chargeAmount) : null;
+
+    if (!hasActiveWarranty && !hasActiveContract) {
+      isChargeable = true;
+      chargeableReason = "NO_WARRANTY_OR_CONTRACT";
+    }
+
+    // If chargeable: ≤1000 auto-approved, >1000 needs approval
+    if (isChargeable && amount != null) {
+      chargeApprovalStatus = amount <= 1000 ? "APPROVED" : "PENDING";
+    }
+
+    const visit = await (prisma as any).serviceVisit.create({
+      data: {
+        serviceContractId: contractId,
+        assetId,
+        visitType,
+        visitDate: new Date(visitDate),
+        visitedById: visitedById ? Number(visitedById) : null,
+        workDone: workDone ?? null,
+        partsReplaced: partsReplaced ?? null,
+        outcome: outcome ?? null,
+        isChargeable,
+        chargeableReason,
+        chargeAmount: amount,
+        chargeApprovalStatus,
+        createdById: user.employeeDbId,
+      },
+    });
+
+    // Fire-and-forget: notify admins about service visit logged
+    getAdminIds().then(adminIds =>
+      notify({
+        type: "AMC_CMC_EXPIRY",
+        title: "Service Visit Logged",
+        message: `${visitType} visit logged for asset ${contract.asset.assetName} under contract #${contractId}`,
+        recipientIds: adminIds,
+        createdById: user.employeeDbId,
+      })
+    ).catch(() => {});
+
+    // If charge > 1000, notify HOD/manager
+    if (isChargeable && amount != null && amount > 1000 && contract.asset.departmentId) {
+      const hod = await prisma.employee.findFirst({
+        where: { departmentId: contract.asset.departmentId, role: "HOD" },
+        select: { id: true },
+      });
+      if (hod) {
+        const notif = await prisma.notification.create({
+          data: {
+            type: "OTHER",
+            title: `Chargeable Service Visit — Approval Required`,
+            message: `Service visit for asset ${contract.asset.assetName} is chargeable ₹${amount}. Approval needed.`,
+            priority: "HIGH",
+            assetId,
+            dedupeKey: `SVC_VISIT_CHARGE_${visit.id}`,
+            createdById: user.employeeDbId,
+          },
+        });
+        await prisma.notificationRecipient.create({
+          data: { notificationId: notif.id, employeeId: hod.id },
+        });
+      }
+    }
+
+    res.status(201).json(visit);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to log service visit" });
+  }
+};
+
+// GET /service-contracts/:contractId/visits
+export const getServiceVisits = async (req: any, res: Response) => {
+  try {
+    const contractId = Number(req.params.contractId);
+    const visits = await (prisma as any).serviceVisit.findMany({
+      where: { serviceContractId: contractId },
+      include: {
+        visitedBy: { select: { id: true, name: true } },
+        chargeApprovedBy: { select: { id: true, name: true } },
+      },
+      orderBy: { visitDate: "desc" },
+    });
+    res.json(visits);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to fetch visits" });
+  }
+};
+
+// PATCH /service-contracts/visits/:visitId/approve-charge
+export const approveVisitCharge = async (req: any, res: Response) => {
+  try {
+    const user = mustUser(req);
+    const visitId = Number(req.params.visitId);
+    const { decision, remarks } = req.body; // APPROVED | REJECTED
+
+    if (!["APPROVED", "REJECTED"].includes(decision)) {
+      res.status(400).json({ message: "decision must be APPROVED or REJECTED" });
+      return;
+    }
+
+    const visit = await (prisma as any).serviceVisit.findUnique({ where: { id: visitId } });
+    if (!visit) {
+      res.status(404).json({ message: "Service visit not found" });
+      return;
+    }
+    if (visit.chargeApprovalStatus !== "PENDING") {
+      res.status(400).json({ message: "Charge approval not pending" });
+      return;
+    }
+
+    const updated = await (prisma as any).serviceVisit.update({
+      where: { id: visitId },
+      data: {
+        chargeApprovalStatus: decision,
+        chargeApprovedById: user.employeeDbId,
+        chargeApprovedAt: new Date(),
+      },
+    });
+
+    res.json(updated);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to approve charge" });
+  }
 };

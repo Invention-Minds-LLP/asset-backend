@@ -1,0 +1,13 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const financial_dashboard_controller_1 = require("./financial-dashboard.controller");
+const router = (0, express_1.Router)();
+router.get("/filters", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getFilterOptions);
+router.get("/summary", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getFinancialSummary);
+router.get("/fy-breakdown", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getFYBreakdown);
+router.get("/monthly-assets", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getMonthlyAssets);
+router.get("/cost-trend", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getCostTrend);
+router.get("/month-breakdown", authMiddleware_1.authenticateToken, financial_dashboard_controller_1.getMonthBreakdown);
+exports.default = router;

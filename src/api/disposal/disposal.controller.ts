@@ -1,6 +1,8 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { logAction } from "../audit-trail/audit-trail.controller";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 // GET /disposals
 export const getAllDisposals = async (
@@ -24,6 +26,19 @@ export const getAllDisposals = async (
     if (status) where.status = String(status);
     if (disposalType) where.disposalType = String(disposalType);
     if (assetId) where.assetId = Number(assetId);
+
+    // Department-based scoping for non-admin users via asset
+    const user = (req as any).user;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      const scopedAssetIds = deptAssets.map(a => a.id);
+      if (!assetId) {
+        where.assetId = { in: scopedAssetIds };
+      }
+    }
 
     const [disposals, total] = await Promise.all([
       prisma.assetDisposal.findMany({
@@ -97,6 +112,7 @@ export const requestDisposal = async (
 
     const asset = await prisma.asset.findUnique({
       where: { id: Number(assetId) },
+      include: { depreciation: { select: { currentBookValue: true } } },
     });
 
     if (!asset) {
@@ -104,17 +120,30 @@ export const requestDisposal = async (
       return;
     }
 
+    // Capture book value at time of disposal request
+    const bookValueAtDisposal =
+      (asset as any).depreciation?.currentBookValue != null
+        ? Number((asset as any).depreciation.currentBookValue)
+        : Number(asset.purchaseCost ?? asset.estimatedValue ?? 0) || null;
+
     const disposal = await prisma.assetDisposal.create({
       data: {
         assetId: Number(assetId),
         disposalType,
         reason,
         estimatedScrapValue: estimatedScrapValue != null ? estimatedScrapValue : null,
+        bookValueAtDisposal: bookValueAtDisposal,
         status: "REQUESTED",
         requestedById: req.user?.id ?? null,
         requestedAt: new Date(),
-      },
+      } as any,
     });
+
+    logAction({ entityType: "DISPOSAL", entityId: disposal.id, action: "CREATE", description: `Disposal request created for asset #${assetId} (${disposalType})`, performedById: req.user?.employeeDbId });
+
+    // Notify admins about new disposal request
+    const adminIds = await getAdminIds();
+    notify({ type: "DISPOSAL", title: "Disposal Request", message: `Disposal request for asset #${assetId} (${disposalType})`, recipientIds: adminIds, assetId: Number(assetId), createdById: req.user?.employeeDbId });
 
     res.status(201).json({ data: disposal, message: "Disposal request created successfully" });
   } catch (error: any) {
@@ -209,6 +238,11 @@ export const approveDisposal = async (
       return updatedDisposal;
     });
 
+    logAction({ entityType: "DISPOSAL", entityId: Number(id), action: "APPROVE", description: `Disposal #${id} approved for asset #${disposal.assetId}`, performedById: req.user?.employeeDbId });
+
+    // Notify requester that disposal is approved
+    if ((disposal as any).requestedById) notify({ type: "DISPOSAL", title: "Disposal Approved", message: `Disposal #${id} approved for asset #${disposal.assetId}`, recipientIds: [(disposal as any).requestedById].filter(Boolean) as number[], assetId: disposal.assetId, channel: "BOTH", templateCode: "DISPOSAL_APPROVED", templateData: { assetName: `Asset #${disposal.assetId}` } });
+
     res.json({ data: updated, message: "Disposal approved and asset marked as disposed" });
   } catch (error: any) {
     console.error("Error approving disposal:", error);
@@ -253,6 +287,11 @@ export const rejectDisposal = async (
       },
     });
 
+    logAction({ entityType: "DISPOSAL", entityId: Number(id), action: "STATUS_CHANGE", description: `Disposal #${id} rejected`, performedById: req.user?.employeeDbId });
+
+    // Notify requester that disposal is rejected
+    if ((disposal as any).requestedById) notify({ type: "DISPOSAL", title: "Disposal Rejected", message: `Disposal #${id} rejected: ${rejectionReason}`, recipientIds: [(disposal as any).requestedById].filter(Boolean) as number[], assetId: disposal.assetId });
+
     res.json({ data: updated, message: "Disposal rejected" });
   } catch (error: any) {
     console.error("Error rejecting disposal:", error);
@@ -283,18 +322,25 @@ export const completeDisposal = async (
       return;
     }
 
+    const bookVal = disposal.bookValueAtDisposal != null ? Number((disposal as any).bookValueAtDisposal) : null;
+    const saleVal = actualSaleValue != null ? Number(actualSaleValue) : null;
+    const netGainLoss = (bookVal != null && saleVal != null) ? saleVal - bookVal : null;
+
     const updated = await prisma.assetDisposal.update({
       where: { id: Number(id) },
       data: {
         status: "COMPLETED",
         actualSaleValue: actualSaleValue != null ? actualSaleValue : null,
+        netGainLoss: netGainLoss,
         buyerName: buyerName || null,
         buyerContact: buyerContact || null,
         certificateUrl: certificateUrl || null,
         completedById: req.user?.id ?? null,
         completedAt: new Date(),
-      },
+      } as any,
     });
+
+    logAction({ entityType: "DISPOSAL", entityId: Number(id), action: "STATUS_CHANGE", description: `Disposal #${id} completed${saleVal != null ? `, sale value ${saleVal}` : ""}`, performedById: req.user?.employeeDbId });
 
     res.json({ data: updated, message: "Disposal completed successfully" });
   } catch (error: any) {

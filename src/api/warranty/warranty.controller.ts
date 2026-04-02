@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { requireAssetByAssetId } from "../../utilis/asset";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 function parseDate(value: any): Date | null {
   if (!value) return null;
@@ -9,41 +10,162 @@ function parseDate(value: any): Date | null {
 }
 
 // GET /warranties/
+// export const getAllWarranties = async (req: Request, res: Response) => {
+//   try {
+//     const { status, isActive, search, page = "1", limit = "25", exportCsv, expiringDays } = req.query;
+
+//     const where: any = {};
+//     if (isActive !== undefined) where.isActive = isActive === "true";
+//     if (search) {
+//       where.OR = [
+//         { warrantyProvider: { contains: String(search) } },
+//         { warrantyReference: { contains: String(search) } },
+//         { asset: { assetName: { contains: String(search) } } },
+//         { asset: { assetId: { contains: String(search) } } },
+//       ];
+//     }
+
+//     // Filter for expiring soon
+//     if (expiringDays) {
+//       const now = new Date();
+//       const future = new Date();
+//       future.setDate(now.getDate() + Number(expiringDays));
+//       where.isActive = true;
+//       where.isUnderWarranty = true;
+//       where.warrantyEnd = { gte: now, lte: future };
+//     }
+
+//     // Filter by warranty status (active/expired based on dates)
+//     if (status === "ACTIVE") {
+//       where.isActive = true;
+//       where.isUnderWarranty = true;
+//       where.warrantyEnd = { gte: new Date() };
+//     } else if (status === "EXPIRED") {
+//       where.OR = [
+//         { isActive: false },
+//         { warrantyEnd: { lt: new Date() } },
+//       ];
+//     }
+
+//     const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+//     const take = parseInt(String(limit));
+
+//     const [total, warranties] = await Promise.all([
+//       prisma.warranty.count({ where }),
+//       prisma.warranty.findMany({
+//         where,
+//         include: { asset: { select: { id: true, assetId: true, assetName: true, serialNumber: true, departmentId: true } }, vendor: true },
+//         orderBy: { warrantyEnd: "asc" },
+//         ...(exportCsv !== "true" ? { skip, take } : {}),
+//       }),
+//     ]);
+
+//     if (exportCsv === "true") {
+//       const csvRows = warranties.map((w: any) => ({
+//         AssetId: w.asset?.assetId || "",
+//         AssetName: w.asset?.assetName || "",
+//         WarrantyType: w.warrantyType || "",
+//         Provider: w.warrantyProvider || "",
+//         Vendor: w.vendor?.name || "",
+//         Start: w.warrantyStart ? new Date(w.warrantyStart).toISOString().split("T")[0] : "",
+//         End: w.warrantyEnd ? new Date(w.warrantyEnd).toISOString().split("T")[0] : "",
+//         UnderWarranty: w.isUnderWarranty ? "Yes" : "No",
+//         Active: w.isActive ? "Yes" : "No",
+//         Reference: w.warrantyReference || "",
+//       }));
+
+//       const headers = Object.keys(csvRows[0] || {}).join(",");
+//       const rows = csvRows.map((r: any) => Object.values(r).join(",")).join("\n");
+//       res.setHeader("Content-Type", "text/csv");
+//       res.setHeader("Content-Disposition", "attachment; filename=warranties.csv");
+//       res.send(headers + "\n" + rows);
+//       return;
+//     }
+
+//     res.json({ data: warranties, total, page: parseInt(String(page)), limit: take });
+//   } catch (e: any) {
+//     res.status(500).json({ message: e.message });
+//   }
+// };
 export const getAllWarranties = async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
     const { status, isActive, search, page = "1", limit = "25", exportCsv, expiringDays } = req.query;
 
-    const where: any = {};
-    if (isActive !== undefined) where.isActive = isActive === "true";
-    if (search) {
-      where.OR = [
-        { warrantyProvider: { contains: String(search) } },
-        { warrantyReference: { contains: String(search) } },
-        { asset: { assetName: { contains: String(search) } } },
-        { asset: { assetId: { contains: String(search) } } },
-      ];
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
     }
 
-    // Filter for expiring soon
+    const where: any = {
+      AND: []
+    };
+
+    if (scopedAssetIds) {
+      where.AND.push({ assetId: { in: scopedAssetIds } });
+    }
+
+    if (isActive !== undefined) {
+      where.AND.push({ isActive: isActive === "true" });
+    }
+
+    if (search) {
+      where.AND.push({
+        OR: [
+          { warrantyProvider: { contains: String(search) } },
+          { warrantyReference: { contains: String(search) } },
+          { asset: { assetName: { contains: String(search) } } },
+          { asset: { assetId: { contains: String(search) } } },
+        ]
+      });
+    }
+
+    // Expiring within custom number of days
     if (expiringDays) {
       const now = new Date();
       const future = new Date();
       future.setDate(now.getDate() + Number(expiringDays));
-      where.isActive = true;
-      where.isUnderWarranty = true;
-      where.warrantyEnd = { gte: now, lte: future };
+
+      where.AND.push(
+        { isActive: true },
+        { isUnderWarranty: true },
+        { warrantyEnd: { gte: now, lte: future } }
+      );
     }
 
-    // Filter by warranty status (active/expired based on dates)
+    // Status filters
     if (status === "ACTIVE") {
-      where.isActive = true;
-      where.isUnderWarranty = true;
-      where.warrantyEnd = { gte: new Date() };
+      where.AND.push(
+        { isActive: true },
+        { isUnderWarranty: true },
+        { warrantyEnd: { gte: new Date() } }
+      );
     } else if (status === "EXPIRED") {
-      where.OR = [
-        { isActive: false },
-        { warrantyEnd: { lt: new Date() } },
-      ];
+      where.AND.push({
+        OR: [
+          { isActive: false },
+          { warrantyEnd: { lt: new Date() } }
+        ]
+      });
+    } else if (status === "EXPIRING_SOON") {
+      const now = new Date();
+      const future = new Date();
+      future.setDate(now.getDate() + 30);
+
+      where.AND.push(
+        { isActive: true },
+        { isUnderWarranty: true },
+        { warrantyEnd: { gte: now, lte: future } }
+      );
+    }
+
+    if (where.AND.length === 0) {
+      delete where.AND;
     }
 
     const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
@@ -53,7 +175,18 @@ export const getAllWarranties = async (req: Request, res: Response) => {
       prisma.warranty.count({ where }),
       prisma.warranty.findMany({
         where,
-        include: { asset: { select: { id: true, assetId: true, assetName: true, serialNumber: true, departmentId: true } }, vendor: true },
+        include: {
+          asset: {
+            select: {
+              id: true,
+              assetId: true,
+              assetName: true,
+              serialNumber: true,
+              departmentId: true
+            }
+          },
+          vendor: true
+        },
         orderBy: { warrantyEnd: "asc" },
         ...(exportCsv !== "true" ? { skip, take } : {}),
       }),
@@ -206,6 +339,19 @@ export const createWarranty = async (req: Request, res: Response) => {
         remarks: remarks || null,
       },
     });
+
+    // Notify department HODs about new warranty
+    const hodIds = await getDepartmentHODs(asset.departmentId);
+    if (hodIds.length) {
+      notify({
+        type: "WARRANTY",
+        title: "New Warranty Created",
+        message: `Warranty created for asset ${asset.assetName || asset.assetId}`,
+        recipientIds: hodIds,
+        assetId: asset.id,
+        createdById: (req as any).user?.employeeDbId,
+      });
+    }
 
     res.status(201).json(warranty);
   } catch (e: any) {
@@ -437,6 +583,21 @@ export const renewWarranty = async (req: Request, res: Response) => {
       return newWarranty;
     });
 
+    // Notify department HODs + admins about warranty renewal
+    const hodIds = await getDepartmentHODs(asset.departmentId);
+    const adminIds = await getAdminIds();
+    const recipientIds = [...new Set([...hodIds, ...adminIds])];
+    if (recipientIds.length) {
+      notify({
+        type: "WARRANTY",
+        title: "Warranty Renewed",
+        message: `Warranty renewed for asset ${asset.assetName || assetCode}`,
+        recipientIds,
+        assetId: asset.id,
+        createdById: (req as any).user?.employeeDbId,
+      });
+    }
+
     res.status(201).json(result);
   } catch (e: any) {
     res.status(500).json({ message: e.message });
@@ -447,18 +608,26 @@ export const renewWarranty = async (req: Request, res: Response) => {
 // GET /warranties/stats
 export const getWarrantyStats = async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
     const now = new Date();
     const thirtyDays = new Date();
     thirtyDays.setDate(now.getDate() + 30);
     const sixtyDays = new Date();
     sixtyDays.setDate(now.getDate() + 60);
 
+    // Department scoping
+    let scope: any = {};
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
+      scope = { assetId: { in: deptAssets.map(a => a.id) } };
+    }
+
     const [total, active, expired, expiring30, expiring60] = await Promise.all([
-      prisma.warranty.count({ where: { isActive: true } }),
-      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now } } }),
-      prisma.warranty.count({ where: { isActive: true, warrantyEnd: { lt: now } } }),
-      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now, lte: thirtyDays } } }),
-      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now, lte: sixtyDays } } }),
+      prisma.warranty.count({ where: { isActive: true, ...scope } }),
+      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now }, ...scope } }),
+      prisma.warranty.count({ where: { isActive: true, warrantyEnd: { lt: now }, ...scope } }),
+      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now, lte: thirtyDays }, ...scope } }),
+      prisma.warranty.count({ where: { isActive: true, isUnderWarranty: true, warrantyEnd: { gte: now, lte: sixtyDays }, ...scope } }),
     ]);
 
     res.json({ total, active, expired, expiring30, expiring60 });

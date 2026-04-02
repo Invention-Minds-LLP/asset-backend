@@ -15,6 +15,11 @@ export const createEscalationRule = async (req: Request, res: Response) => {
       escalateAfterUnit,
       notifyRole,
       notifyEmployeeId,
+      slaType,         // INTERNAL | VENDOR | null (both)
+      applicableTo,    // TICKET | MAINTENANCE | null (both)
+      vendorContactName,
+      vendorContactEmail,
+      vendorContactPhone,
     } = req.body;
 
     if (!priority || !level || !escalateAfterValue || !escalateAfterUnit) {
@@ -32,7 +37,12 @@ export const createEscalationRule = async (req: Request, res: Response) => {
         escalateAfterUnit,
         notifyRole,
         notifyEmployeeId: notifyEmployeeId ? Number(notifyEmployeeId) : undefined,
-      },
+        slaType: slaType ?? null,
+        applicableTo: applicableTo ?? null,
+        vendorContactName: vendorContactName ?? null,
+        vendorContactEmail: vendorContactEmail ?? null,
+        vendorContactPhone: vendorContactPhone ?? null,
+      } as any,
       include: {
         department: { select: { name: true } },
         assetCategory: { select: { name: true } },
@@ -49,11 +59,13 @@ export const createEscalationRule = async (req: Request, res: Response) => {
 
 export const getAllEscalationRules = async (req: Request, res: Response) => {
   try {
-    const { departmentId, assetCategoryId, priority } = req.query;
+    const { departmentId, assetCategoryId, priority, slaType, applicableTo } = req.query;
     const where: any = {};
     if (departmentId) where.departmentId = Number(departmentId);
     if (assetCategoryId) where.assetCategoryId = Number(assetCategoryId);
     if (priority) where.priority = String(priority);
+    if (slaType) where.slaType = String(slaType);
+    if (applicableTo) where.applicableTo = String(applicableTo);
 
     const rules = await prisma.escalationMatrix.findMany({
       where,
@@ -156,7 +168,12 @@ export const bulkUpsertEscalationMatrix = async (req: Request, res: Response) =>
             escalateAfterUnit: r.escalateAfterUnit,
             notifyRole: r.notifyRole,
             notifyEmployeeId: r.notifyEmployeeId ? Number(r.notifyEmployeeId) : undefined,
-          },
+            slaType: r.slaType ?? null,
+            applicableTo: r.applicableTo ?? null,
+            vendorContactName: r.vendorContactName ?? null,
+            vendorContactEmail: r.vendorContactEmail ?? null,
+            vendorContactPhone: r.vendorContactPhone ?? null,
+          } as any,
         })
       )
     );
@@ -223,7 +240,6 @@ export const checkAndEscalateTickets = async (req: AuthenticatedRequest, res: Re
     const openTickets = await prisma.ticket.findMany({
       where: {
         status: { in: ["OPEN", "ASSIGNED", "IN_PROGRESS"] },
-        slaBreached: false,
       },
       include: {
         department: true,
@@ -234,46 +250,127 @@ export const checkAndEscalateTickets = async (req: AuthenticatedRequest, res: Re
     const escalated: number[] = [];
 
     for (const ticket of openTickets) {
-      if (!ticket.slaExpectedValue || !ticket.slaExpectedUnit) continue;
-
+      const t = ticket as any;
       const createdAt = new Date(ticket.createdAt);
-      let slaDeadline = new Date(createdAt);
 
-      if (ticket.slaExpectedUnit === "HOURS") slaDeadline.setHours(slaDeadline.getHours() + ticket.slaExpectedValue);
-      else if (ticket.slaExpectedUnit === "DAYS") slaDeadline.setDate(slaDeadline.getDate() + ticket.slaExpectedValue);
+      function calcDeadline(value: number | null, unit: string | null): Date | null {
+        if (!value || !unit) return null;
+        const d = new Date(createdAt);
+        if (unit === "HOURS") d.setHours(d.getHours() + value);
+        else if (unit === "DAYS") d.setDate(d.getDate() + value);
+        else if (unit === "MINUTES") d.setMinutes(d.getMinutes() + value);
+        return d;
+      }
 
-      if (now > slaDeadline) {
-        // Mark breached
-        await prisma.ticket.update({
-          where: { id: ticket.id },
-          data: { slaBreached: true },
-        });
+      const internalDeadline = calcDeadline(t.internalSlaValue, t.internalSlaUnit);
+      const vendorDeadline   = calcDeadline(t.vendorSlaValue,   t.vendorSlaUnit);
+      const governingDeadline = calcDeadline(ticket.slaExpectedValue, ticket.slaExpectedUnit);
 
-        // Find applicable escalation rules
-        const rules = await prisma.escalationMatrix.findMany({
+      const updateData: any = {};
+      let breachOccurred = false;
+
+      // Check internal SLA
+      if (internalDeadline && now > internalDeadline && !ticket.slaBreached) {
+        updateData.slaBreached = true;
+        breachOccurred = true;
+      }
+
+      // Check vendor SLA separately
+      if (vendorDeadline && now > vendorDeadline && !t.vendorSlaBreached) {
+        updateData.vendorSlaBreached = true;
+        breachOccurred = true;
+
+        // Vendor-specific escalation rules
+        const vendorRules = await prisma.escalationMatrix.findMany({
           where: {
             priority: ticket.priority,
+            slaType: "VENDOR",
+            applicableTo: { in: ["TICKET", null as any] },
             OR: [
               { departmentId: ticket.departmentId },
               { assetCategoryId: ticket.asset?.assetCategoryId ?? undefined },
+              { departmentId: null, assetCategoryId: null },
             ],
-          },
+          } as any,
           orderBy: { level: "asc" },
         });
 
-        for (const rule of rules) {
+        for (const rule of vendorRules) {
           await prisma.ticketEscalation.create({
             data: {
               ticketId: ticket.id,
               level: rule.level,
               notifiedEmployeeId: rule.notifyEmployeeId ?? undefined,
-              message: `Auto-escalation: SLA breached for ticket ${ticket.ticketId}`,
+              message: `[VENDOR SLA BREACH] Ticket ${ticket.ticketId}: vendor resolution SLA exceeded. Contact: ${(rule as any).vendorContactName ?? "vendor"}`,
             },
           });
         }
 
-        escalated.push(ticket.id);
+        // Notification for vendor SLA breach
+        await (prisma.notification as any).upsert?.({
+          where: { dedupeKey: `vendor-sla-breach-${ticket.id}` },
+          create: {
+            type: "SLA_BREACH",
+            title: "Vendor SLA Breached",
+            message: `Ticket ${ticket.ticketId} exceeded vendor contractual SLA.`,
+            priority: "HIGH",
+            ticketId: ticket.id,
+            dedupeKey: `vendor-sla-breach-${ticket.id}`,
+          },
+          update: {},
+        }).catch(() => null);
       }
+
+      // Check governing (internal) SLA breach for escalation
+      if (governingDeadline && now > governingDeadline && !ticket.slaBreached) {
+        updateData.slaBreached = true;
+        breachOccurred = true;
+
+        const internalRules = await prisma.escalationMatrix.findMany({
+          where: {
+            priority: ticket.priority,
+            slaType: { in: ["INTERNAL", null as any] },
+            applicableTo: { in: ["TICKET", null as any] },
+            OR: [
+              { departmentId: ticket.departmentId },
+              { assetCategoryId: ticket.asset?.assetCategoryId ?? undefined },
+              { departmentId: null, assetCategoryId: null },
+            ],
+          } as any,
+          orderBy: { level: "asc" },
+        });
+
+        for (const rule of internalRules) {
+          await prisma.ticketEscalation.create({
+            data: {
+              ticketId: ticket.id,
+              level: rule.level,
+              notifiedEmployeeId: rule.notifyEmployeeId ?? undefined,
+              message: `[INTERNAL SLA BREACH] Ticket ${ticket.ticketId}: internal resolution SLA exceeded`,
+            },
+          });
+        }
+
+        // Notification
+        await (prisma.notification.upsert as any)({
+          where: { dedupeKey: `sla-breach-${ticket.id}` },
+          create: {
+            type: "SLA_BREACH",
+            title: "SLA Breached",
+            message: `Ticket ${ticket.ticketId} for ${ticket.asset.assetName} has breached internal SLA.`,
+            priority: "HIGH",
+            ticketId: ticket.id,
+            dedupeKey: `sla-breach-${ticket.id}`,
+          },
+          update: {},
+        });
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await prisma.ticket.update({ where: { id: ticket.id }, data: updateData });
+      }
+
+      if (breachOccurred) escalated.push(ticket.id);
     }
 
     res.json({ escalated: escalated.length, ticketIds: escalated });

@@ -6,38 +6,104 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 export const seedDefaultModules = async (req: Request, res: Response) => {
   try {
     const defaults = [
-      // { name: "dashboard",      label: "Dashboard",           icon: "pi pi-th-large",     path: "/dashboard",      sortOrder: 1,  items: [] },
-      { name: "master-dashboard", label: "Dashboard",  icon: "pi pi-chart-bar",    path: "/master-dashboard", sortOrder: 2, items: [] },
-      { name: "assets",         label: "Assets Master",       icon: "pi pi-database",     path: "/assets",         sortOrder: 3,
+      // ── Overview ──
+      { name: "master-dashboard", label: "Dashboard", icon: "pi pi-chart-bar", path: "/master-dashboard", sortOrder: 1, items: [] },
+      { name: "my-assets", label: "My Assets", icon: "pi pi-id-card", path: "/my-assets", sortOrder: 2, items: [] },
+
+      // ── Asset Management ──
+      { name: "asset-master", label: "Asset Master", icon: "pi pi-database", path: "/assets", sortOrder: 3,
         items: [
-          { name: "view",        label: "View Assets",        path: "/assets/view",        icon: "pi pi-eye",       sortOrder: 1 },
-          { name: "create",      label: "New Asset",          path: "/assets/new",         icon: "pi pi-plus",      sortOrder: 2 },
-          { name: "edit",        label: "Edit Asset",         path: "/assets/edit",        icon: "pi pi-pencil",    sortOrder: 3 },
-          { name: "delete",      label: "Delete Asset",       path: null,                  icon: "pi pi-trash",     sortOrder: 4 },
-          { name: "assignments", label: "Assignments",        path: "/assets/assignments", icon: "pi pi-user",      sortOrder: 5 },
-          { name: "transfer",    label: "Transfer",           path: "/transfer",           icon: "pi pi-arrows-h",  sortOrder: 6 },
-          { name: "import",      label: "Import",             path: "/import",             icon: "pi pi-upload",    sortOrder: 7 },
+          { name: "view-assets",       label: "View Assets",       path: "/assets/view",       icon: "pi pi-eye",       sortOrder: 1 },
+          { name: "new-asset",         label: "New Asset",         path: "/assets/new",        icon: "pi pi-plus",      sortOrder: 2 },
+          { name: "assignments",       label: "Assignments",       path: "/assets/assignments",icon: "pi pi-user",      sortOrder: 3 },
+          { name: "transfer",          label: "Transfer",          path: "/transfer",          icon: "pi pi-arrows-h",  sortOrder: 4 },
+          { name: "import",            label: "Import",            path: "/import",            icon: "pi pi-upload",    sortOrder: 5 },
+          { name: "sub-assets",        label: "Sub-Assets",        path: "/sub-assets",        icon: "pi pi-sitemap",   sortOrder: 6 },
+          { name: "department-assets", label: "Department Assets",  path: "/department-assets", icon: "pi pi-building",  sortOrder: 7 },
+          { name: "revenue-log",       label: "Revenue Log",        path: "/revenue-log",       icon: "pi pi-chart-line",sortOrder: 8 },
+          { name: "asset-disposal",    label: "Asset Disposal",     path: "/disposal",          icon: "pi pi-trash",     sortOrder: 9 },
         ]
       },
-      { name: "tickets",        label: "Ticket for Repair",   icon: "pi pi-wrench",        path: "/ticket",         sortOrder: 4,
+      { name: "asset-indent", label: "Asset Indent", icon: "pi pi-list-check", path: "/asset-indent", sortOrder: 4, items: [] },
+
+      // ── Procurement ──
+      // { name: "procurement", label: "Procurement", icon: "pi pi-shopping-cart", path: "/procurement", sortOrder: 5,
+      //   items: [
+      //     { name: "purchase-orders", label: "Purchase Orders",      path: "/purchase-orders", icon: "pi pi-file-edit", sortOrder: 1 },
+      //     { name: "goods-receipts",  label: "Goods Receipt (GRA)", path: "/goods-receipts",  icon: "pi pi-inbox",     sortOrder: 2 },
+      //   ]
+      // },
+
+      // ── Store & Inventory ──
+      { name: "store-management", label: "Store & Inventory", icon: "pi pi-warehouse", path: "/store-management", sortOrder: 6, items: [] },
+
+      // ── Maintenance & Service ──
+      { name: "maintenance", label: "Maintenance", icon: "pi pi-wrench", path: "/maintenance", sortOrder: 7,
         items: [
-          { name: "view",   label: "View Tickets",  path: "/ticket/view", icon: "pi pi-eye",  sortOrder: 1 },
-          { name: "create", label: "New Ticket",    path: "/ticket/new",  icon: "pi pi-plus", sortOrder: 2 },
-          { name: "assign", label: "Assign Ticket", path: null,           icon: "pi pi-user", sortOrder: 3 },
+          { name: "repair-tickets",         label: "Repair Tickets",         path: "/ticket/view",             icon: "pi pi-wrench",    sortOrder: 1 },
+          { name: "new-ticket",             label: "New Ticket",             path: "/ticket/new",              icon: "pi pi-plus",      sortOrder: 2 },
+          { name: "work-orders",            label: "Work Orders",            path: "/work-orders",             icon: "pi pi-briefcase", sortOrder: 3 },
+          { name: "preventive-maintenance", label: "Preventive Maintenance", path: "/preventive-maintenance",  icon: "pi pi-calendar",  sortOrder: 4 },
+          { name: "calibration",            label: "Calibration",            path: "/calibration",             icon: "pi pi-sliders-h", sortOrder: 5 },
+          { name: "pm-checklists",         label: "PM Checklists",          path: "/pm-checklist",            icon: "pi pi-list-check",sortOrder: 6 },
         ]
       },
-      { name: "warranty",       label: "Warranty & AMC",      icon: "pi pi-shield",       path: "/warranty",       sortOrder: 5,  items: [] },
-      { name: "calibration",    label: "Calibration",         icon: "pi pi-sliders-h",    path: "/calibration",    sortOrder: 6,  items: [] },
-      { name: "gate-pass",      label: "Gate Pass",           icon: "pi pi-id-card",      path: "/gate-pass",      sortOrder: 7,  items: [] },
-      { name: "acknowledgement",label: "Acknowledgement",     icon: "pi pi-check-square", path: "/acknowledgement",sortOrder: 8,  items: [] },
-      { name: "sla",            label: "SLA Matrix",          icon: "pi pi-clock",        path: "/sla",            sortOrder: 9,  items: [] },
-      { name: "escalation",     label: "Escalation Matrix",   icon: "pi pi-sort-alt",     path: "/escalation",     sortOrder: 10, items: [] },
-      { name: "support-matrix", label: "Support Matrix",      icon: "pi pi-users",        path: "/support-matrix", sortOrder: 11, items: [] },
-      { name: "inventory",      label: "Inventory",           icon: "pi pi-box",          path: "/master",         sortOrder: 12, items: [] },
-      { name: "notifications",  label: "Notifications",       icon: "pi pi-bell",         path: "/notifications",  sortOrder: 13, items: [] },
-      { name: "master-settings",label: "Master Settings",     icon: "pi pi-cog",          path: "/master-settings",sortOrder: 14, items: [] },
-      { name: "module-access",  label: "Module Access",       icon: "pi pi-lock",         path: "/module-access",  sortOrder: 15, items: [] },
-      { name: "settings", label: "Settings", icon: "pi pi-user-edit", path: "/settings", sortOrder: 16,
+
+      // ── Contracts & Coverage ──
+      { name: "contracts-coverage", label: "Contracts & Coverage", icon: "pi pi-verified", path: "/contracts", sortOrder: 8,
+        items: [
+          { name: "warranty",           label: "Warranty",            path: "/warranty-management",  icon: "pi pi-verified",  sortOrder: 1 },
+          { name: "insurance",          label: "Insurance",           path: "/insurance-management", icon: "pi pi-shield",    sortOrder: 2 },
+          { name: "service-contracts",  label: "Service Contracts",   path: "/service-contracts",    icon: "pi pi-file-edit", sortOrder: 3 },
+          { name: "vendor-performance", label: "Vendor Performance",  path: "/vendor-performance",   icon: "pi pi-star",      sortOrder: 4 },
+        ]
+      },
+
+      // ── Finance & Analytics ──
+      { name: "finance-analytics", label: "Finance & Analytics", icon: "pi pi-indian-rupee", path: "/finance", sortOrder: 9,
+        items: [
+          { name: "financial-dashboard", label: "Financial Dashboard", path: "/financial-dashboard", icon: "pi pi-indian-rupee", sortOrder: 1 },
+          { name: "cfo-dashboard",       label: "CFO Dashboard",      path: "/cfo-dashboard",       icon: "pi pi-chart-pie",   sortOrder: 2 },
+          { name: "coo-dashboard",       label: "COO Dashboard",      path: "/coo-dashboard",       icon: "pi pi-gauge",       sortOrder: 3 },
+          { name: "cost-analysis",       label: "Cost Analysis",      path: "/cost-analysis",       icon: "pi pi-chart-bar",   sortOrder: 4 },
+          { name: "decision-engine",     label: "Decision Engine",    path: "/decision-engine",     icon: "pi pi-microchip",   sortOrder: 5 },
+          { name: "batch-depreciation",  label: "Batch Depreciation", path: "/batch-depreciation",  icon: "pi pi-chart-line",  sortOrder: 6 },
+          { name: "reports",             label: "Reports",            path: "/reports",              icon: "pi pi-file",        sortOrder: 7 },
+        ]
+      },
+
+      // ── Operations ──
+      { name: "operations", label: "Operations", icon: "pi pi-cog", path: "/operations", sortOrder: 10,
+        items: [
+          { name: "gate-pass",       label: "Gate Pass",       path: "/gate-pass",       icon: "pi pi-id-card",      sortOrder: 1 },
+          { name: "acknowledgement", label: "Acknowledgement", path: "/acknowledgement", icon: "pi pi-check-square", sortOrder: 2 },
+          { name: "physical-audit",  label: "Physical Audit",  path: "/asset-audit",     icon: "pi pi-clipboard",    sortOrder: 3 },
+          { name: "employee-exit",   label: "Employee Exit",   path: "/employee-exit",   icon: "pi pi-sign-out",     sortOrder: 4 },
+          { name: "document-vault",  label: "Document Vault",  path: "/document-vault",  icon: "pi pi-folder-open",  sortOrder: 5 },
+          { name: "knowledge-base",  label: "Knowledge Base",  path: "/knowledge-base",  icon: "pi pi-book",         sortOrder: 6 },
+        ]
+      },
+
+      // ── Administration ──
+      { name: "administration", label: "Administration", icon: "pi pi-shield", path: "/admin", sortOrder: 11,
+        items: [
+          { name: "sla-matrix",                label: "SLA Matrix",                path: "/sla",                       icon: "pi pi-clock",      sortOrder: 1 },
+          { name: "escalation-matrix",         label: "Escalation Matrix",         path: "/escalation",                icon: "pi pi-sort-alt",   sortOrder: 2 },
+          { name: "support-matrix",            label: "Support Matrix",            path: "/support-matrix",            icon: "pi pi-users",      sortOrder: 3 },
+          { name: "master-settings",           label: "Master Settings",           path: "/master-settings",           icon: "pi pi-cog",        sortOrder: 4 },
+          { name: "module-access",             label: "Module Access",             path: "/module-access",             icon: "pi pi-lock",       sortOrder: 5 },
+          { name: "system-config",             label: "System Config",             path: "/tenant-config",             icon: "pi pi-sliders-v",  sortOrder: 6 },
+          { name: "user-activity",             label: "User Activity",             path: "/user-activity",             icon: "pi pi-users",      sortOrder: 7 },
+          { name: "audit-trail",               label: "Audit Trail",               path: "/audit-trail",               icon: "pi pi-history",    sortOrder: 8 },
+          { name: "notifications",             label: "Notifications",             path: "/notifications",             icon: "pi pi-bell",       sortOrder: 9 },
+          { name: "notification-preferences",  label: "Notification Preferences",  path: "/notification-preferences",  icon: "pi pi-sliders-h",  sortOrder: 10 },
+          { name: "email-templates",           label: "Email Templates",           path: "/email-templates",           icon: "pi pi-envelope",   sortOrder: 11 },
+          { name: "inventory-master",          label: "Inventory Master",          path: "/master",                    icon: "pi pi-box",        sortOrder: 12 },
+        ]
+      },
+
+      // ── Settings ──
+      { name: "settings", label: "Settings", icon: "pi pi-user-edit", path: "/settings", sortOrder: 12,
         items: [
           { name: "profile",           label: "Profile",           path: "/settings", icon: "pi pi-user",       sortOrder: 1 },
           { name: "reset-password",    label: "Reset Password",    path: "/settings", icon: "pi pi-lock",       sortOrder: 2 },
@@ -86,6 +152,31 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
   } catch (error) {
     console.error("seedDefaultModules error:", error);
     res.status(500).json({ message: "Failed to seed modules" });
+  }
+};
+
+// ─── Reset & Re-seed (DESTRUCTIVE — wipes all modules/items/permissions) ─────
+export const resetAndReseed = async (req: Request, res: Response) => {
+  try {
+    // Delete in correct order (FK constraints)
+    await prisma.modulePermission.deleteMany({});
+    await prisma.appModuleItem.deleteMany({});
+    await prisma.appModule.deleteMany({});
+
+    // Now re-seed by calling the same logic as seedDefaultModules
+    // Re-use the defaults array from above by forwarding to seed
+    // We can't call seedDefaultModules directly, so duplicate the insert logic
+    const seedReq = { ...req } as any;
+    const seedRes = {
+      json: (data: any) => res.json({ message: "Reset & re-seed complete", ...data }),
+      status: (code: number) => ({ json: (data: any) => res.status(code).json(data) }),
+    } as any;
+
+    // Forward to seed
+    await seedDefaultModules(seedReq, seedRes);
+  } catch (error) {
+    console.error("resetAndReseed error:", error);
+    res.status(500).json({ message: "Failed to reset and re-seed modules" });
   }
 };
 
@@ -341,7 +432,10 @@ export const getMyAccess = async (req: AuthenticatedRequest, res: Response) => {
       return;
     }
 
-    const { role, employeeDbId } = req.user;
+    const { role: rawRole, employeeDbId } = req.user;
+
+    // Normalize: treat "user" as "EXECUTIVE" for module access
+    const role = rawRole === "user" ? "EXECUTIVE" : rawRole;
 
     // ADMIN gets everything
     if (role === "ADMIN") {

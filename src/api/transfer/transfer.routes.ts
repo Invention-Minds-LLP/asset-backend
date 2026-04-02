@@ -14,18 +14,22 @@ import {
   requestTransferredAssetReturn,
   approveTransferredAssetReturn,
   getTransferredAssetReturnChecklist,
-  completeTransferredAssetReturn
+  completeTransferredAssetReturn,
+  managementApproveTransfer,
+  getPendingMgmtApprovals
 } from "./transfer.controller";
 
 const router = express.Router();
 
 router.post("/assets/transfer/request", authenticateToken, requestAssetTransfer);
+router.post("/assets/transfer/:id/management-approve", authenticateToken, managementApproveTransfer);
 router.post("/assets/transfer/:id/approve", authenticateToken, approveAssetTransfer);
 router.post("/assets/transfer/:id/reject", authenticateToken, rejectAssetTransfer);
 router.post("/assets/transfer/:id/return", authenticateToken, requestTransferredAssetReturn);
 router.get("/assets/:assetId/transfer-history", authenticateToken, getTransferHistory);
 router.get("/assets/transfer/pending", authenticateToken, getPendingTransferRequests);
 router.get("/assets/transfer/my-pending-approvals", authenticateToken, getMyPendingTransferApprovals);
+router.get("/assets/transfer/pending-mgmt-approvals", authenticateToken, getPendingMgmtApprovals);
 router.post("/assets/transfer/:id/return", authenticateToken, requestTransferredAssetReturn);
 router.post("/assets/transfer/:id/approve-return", authenticateToken, approveTransferredAssetReturn);
 router.get(

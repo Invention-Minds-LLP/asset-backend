@@ -94,3 +94,32 @@ export const getDepartmentNameByEmployeeID = async (req: Request, res: Response)
     res.status(500).json({ message: "Internal server error" });
   }
 };
+
+// GET /api/employees/:id/assets — all assets assigned to a specific employee
+export const getEmployeeAssets = async (req: Request, res: Response) => {
+  try {
+    const empId = Number(req.params.id);
+
+    const employee = await prisma.employee.findUnique({
+      where: { id: empId },
+      select: { id: true, name: true, employeeID: true, designation: true },
+    });
+    if (!employee) {
+      res.status(404).json({ message: "Employee not found" });
+      return;
+    }
+
+    const assets = await prisma.asset.findMany({
+      where: { allottedToId: empId, status: { notIn: ["DISPOSED", "CONDEMNED"] } },
+      include: {
+        assetCategory: { select: { id: true, name: true } },
+        department: { select: { id: true, name: true } },
+      },
+      orderBy: { assetName: "asc" },
+    });
+
+    res.json({ employee, totalAssets: assets.length, assets });
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to fetch employee assets" });
+  }
+};

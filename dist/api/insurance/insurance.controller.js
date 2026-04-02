@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getClaimsByAsset = exports.updateClaimStatus = exports.createInsuranceClaim = exports.renewInsurancePolicy = exports.uploadInsuranceDocument = exports.markInsuranceExpired = exports.getInsuranceHistory = exports.updateInsurancePolicy = exports.addInsurancePolicy = void 0;
+exports.getInsuranceStats = exports.getAllInsuranceClaims = exports.getAllInsurancePolicies = exports.getClaimsByAsset = exports.updateClaimStatus = exports.createInsuranceClaim = exports.renewInsurancePolicy = exports.uploadInsuranceDocument = exports.markInsuranceExpired = exports.getInsuranceHistory = exports.updateInsurancePolicy = exports.addInsurancePolicy = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const addInsurancePolicy = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -289,3 +289,157 @@ const getClaimsByAsset = (req, res) => __awaiter(void 0, void 0, void 0, functio
     }
 });
 exports.getClaimsByAsset = getClaimsByAsset;
+// ─── Get All Insurance Policies (standalone page) ─────────────────────────────
+const getAllInsurancePolicies = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { status, assetId, provider, page = "1", limit = "25", search, exportCsv } = req.query;
+        const where = {};
+        if (status)
+            where.policyStatus = String(status);
+        if (assetId)
+            where.assetId = Number(assetId);
+        if (provider)
+            where.provider = { contains: String(provider) };
+        if (search) {
+            where.OR = [
+                { policyNumber: { contains: String(search) } },
+                { provider: { contains: String(search) } },
+                { asset: { assetName: { contains: String(search) } } },
+            ];
+        }
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, policies] = yield Promise.all([
+            prismaClient_1.default.assetInsurance.count({ where }),
+            prismaClient_1.default.assetInsurance.findMany(Object.assign({ where, include: {
+                    asset: { select: { id: true, assetId: true, assetName: true, serialNumber: true } },
+                    claims: true,
+                }, orderBy: { createdAt: "desc" } }, (exportCsv !== "true" ? { skip, take } : {}))),
+        ]);
+        if (exportCsv === "true") {
+            const csvRows = policies.map((p) => {
+                var _a, _b, _c;
+                return ({
+                    PolicyNumber: p.policyNumber || "",
+                    Provider: p.provider || "",
+                    AssetId: ((_a = p.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = p.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    PolicyType: p.policyType || "",
+                    Status: p.policyStatus || "",
+                    CoverageAmount: p.coverageAmount ? Number(p.coverageAmount) : "",
+                    PremiumAmount: p.premiumAmount ? Number(p.premiumAmount) : "",
+                    StartDate: p.startDate ? new Date(p.startDate).toISOString().split("T")[0] : "",
+                    EndDate: p.endDate ? new Date(p.endDate).toISOString().split("T")[0] : "",
+                    ClaimsCount: ((_c = p.claims) === null || _c === void 0 ? void 0 : _c.length) || 0,
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=insurance-policies.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
+        res.json({ data: policies, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch insurance policies" });
+    }
+});
+exports.getAllInsurancePolicies = getAllInsurancePolicies;
+// ─── Get All Insurance Claims (standalone page) ──────────────────────────────
+const getAllInsuranceClaims = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { status, assetId, page = "1", limit = "25", search, exportCsv } = req.query;
+        const where = {};
+        if (status)
+            where.claimStatus = String(status);
+        if (assetId)
+            where.assetId = Number(assetId);
+        if (search) {
+            where.OR = [
+                { claimNumber: { contains: String(search) } },
+                { reason: { contains: String(search) } },
+                { asset: { assetName: { contains: String(search) } } },
+            ];
+        }
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, claims] = yield Promise.all([
+            prismaClient_1.default.insuranceClaim.count({ where }),
+            prismaClient_1.default.insuranceClaim.findMany(Object.assign({ where, include: {
+                    asset: { select: { id: true, assetId: true, assetName: true } },
+                    insurance: { select: { id: true, policyNumber: true, provider: true } },
+                }, orderBy: { createdAt: "desc" } }, (exportCsv !== "true" ? { skip, take } : {}))),
+        ]);
+        if (exportCsv === "true") {
+            const csvRows = claims.map((c) => {
+                var _a, _b, _c, _d;
+                return ({
+                    ClaimNumber: c.claimNumber || "",
+                    AssetId: ((_a = c.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = c.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    PolicyNumber: ((_c = c.insurance) === null || _c === void 0 ? void 0 : _c.policyNumber) || "",
+                    Provider: ((_d = c.insurance) === null || _d === void 0 ? void 0 : _d.provider) || "",
+                    ClaimDate: c.claimDate ? new Date(c.claimDate).toISOString().split("T")[0] : "",
+                    ClaimAmount: c.claimAmount ? Number(c.claimAmount) : "",
+                    ApprovedAmount: c.approvedAmount ? Number(c.approvedAmount) : "",
+                    Status: c.claimStatus || "",
+                    Reason: c.reason || "",
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=insurance-claims.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
+        res.json({ data: claims, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch insurance claims" });
+    }
+});
+exports.getAllInsuranceClaims = getAllInsuranceClaims;
+// ─── Insurance Dashboard Stats ───────────────────────────────────────────────
+const getInsuranceStats = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const [totalPolicies, activePolicies, expiredPolicies, totalClaims, pendingClaims, approvedClaims, settledClaims] = yield Promise.all([
+            prismaClient_1.default.assetInsurance.count(),
+            prismaClient_1.default.assetInsurance.count({ where: { policyStatus: "ACTIVE" } }),
+            prismaClient_1.default.assetInsurance.count({ where: { policyStatus: "EXPIRED" } }),
+            prismaClient_1.default.insuranceClaim.count(),
+            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "SUBMITTED" } }),
+            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "APPROVED" } }),
+            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "SETTLED" } }),
+        ]);
+        // Expiring soon (within 30 days)
+        const now = new Date();
+        const thirtyDaysLater = new Date();
+        thirtyDaysLater.setDate(now.getDate() + 30);
+        const expiringSoon = yield prismaClient_1.default.assetInsurance.count({
+            where: {
+                policyStatus: "ACTIVE",
+                endDate: { gte: now, lte: thirtyDaysLater },
+            },
+        });
+        res.json({
+            totalPolicies,
+            activePolicies,
+            expiredPolicies,
+            expiringSoon,
+            totalClaims,
+            pendingClaims,
+            approvedClaims,
+            settledClaims,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        res.status(500).json({ message: "Failed to fetch insurance stats" });
+    }
+});
+exports.getInsuranceStats = getInsuranceStats;

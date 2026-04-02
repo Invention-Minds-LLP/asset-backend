@@ -16,6 +16,7 @@ router.post("/", authMiddleware_1.authenticateToken, assets_controller_1.createA
 router.put("/:id", authMiddleware_1.authenticateToken, assets_controller_1.updateAsset);
 router.delete("/:id", authMiddleware_1.authenticateToken, assets_controller_1.deleteAsset);
 router.post('/:assetId/upload-image', assets_controller_1.uploadAssetImage);
+router.post('/:id/hod-approval', authMiddleware_1.authenticateToken, assets_controller_1.hodApproveAsset);
 router.get('/:assetId/specifications', assets_controller_1.getAssetSpecifications);
 router.post('/specifications', assets_controller_1.createAssetSpecification);
 router.put('/specifications/:id', assets_controller_1.updateAssetSpecification);

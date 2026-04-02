@@ -23,7 +23,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getPendingTransferApprovals = exports.resolveTicket = exports.holdTicket = exports.startWork = exports.getMyRaisedTickets = exports.getMyAssignedTickets = exports.getTransferHistory = exports.completeTicketTransfer = exports.rejectTicketTransfer = exports.approveTicketTransfer = exports.requestTicketTransfer = exports.uploadTicketImage = exports.deleteTicket = exports.getAssignmentHistory = exports.closeTicket = exports.terminateTicket = exports.reassignTicket = exports.assignTicket = exports.updateTicket = exports.updateTicketBasic = exports.createTicket = exports.getTicketById = exports.getAllTickets = exports.getTicketMetrics = void 0;
+exports.addCollectionNote = exports.completeTicketWork = exports.getPendingTransferApprovals = exports.resolveTicket = exports.holdTicket = exports.startWork = exports.getMyRaisedTickets = exports.getMyAssignedTickets = exports.getTransferHistory = exports.completeTicketTransfer = exports.rejectTicketTransfer = exports.approveTicketTransfer = exports.requestTicketTransfer = exports.uploadTicketImage = exports.deleteTicket = exports.getAssignmentHistory = exports.closeTicket = exports.terminateTicket = exports.reassignTicket = exports.assignTicket = exports.updateTicket = exports.updateTicketBasic = exports.createTicket = exports.getTicketById = exports.getAllTickets = exports.getTicketMetrics = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
@@ -170,15 +170,27 @@ exports.getTicketMetrics = getTicketMetrics;
 function detectServiceType(tx, assetId) {
     return __awaiter(this, void 0, void 0, function* () {
         const now = new Date();
-        const warranty = yield tx.warranty.findUnique({ where: { assetId } });
-        if ((warranty === null || warranty === void 0 ? void 0 : warranty.isUnderWarranty) && warranty.warrantyEnd >= now)
+        const warranty = yield tx.warranty.findFirst({
+            where: {
+                assetId,
+                isActive: true,
+            },
+            orderBy: {
+                warrantyEnd: 'desc',
+            },
+        });
+        if ((warranty === null || warranty === void 0 ? void 0 : warranty.isUnderWarranty) && warranty.warrantyEnd >= now) {
             return "WARRANTY";
+        }
         const contract = yield tx.serviceContract.findFirst({
             where: {
                 assetId,
                 status: "ACTIVE",
                 startDate: { lte: now },
                 endDate: { gte: now },
+            },
+            orderBy: {
+                endDate: 'desc',
             },
         });
         if (contract)
@@ -282,64 +294,88 @@ function createStatusHistory(tx, args) {
 const getAllTickets = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a;
     try {
-        // req.user set by authenticateToken
         if (!((_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId)) {
             res.status(401).json({ message: "Unauthorized" });
             return;
         }
         const { role, employeeDbId } = req.user;
-        // ADMIN => all tickets
-        if (role === "ADMIN") {
-            const tickets = yield prismaClient_1.default.ticket.findMany({
-                include: {
-                    asset: true,
-                    department: true,
-                    assignedTo: true,
-                    raisedBy: true,
-                },
-                orderBy: { id: "desc" },
-            });
-            res.json(tickets);
-            return;
-        }
-        // HOD => only tickets of their department
+        const { exportCsv, search, status, priority } = req.query;
+        // Build role-based where
+        let where = {};
         if (role === "HOD") {
             const me = yield prismaClient_1.default.employee.findUnique({
                 where: { id: employeeDbId },
                 select: { departmentId: true },
             });
             if (!(me === null || me === void 0 ? void 0 : me.departmentId)) {
-                res.json([]); // no department mapped
+                res.json(exportCsv ? [] : []);
                 return;
             }
-            const tickets = yield prismaClient_1.default.ticket.findMany({
-                where: { departmentId: me.departmentId },
-                include: {
-                    asset: true,
-                    department: true,
-                    assignedTo: true,
-                    raisedBy: true,
-                },
-                orderBy: { id: "desc" },
-            });
-            res.json(tickets);
-            return;
+            where.departmentId = me.departmentId;
         }
-        // Others (Supervisor/Executive) => choose rule (common options below)
-        // Option A: return all (not recommended)
-        // Option B: return only my assigned + my raised
+        else if (role !== "ADMIN") {
+            where.OR = [{ assignedToId: employeeDbId }, { raisedById: employeeDbId }];
+        }
+        // Additional filters
+        if (status)
+            where.status = String(status);
+        if (priority)
+            where.priority = String(priority);
+        if (search) {
+            const searchFilter = [
+                { ticketId: { contains: String(search) } },
+                { detailedDesc: { contains: String(search) } },
+                { issueType: { contains: String(search) } },
+            ];
+            if (where.OR) {
+                // Combine role filter with search
+                where = { AND: [{ OR: where.OR }, { OR: searchFilter }] };
+            }
+            else {
+                where.OR = searchFilter;
+            }
+        }
         const tickets = yield prismaClient_1.default.ticket.findMany({
-            where: {
-                OR: [{ assignedToId: employeeDbId }, { raisedById: employeeDbId }],
-            },
+            where,
             include: {
-                asset: true,
-                department: true,
-                assignedTo: true,
-                raisedBy: true,
+                asset: { select: { assetId: true, assetName: true } },
+                department: { select: { name: true } },
+                assignedTo: { select: { name: true, employeeID: true } },
+                raisedBy: { select: { name: true, employeeID: true } },
             },
             orderBy: { id: "desc" },
         });
+        if (exportCsv === "true") {
+            const csvRows = tickets.map((t) => {
+                var _a, _b, _c, _d, _e;
+                return ({
+                    TicketID: t.ticketId,
+                    AssetID: ((_a = t.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = t.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    Department: ((_c = t.department) === null || _c === void 0 ? void 0 : _c.name) || "",
+                    IssueType: t.issueType,
+                    Priority: t.priority,
+                    Status: t.status,
+                    RaisedBy: ((_d = t.raisedBy) === null || _d === void 0 ? void 0 : _d.name) || "",
+                    AssignedTo: ((_e = t.assignedTo) === null || _e === void 0 ? void 0 : _e.name) || "",
+                    ServiceType: t.serviceType || "",
+                    TotalCost: t.totalCost ? Number(t.totalCost) : "",
+                    SLABreached: t.slaBreached ? "Yes" : "No",
+                    RootCause: t.rootCause || "",
+                    Resolution: t.resolutionSummary || "",
+                    CreatedAt: t.createdAt ? new Date(t.createdAt).toISOString().split("T")[0] : "",
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).map((v) => {
+                const str = String(v !== null && v !== void 0 ? v : "").replace(/"/g, '""');
+                return str.includes(",") || str.includes('"') || str.includes("\n") ? `"${str}"` : str;
+            }).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=tickets.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
         res.json(tickets);
     }
     catch (e) {
@@ -380,7 +416,7 @@ const getTicketById = (req, res) => __awaiter(void 0, void 0, void 0, function* 
 });
 exports.getTicketById = getTicketById;
 const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r;
     try {
         const user = mustUser(req);
         const assetId = Number(req.body.assetId);
@@ -471,6 +507,77 @@ const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
         //   }
         //   return ticket;
         // });
+        // ── SLA Resolution ─────────────────────────────────────────────────────
+        // 1. Internal SLA: from AssetSlaMatrix by asset category + ticket priority
+        const priority = (req.body.priority || "MEDIUM").toUpperCase();
+        const slaCategoryMap = {
+            LOW: "LOW", MEDIUM: "MEDIUM", HIGH: "HIGH", CRITICAL: "HIGH",
+        };
+        const slaCategory = (_a = slaCategoryMap[priority]) !== null && _a !== void 0 ? _a : "MEDIUM";
+        const internalSlaRow = asset.assetCategoryId
+            ? yield prismaClient_1.default.assetSlaMatrix.findFirst({
+                where: {
+                    assetCategoryId: asset.assetCategoryId,
+                    slaCategory,
+                    isActive: true,
+                },
+                orderBy: { level: "asc" },
+            })
+            : null;
+        const internalSlaValue = (_c = (_b = internalSlaRow === null || internalSlaRow === void 0 ? void 0 : internalSlaRow.resolutionTimeValue) !== null && _b !== void 0 ? _b : asset.slaResolutionValue) !== null && _c !== void 0 ? _c : null;
+        const internalSlaUnit = (_e = (_d = internalSlaRow === null || internalSlaRow === void 0 ? void 0 : internalSlaRow.resolutionTimeUnit) !== null && _d !== void 0 ? _d : asset.slaResolutionUnit) !== null && _e !== void 0 ? _e : null;
+        // 2. Vendor SLA: from active AMC/CMC service contract
+        const activeContract = yield prismaClient_1.default.serviceContract.findFirst({
+            where: {
+                assetId,
+                status: "ACTIVE",
+                contractType: { in: ["AMC", "CMC"] },
+                endDate: { gte: new Date() },
+            },
+            orderBy: { endDate: "asc" },
+        });
+        const vendorSlaValue = (_f = activeContract === null || activeContract === void 0 ? void 0 : activeContract.vendorResolutionValue) !== null && _f !== void 0 ? _f : null;
+        const vendorSlaUnit = (_g = activeContract === null || activeContract === void 0 ? void 0 : activeContract.vendorResolutionUnit) !== null && _g !== void 0 ? _g : null;
+        // 3. Governing SLA = strictest (smallest in hours), prefer vendor if set
+        function toHours(val, unit) {
+            if (!val || !unit)
+                return Infinity;
+            if (unit === "HOURS")
+                return val;
+            if (unit === "DAYS")
+                return val * 24;
+            if (unit === "MINUTES")
+                return val / 60;
+            return Infinity;
+        }
+        let slaExpectedValue = null;
+        let slaExpectedUnit = null;
+        let slaSource = null;
+        const internalHrs = toHours(internalSlaValue, internalSlaUnit);
+        const vendorHrs = toHours(vendorSlaValue, vendorSlaUnit);
+        if (internalSlaValue && vendorSlaValue) {
+            slaSource = "BOTH";
+            // Use stricter (smaller) SLA as governing
+            if (vendorHrs <= internalHrs) {
+                slaExpectedValue = vendorSlaValue;
+                slaExpectedUnit = vendorSlaUnit;
+            }
+            else {
+                slaExpectedValue = internalSlaValue;
+                slaExpectedUnit = internalSlaUnit;
+            }
+        }
+        else if (vendorSlaValue) {
+            slaSource = "VENDOR";
+            slaExpectedValue = vendorSlaValue;
+            slaExpectedUnit = vendorSlaUnit;
+        }
+        else if (internalSlaValue) {
+            slaSource = "INTERNAL";
+            slaExpectedValue = internalSlaValue;
+            slaExpectedUnit = internalSlaUnit;
+        }
+        // ────────────────────────────────────────────────────────────────────────
         // 1) create ticket
         const created = yield prismaClient_1.default.ticket.create({
             data: {
@@ -481,15 +588,22 @@ const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 issueType: req.body.issueType,
                 detailedDesc: req.body.detailedDesc,
                 priority: req.body.priority,
-                photoOfIssue: (_a = req.body.photoOfIssue) !== null && _a !== void 0 ? _a : null,
-                location: (_c = (_b = req.body.location) !== null && _b !== void 0 ? _b : asset.currentLocation) !== null && _c !== void 0 ? _c : "UNKNOWN",
+                photoOfIssue: (_h = req.body.photoOfIssue) !== null && _h !== void 0 ? _h : null,
+                location: (_k = (_j = req.body.location) !== null && _j !== void 0 ? _j : asset.currentLocation) !== null && _k !== void 0 ? _k : "UNKNOWN",
                 status: "OPEN",
                 assignedTo: (supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) ? { connect: { id: supervisor.id } } : undefined,
-                assignedBy: (supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) ? { connect: { id: (_d = hod === null || hod === void 0 ? void 0 : hod.id) !== null && _d !== void 0 ? _d : user.employeeDbId } } : undefined,
+                assignedBy: (supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) ? { connect: { id: (_l = hod === null || hod === void 0 ? void 0 : hod.id) !== null && _l !== void 0 ? _l : user.employeeDbId } } : undefined,
                 lastAssignedAt: (supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) ? new Date() : null,
                 assignmentNote: (supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) ? "Auto-assigned to department supervisor" : null,
-                slaExpectedValue: (_e = asset.slaExpectedValue) !== null && _e !== void 0 ? _e : null,
-                slaExpectedUnit: (_f = asset.slaExpectedUnit) !== null && _f !== void 0 ? _f : null,
+                slaCategory,
+                slaSource,
+                slaExpectedValue,
+                slaExpectedUnit,
+                internalSlaValue,
+                internalSlaUnit,
+                vendorSlaValue,
+                vendorSlaUnit,
+                workCategory: (_m = req.body.workCategory) !== null && _m !== void 0 ? _m : null,
             },
         });
         // 2) status history
@@ -497,8 +611,8 @@ const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             data: {
                 ticketId: created.id,
                 status: created.status,
-                changedBy: (_h = (_g = user.employeeID) !== null && _g !== void 0 ? _g : user.name) !== null && _h !== void 0 ? _h : "system",
-                changedById: (_j = user.employeeDbId) !== null && _j !== void 0 ? _j : null,
+                changedBy: (_p = (_o = user.employeeID) !== null && _o !== void 0 ? _o : user.name) !== null && _p !== void 0 ? _p : "system",
+                changedById: (_q = user.employeeDbId) !== null && _q !== void 0 ? _q : null,
                 note: "Ticket created",
             },
         });
@@ -511,7 +625,7 @@ const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                     toEmployeeId: supervisor.id,
                     action: "ASSIGNED",
                     comment: "Auto-assigned to supervisor on ticket creation",
-                    performedById: (_k = hod === null || hod === void 0 ? void 0 : hod.id) !== null && _k !== void 0 ? _k : user.employeeDbId,
+                    performedById: (_r = hod === null || hod === void 0 ? void 0 : hod.id) !== null && _r !== void 0 ? _r : user.employeeDbId,
                 },
             });
         }
@@ -597,7 +711,58 @@ const updateTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
     }
 });
 exports.updateTicket = updateTicket;
+// export const assignTicket = async (req: any, res: Response) => {
+//   try {
+//     const user = mustUser(req);
+//     const ticketId = Number(req.params.id);
+//     const toEmployeeId = Number(req.body.toEmployeeId);
+//     const comment = String(req.body.comment || "").trim();
+//     if (!toEmployeeId) {
+//       res.status(400).json({ message: "toEmployeeId required" });
+//       return;
+//     }
+//     if (!comment) {
+//       res.status(400).json({ message: "comment required" });
+//       return;
+//     }
+//     const ticket = await requireAssetDeptHod(user, ticketId);
+//     const updated = await prisma.$transaction(async (tx) => {
+//       const upd = await tx.ticket.update({
+//         where: { id: ticketId },
+//         data: {
+//           assignedTo: { connect: { id: toEmployeeId } },
+//           assignedBy: { connect: { id: user.employeeDbId } },
+//           lastAssignedAt: new Date(),
+//           assignmentNote: comment,
+//           status: "ASSIGNED",
+//         },
+//       });
+//       await tx.ticketAssignmentHistory.create({
+//         data: {
+//           ticketId,
+//           fromEmployeeId: ticket.assignedToId ?? null,
+//           toEmployeeId,
+//           action: "ASSIGNED",
+//           comment,
+//           performedById: user.employeeDbId,
+//         },
+//       });
+//       await createStatusHistory(tx, {
+//         ticketDbId: ticketId,
+//         status: "ASSIGNED",
+//         changedBy: user.employeeID ?? user.name ?? "system",
+//         changedById: user.employeeDbId ?? null,
+//         note: comment,
+//       });
+//       return upd;
+//     });
+//     res.json(updated);
+//   } catch (e: any) {
+//     res.status(400).json({ message: e.message || "Failed to assign" });
+//   }
+// };
 const assignTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
     try {
         const user = mustUser(req);
         const ticketId = Number(req.params.id);
@@ -612,41 +777,42 @@ const assignTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             return;
         }
         const ticket = yield requireAssetDeptHod(user, ticketId);
-        const updated = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-            var _a, _b, _c, _d;
-            const upd = yield tx.ticket.update({
-                where: { id: ticketId },
-                data: {
-                    assignedTo: { connect: { id: toEmployeeId } },
-                    assignedBy: { connect: { id: user.employeeDbId } },
-                    lastAssignedAt: new Date(),
-                    assignmentNote: comment,
-                    status: "ASSIGNED",
-                },
-            });
-            yield tx.ticketAssignmentHistory.create({
-                data: {
-                    ticketId,
-                    fromEmployeeId: (_a = ticket.assignedToId) !== null && _a !== void 0 ? _a : null,
-                    toEmployeeId,
-                    action: "ASSIGNED",
-                    comment,
-                    performedById: user.employeeDbId,
-                },
-            });
-            yield createStatusHistory(tx, {
-                ticketDbId: ticketId,
+        // ✅ 1. Update ticket
+        const updated = yield prismaClient_1.default.ticket.update({
+            where: { id: ticketId },
+            data: {
+                assignedTo: { connect: { id: toEmployeeId } },
+                assignedBy: { connect: { id: user.employeeDbId } },
+                lastAssignedAt: new Date(),
+                assignmentNote: comment,
                 status: "ASSIGNED",
-                changedBy: (_c = (_b = user.employeeID) !== null && _b !== void 0 ? _b : user.name) !== null && _c !== void 0 ? _c : "system",
-                changedById: (_d = user.employeeDbId) !== null && _d !== void 0 ? _d : null,
-                note: comment,
-            });
-            return upd;
-        }));
+            },
+        });
+        // ✅ 2. Save assignment history
+        yield prismaClient_1.default.ticketAssignmentHistory.create({
+            data: {
+                ticketId,
+                fromEmployeeId: (_a = ticket.assignedToId) !== null && _a !== void 0 ? _a : null,
+                toEmployeeId,
+                action: "ASSIGNED",
+                comment,
+                performedById: user.employeeDbId,
+            },
+        });
+        // ✅ 3. Save status history
+        yield createStatusHistory(prismaClient_1.default, {
+            ticketDbId: ticketId,
+            status: "ASSIGNED",
+            changedBy: (_c = (_b = user.employeeID) !== null && _b !== void 0 ? _b : user.name) !== null && _c !== void 0 ? _c : "system",
+            changedById: (_d = user.employeeDbId) !== null && _d !== void 0 ? _d : null,
+            note: comment,
+        });
         res.json(updated);
+        return;
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to assign" });
+        res.status(400).json({ message: e.message || "Failed to assign" });
+        return;
     }
 });
 exports.assignTicket = assignTicket;
@@ -705,7 +871,7 @@ const reassignTicket = (req, res) => __awaiter(void 0, void 0, void 0, function*
         res.json(updated);
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to reassign" });
+        res.status(400).json({ message: e.message || "Failed to reassign" });
     }
 });
 exports.reassignTicket = reassignTicket;
@@ -742,7 +908,7 @@ const terminateTicket = (req, res) => __awaiter(void 0, void 0, void 0, function
         res.json(upd);
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to terminate" });
+        res.status(400).json({ message: e.message || "Failed to terminate" });
     }
 });
 exports.terminateTicket = terminateTicket;
@@ -886,118 +1052,132 @@ const uploadTicketImage = (req, res) => __awaiter(void 0, void 0, void 0, functi
     }
 });
 exports.uploadTicketImage = uploadTicketImage;
-const requestTicketTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    try {
-        const user = mustUser(req);
-        const ticketId = Number(req.params.id);
-        const { transferType, toDepartmentId, vendorId, comment } = req.body;
-        if (!comment) {
-            res.status(400).json({ message: "comment is required" });
-            return;
-        }
-        const ticket = yield prismaClient_1.default.ticket.findUnique({
-            where: { id: ticketId },
-        });
-        if (!ticket) {
-            res.status(404).json({ message: "Ticket not found" });
-            return;
-        }
-        const existingPending = yield prismaClient_1.default.ticketTransferHistory.findFirst({
-            where: { ticketId, status: "REQUESTED" },
-            orderBy: { createdAt: "desc" },
-        });
-        if (existingPending) {
-            res.status(400).json({ message: "A transfer request is already pending for this ticket" });
-            return;
-        }
-        if (transferType !== "INTERNAL_DEPARTMENT" && !vendorId) {
-            res.status(400).json({ message: "vendorId required for external transfer" });
-            return;
-        }
-        //  Get TARGET HOD
-        let targetHod = null;
-        if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
-            targetHod = yield prismaClient_1.default.employee.findFirst({
-                where: { departmentId: toDepartmentId, role: "HOD" },
-            });
-        }
-        // const result = await prisma.$transaction(async (tx) => {
-        //   const transfer = await tx.ticketTransferHistory.create({
-        //     data: {
-        //       ticketId,
-        //       transferType,
-        //       fromDepartmentId: ticket.departmentId,
-        //       toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
-        //       vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
-        //       comment,
-        //       requestedById: user.employeeDbId,
-        //     },
-        //   });
-        //   // 🔔 Notify target HOD
-        //   if (targetHod?.id) {
-        //     await createNotificationWithRecipients(tx, {
-        //       title: "Ticket Transfer Request",
-        //       message: `Ticket ${ticket.ticketId} transfer requested`,
-        //       ticketId: ticket.id,
-        //       createdById: user.employeeDbId,
-        //       recipients: [targetHod.id],
-        //     });
-        //   }
-        //   return transfer;
-        // });
-        const result = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-            var _a, _b;
-            const transfer = yield tx.ticketTransferHistory.create({
-                data: {
-                    ticketId,
-                    transferType,
-                    fromDepartmentId: ticket.departmentId,
-                    toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
-                    vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
-                    comment,
-                    requestedById: user.employeeDbId,
-                    status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED", // ✅ auto approve external
-                    approvedById: transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId, // ✅
-                },
-            });
-            // ✅ If EXTERNAL, update ticket immediately
-            if (transferType !== "INTERNAL_DEPARTMENT") {
-                const serviceType = yield detectServiceType(tx, ticket.assetId);
-                yield tx.ticket.update({
-                    where: { id: ticketId },
-                    data: {
-                        status: "ON_HOLD",
-                        serviceType, // WARRANTY | AMC | CMC | PAID
-                        assignmentNote: `Sent to external service (${serviceType})`,
-                    },
-                });
-                yield createStatusHistory(tx, {
-                    ticketDbId: ticketId,
-                    status: "ON_HOLD",
-                    changedBy: (_b = (_a = user.employeeID) !== null && _a !== void 0 ? _a : user.name) !== null && _b !== void 0 ? _b : "system",
-                    changedById: user.employeeDbId,
-                    note: `External transfer approved (${serviceType}). ${comment}`,
-                });
-            }
-            // 🔔 Notify target HOD ONLY for internal
-            if (transferType === "INTERNAL_DEPARTMENT" && (targetHod === null || targetHod === void 0 ? void 0 : targetHod.id)) {
-                yield createNotificationWithRecipients(tx, {
-                    title: "Ticket Transfer Request",
-                    message: `Ticket ${ticket.ticketId} transfer requested`,
-                    ticketId: ticket.id,
-                    createdById: user.employeeDbId,
-                    recipients: [targetHod.id],
-                });
-            }
-            return transfer;
-        }));
-        res.json({ message: "Transfer requested", result });
-    }
-    catch (err) {
-        res.status(500).json({ message: "Failed to request transfer" });
-    }
-});
-exports.requestTicketTransfer = requestTicketTransfer;
+// export const requestTicketTransfer = async (req: any, res: Response) => {
+//   try {
+//     const user = mustUser(req);
+//     const ticketId = Number(req.params.id);
+//     const { transferType, toDepartmentId, vendorId, comment, serviceCenterName, expectedReturnDate } = req.body;
+//     if (!comment) {
+//       res.status(400).json({ message: "comment is required" });
+//       return;
+//     }
+//     const ticket = await prisma.ticket.findUnique({
+//       where: { id: ticketId },
+//     });
+//     if (!ticket) {
+//       res.status(404).json({ message: "Ticket not found" });
+//       return;
+//     }
+//     const existingPending = await prisma.ticketTransferHistory.findFirst({
+//       where: { ticketId, status: "REQUESTED" },
+//       orderBy: { createdAt: "desc" },
+//     });
+//     if (existingPending) {
+//       res.status(400).json({ message: "A transfer request is already pending for this ticket" });
+//       return;
+//     }
+//     // EXTERNAL_VENDOR requires a vendor; EXTERNAL_SERVICE uses serviceCenterName instead
+//     if (transferType === "EXTERNAL_VENDOR" && !vendorId) {
+//       res.status(400).json({ message: "vendorId is required for EXTERNAL_VENDOR transfer" });
+//       return;
+//     }
+//     if (transferType === "EXTERNAL_SERVICE" && !serviceCenterName) {
+//       res.status(400).json({ message: "serviceCenterName is required for EXTERNAL_SERVICE transfer" });
+//       return;
+//     }
+//     //  Get TARGET HOD
+//     let targetHod: any = null;
+//     if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
+//       targetHod = await prisma.employee.findFirst({
+//         where: { departmentId: toDepartmentId, role: "HOD" },
+//       });
+//     }
+//     // const result = await prisma.$transaction(async (tx) => {
+//     //   const transfer = await tx.ticketTransferHistory.create({
+//     //     data: {
+//     //       ticketId,
+//     //       transferType,
+//     //       fromDepartmentId: ticket.departmentId,
+//     //       toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+//     //       vendorId: transferType !== "INTERNAL_DEPARTMENT" ? vendorId : null,
+//     //       comment,
+//     //       requestedById: user.employeeDbId,
+//     //     },
+//     //   });
+//     //   // 🔔 Notify target HOD
+//     //   if (targetHod?.id) {
+//     //     await createNotificationWithRecipients(tx, {
+//     //       title: "Ticket Transfer Request",
+//     //       message: `Ticket ${ticket.ticketId} transfer requested`,
+//     //       ticketId: ticket.id,
+//     //       createdById: user.employeeDbId,
+//     //       recipients: [targetHod.id],
+//     //     });
+//     //   }
+//     //   return transfer;
+//     // });
+//     const result = await prisma.$transaction(async (tx) => {
+//       const transfer = await tx.ticketTransferHistory.create({
+//         data: {
+//           ticketId,
+//           transferType,
+//           fromDepartmentId: ticket.departmentId,
+//           toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+//           vendorId: transferType === "EXTERNAL_VENDOR" ? vendorId : null,
+//           serviceCenterName: transferType === "EXTERNAL_SERVICE" ? (serviceCenterName || null) : null,
+//           expectedReturnDate: transferType === "EXTERNAL_SERVICE" && expectedReturnDate ? new Date(expectedReturnDate) : null,
+//           comment,
+//           requestedById: user.employeeDbId,
+//           status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED",
+//           approvedById: transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId,
+//         } as any,
+//       });
+//       // ✅ If EXTERNAL, update ticket + asset status immediately
+//       if (transferType !== "INTERNAL_DEPARTMENT") {
+//         const serviceType = await detectServiceType(tx, ticket.assetId);
+//         await tx.ticket.update({
+//           where: { id: ticketId },
+//           data: {
+//             status: "ON_HOLD",
+//             serviceType,
+//             assignmentNote: `Sent to external service (${serviceType})`,
+//           },
+//         });
+//         await createStatusHistory(tx, {
+//           ticketDbId: ticketId,
+//           status: "ON_HOLD",
+//           changedBy: user.employeeID ?? user.name ?? "system",
+//           changedById: user.employeeDbId,
+//           note: `External transfer approved (${serviceType}). ${comment}`,
+//         });
+//         // Auto-set asset status to UNDER_MAINTENANCE when sent to service center
+//         await tx.asset.update({
+//           where: { id: ticket.assetId },
+//           data: { status: "UNDER_MAINTENANCE" },
+//         });
+//       }
+//       // 🔔 Notify target HOD ONLY for internal
+//       if (transferType === "INTERNAL_DEPARTMENT" && targetHod?.id) {
+//         await createNotificationWithRecipients(tx, {
+//           title: "Ticket Transfer Request",
+//           message: `Ticket ${ticket.ticketId} transfer requested`,
+//           ticketId: ticket.id,
+//           createdById: user.employeeDbId,
+//           recipients: [targetHod.id],
+//         });
+//       }
+//       return transfer;
+//     });
+//     res.json({ message: "Transfer requested", result });
+//   }
+//   catch (err: any) {
+//     console.error("requestTicketTransfer error:", err);
+//     res.status(500).json({
+//       message: "Failed to request transfer",
+//       error: err?.message || err,
+//     });
+//   }
+// };
 // export const approveTicketTransfer = async (req: any, res: Response) => {
 //   try {
 //     const user = mustUser(req);
@@ -1109,8 +1289,132 @@ exports.requestTicketTransfer = requestTicketTransfer;
 //     res.status(500).json({ message: err.message || "Failed to approve transfer" });
 //   }
 // };
+const requestTicketTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
+    try {
+        const user = mustUser(req);
+        const ticketId = Number(req.params.id);
+        const { transferType, toDepartmentId, vendorId, comment, serviceCenterName, expectedReturnDate, } = req.body;
+        if (!comment) {
+            res.status(400).json({ message: "comment is required" });
+            return;
+        }
+        const ticket = yield prismaClient_1.default.ticket.findUnique({
+            where: { id: ticketId },
+        });
+        if (!ticket) {
+            res.status(404).json({ message: "Ticket not found" });
+            return;
+        }
+        const existingPending = yield prismaClient_1.default.ticketTransferHistory.findFirst({
+            where: { ticketId, status: "REQUESTED" },
+            orderBy: { createdAt: "desc" },
+        });
+        if (existingPending) {
+            res.status(400).json({
+                message: "A transfer request is already pending for this ticket",
+            });
+            return;
+        }
+        if (transferType === "EXTERNAL_VENDOR" && !vendorId) {
+            res.status(400).json({
+                message: "vendorId is required for EXTERNAL_VENDOR transfer",
+            });
+            return;
+        }
+        if (transferType === "EXTERNAL_SERVICE" && !serviceCenterName) {
+            res.status(400).json({
+                message: "serviceCenterName is required for EXTERNAL_SERVICE transfer",
+            });
+            return;
+        }
+        let targetHod = null;
+        if (transferType === "INTERNAL_DEPARTMENT" && toDepartmentId) {
+            targetHod = yield prismaClient_1.default.employee.findFirst({
+                where: { departmentId: toDepartmentId, role: "HOD" },
+            });
+        }
+        const transfer = yield prismaClient_1.default.ticketTransferHistory.create({
+            data: {
+                ticketId,
+                transferType,
+                fromDepartmentId: ticket.departmentId,
+                toDepartmentId: transferType === "INTERNAL_DEPARTMENT" ? toDepartmentId : null,
+                vendorId: transferType === "EXTERNAL_VENDOR" ? vendorId : null,
+                serviceCenterName: transferType === "EXTERNAL_SERVICE" ? serviceCenterName || null : null,
+                expectedReturnDate: transferType === "EXTERNAL_SERVICE" && expectedReturnDate
+                    ? new Date(expectedReturnDate)
+                    : null,
+                comment,
+                requestedById: user.employeeDbId,
+                status: transferType === "INTERNAL_DEPARTMENT" ? "REQUESTED" : "APPROVED",
+                approvedById: transferType === "INTERNAL_DEPARTMENT" ? null : user.employeeDbId,
+            },
+        });
+        if (transferType !== "INTERNAL_DEPARTMENT") {
+            const serviceType = yield detectServiceType(prismaClient_1.default, ticket.assetId);
+            yield prismaClient_1.default.ticket.update({
+                where: { id: ticketId },
+                data: {
+                    status: "ON_HOLD",
+                    serviceType,
+                    assignmentNote: `Sent to external service (${serviceType})`,
+                },
+            });
+            yield createStatusHistory(prismaClient_1.default, {
+                ticketDbId: ticketId,
+                status: "ON_HOLD",
+                changedBy: (_b = (_a = user.employeeID) !== null && _a !== void 0 ? _a : user.name) !== null && _b !== void 0 ? _b : "system",
+                changedById: user.employeeDbId,
+                note: `External transfer approved (${serviceType}). ${comment}`,
+            });
+            yield prismaClient_1.default.asset.update({
+                where: { id: ticket.assetId },
+                data: { status: "UNDER_MAINTENANCE" },
+            });
+            // Auto-create and auto-approve asset transfer for external ticket transfers
+            const destinationType = transferType === "EXTERNAL_VENDOR" ? "VENDOR" : "SERVICE_CENTER";
+            const destinationName = transferType === "EXTERNAL_VENDOR"
+                ? (_d = (_c = (yield prismaClient_1.default.vendor.findUnique({ where: { id: Number(vendorId) }, select: { name: true } }))) === null || _c === void 0 ? void 0 : _c.name) !== null && _d !== void 0 ? _d : null
+                : serviceCenterName !== null && serviceCenterName !== void 0 ? serviceCenterName : null;
+            yield prismaClient_1.default.assetTransferHistory.create({
+                data: {
+                    assetId: ticket.assetId,
+                    transferType: "EXTERNAL",
+                    externalType: "SERVICE",
+                    destinationType,
+                    destinationName,
+                    temporary: true,
+                    expiresAt: expectedReturnDate ? new Date(expectedReturnDate) : null,
+                    status: "APPROVED",
+                    requestedById: user.employeeDbId,
+                    approvedById: user.employeeDbId,
+                    transferDate: new Date(),
+                },
+            });
+        }
+        if (transferType === "INTERNAL_DEPARTMENT" && (targetHod === null || targetHod === void 0 ? void 0 : targetHod.id)) {
+            yield createNotificationWithRecipients(prismaClient_1.default, {
+                title: "Ticket Transfer Request",
+                message: `Ticket ${ticket.ticketId} transfer requested`,
+                ticketId: ticket.id,
+                createdById: user.employeeDbId,
+                recipients: [targetHod.id],
+            });
+        }
+        res.json({ message: "Transfer requested", result: transfer });
+    }
+    catch (err) {
+        console.error("requestTicketTransfer error:", err);
+        res.status(500).json({
+            message: "Failed to request transfer",
+            error: (err === null || err === void 0 ? void 0 : err.message) || err,
+        });
+    }
+});
+exports.requestTicketTransfer = requestTicketTransfer;
 const approveTicketTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     try {
         const user = mustUser(req);
         const transferId = Number(req.params.transferId);
@@ -1167,12 +1471,26 @@ const approveTicketTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 reassignCount: 0,
             },
         });
-        // 5) Assignment history (optional)
+        // 5) Auto-create approved asset transfer for internal department transfer
+        yield prismaClient_1.default.assetTransferHistory.create({
+            data: {
+                assetId: oldTicket.assetId,
+                transferType: "INTERNAL",
+                fromDepartmentId: (_b = transfer.fromDepartmentId) !== null && _b !== void 0 ? _b : null,
+                toDepartmentId: (_c = transfer.toDepartmentId) !== null && _c !== void 0 ? _c : null,
+                temporary: false,
+                status: "APPROVED",
+                requestedById: (_d = transfer.requestedById) !== null && _d !== void 0 ? _d : null,
+                approvedById: user.employeeDbId,
+                transferDate: new Date(),
+            },
+        });
+        // 6) Assignment history (optional)
         if (targetSupervisor === null || targetSupervisor === void 0 ? void 0 : targetSupervisor.id) {
             yield prismaClient_1.default.ticketAssignmentHistory.create({
                 data: {
                     ticketId: ticket.id,
-                    fromEmployeeId: (_b = oldTicket.assignedToId) !== null && _b !== void 0 ? _b : null,
+                    fromEmployeeId: (_e = oldTicket.assignedToId) !== null && _e !== void 0 ? _e : null,
                     toEmployeeId: targetSupervisor.id,
                     action: "ASSIGNED",
                     comment: "Auto assigned after department transfer approval",
@@ -1180,15 +1498,15 @@ const approveTicketTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 },
             });
         }
-        // 6) Status history
+        // 7) Status history
         yield createStatusHistory(prismaClient_1.default, {
             ticketDbId: ticket.id,
             status: "ASSIGNED",
-            changedBy: (_d = (_c = user.employeeID) !== null && _c !== void 0 ? _c : user.name) !== null && _d !== void 0 ? _d : "system",
-            changedById: (_e = user.employeeDbId) !== null && _e !== void 0 ? _e : null,
+            changedBy: (_g = (_f = user.employeeID) !== null && _f !== void 0 ? _f : user.name) !== null && _g !== void 0 ? _g : "system",
+            changedById: (_h = user.employeeDbId) !== null && _h !== void 0 ? _h : null,
             note: "Ticket transferred and assigned to target department",
         });
-        // 7) Notify requester + source HOD + target supervisor
+        // 8) Notify requester + source HOD + target supervisor
         const sourceHod = transfer.fromDepartmentId
             ? yield prismaClient_1.default.employee.findFirst({
                 where: { departmentId: transfer.fromDepartmentId, role: "HOD" },
@@ -1456,7 +1774,7 @@ const startWork = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         res.json(upd);
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to start work" });
+        res.status(400).json({ message: e.message || "Failed to start work" });
     }
 });
 exports.startWork = startWork;
@@ -1485,24 +1803,68 @@ const holdTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
         res.json(upd);
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to hold ticket" });
+        res.status(400).json({ message: e.message || "Failed to hold ticket" });
     }
 });
 exports.holdTicket = holdTicket;
+// export const resolveTicket = async (req: any, res: Response) => {
+//   try {
+//     const user = mustUser(req);
+//     const ticketId = Number(req.params.id);
+//     const note = String(req.body.note || "").trim();
+//     const ticket = await requireAssignedTo(user, ticketId);
+//     ensureStatus(ticket, ["IN_PROGRESS", "ON_HOLD", "ASSIGNED"]);
+//     const upd = await prisma.$transaction(async (tx) => {
+//       const u = await tx.ticket.update({
+//         where: { id: ticketId },
+//         data: {
+//           status: "RESOLVED",
+//           slaResolvedAt: new Date(),
+//         },
+//       });
+//       await createStatusHistory(tx, {
+//         ticketDbId: ticketId,
+//         status: "RESOLVED",
+//         changedBy: user.employeeID ?? user.name ?? "system",
+//         changedById: user.employeeDbId,
+//         note: note || "Resolved",
+//       });
+//       return u;
+//     });
+//     res.json(upd);
+//   } catch (e: any) {
+//     res.status(403).json({ message: e.message || "Failed to resolve" });
+//   }
+// };
+// GET /api/tickets/transfers/pending
 const resolveTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const user = mustUser(req);
         const ticketId = Number(req.params.id);
         const note = String(req.body.note || "").trim();
-        const ticket = yield requireAssignedTo(user, ticketId);
-        ensureStatus(ticket, ["IN_PROGRESS", "ON_HOLD", "ASSIGNED"]);
+        const ticket = yield requireAssetOrTicketDeptHod(user, ticketId);
+        ensureStatus(ticket, ["WORK_COMPLETED"]);
+        const metricsTicket = yield prismaClient_1.default.ticket.findUnique({
+            where: { id: ticketId }
+        });
+        if (!metricsTicket) {
+            res.status(404).json({ message: "Ticket not found" });
+            return;
+        }
+        const now = new Date();
+        const slaMs = toMs(metricsTicket.slaExpectedValue, metricsTicket.slaExpectedUnit);
+        const resolvedTatMs = Math.max(0, now.getTime() - metricsTicket.createdAt.getTime());
+        const breached = slaMs > 0 ? resolvedTatMs > slaMs : null;
         const upd = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
             var _a, _b;
             const u = yield tx.ticket.update({
                 where: { id: ticketId },
                 data: {
                     status: "RESOLVED",
-                    slaResolvedAt: new Date(),
+                    slaResolvedAt: now,
+                    slaBreached: breached,
+                    closureRemarks: note || null,
+                    approvedBy: user.name || user.employeeID || "HOD",
                 },
             });
             yield createStatusHistory(tx, {
@@ -1510,18 +1872,17 @@ const resolveTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* 
                 status: "RESOLVED",
                 changedBy: (_b = (_a = user.employeeID) !== null && _a !== void 0 ? _a : user.name) !== null && _b !== void 0 ? _b : "system",
                 changedById: user.employeeDbId,
-                note: note || "Resolved",
+                note: note || "Resolved by HOD after review",
             });
             return u;
         }));
         res.json(upd);
     }
     catch (e) {
-        res.status(403).json({ message: e.message || "Failed to resolve" });
+        res.status(400).json({ message: e.message || "Failed to resolve" });
     }
 });
 exports.resolveTicket = resolveTicket;
-// GET /api/tickets/transfers/pending
 const getPendingTransferApprovals = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const user = mustUser(req);
@@ -1550,3 +1911,87 @@ const getPendingTransferApprovals = (req, res) => __awaiter(void 0, void 0, void
     }
 });
 exports.getPendingTransferApprovals = getPendingTransferApprovals;
+const completeTicketWork = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = mustUser(req);
+        const ticketId = Number(req.params.id);
+        const note = String(req.body.note || "").trim();
+        const rootCause = String(req.body.rootCause || "").trim() || null;
+        const resolutionSummary = String(req.body.resolutionSummary || "").trim() || null;
+        if (!note) {
+            res.status(400).json({ message: "Completion note required" });
+            return;
+        }
+        const ticket = yield requireAssignedTo(user, ticketId);
+        ensureStatus(ticket, ["IN_PROGRESS", "ON_HOLD"]);
+        const upd = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            var _a, _b;
+            const u = yield tx.ticket.update({
+                where: { id: ticketId },
+                data: {
+                    status: "WORK_COMPLETED",
+                    closureRemarks: note,
+                    rootCause: rootCause !== null && rootCause !== void 0 ? rootCause : undefined,
+                    resolutionSummary: resolutionSummary !== null && resolutionSummary !== void 0 ? resolutionSummary : undefined,
+                },
+            });
+            yield createStatusHistory(tx, {
+                ticketDbId: ticketId,
+                status: "WORK_COMPLETED",
+                changedBy: (_b = (_a = user.employeeID) !== null && _a !== void 0 ? _a : user.name) !== null && _b !== void 0 ? _b : "system",
+                changedById: user.employeeDbId,
+                note,
+            });
+            return u;
+        }));
+        res.json(upd);
+    }
+    catch (e) {
+        res.status(400).json({ message: e.message || "Failed to mark work completed" });
+    }
+});
+exports.completeTicketWork = completeTicketWork;
+// POST /api/tickets/:id/collection-note
+// Ticket raiser records that supervisor collected the asset
+const addCollectionNote = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = mustUser(req);
+        const ticketId = Number(req.params.id);
+        const ticket = yield prismaClient_1.default.ticket.findUnique({ where: { id: ticketId } });
+        if (!ticket) {
+            res.status(404).json({ message: "Ticket not found" });
+            return;
+        }
+        // Only the raiser can log collection
+        if (ticket.raisedById !== user.employeeDbId) {
+            res.status(403).json({ message: "Only the ticket raiser can log collection" });
+            return;
+        }
+        const { collectionNotes, collectionHandoverRemarks, collectedById } = req.body;
+        const updated = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            var _a, _b;
+            const u = yield tx.ticket.update({
+                where: { id: ticketId },
+                data: {
+                    collectionNotes: collectionNotes !== null && collectionNotes !== void 0 ? collectionNotes : null,
+                    collectionHandoverRemarks: collectionHandoverRemarks !== null && collectionHandoverRemarks !== void 0 ? collectionHandoverRemarks : null,
+                    collectedAt: new Date(),
+                    collectedById: collectedById ? Number(collectedById) : null,
+                },
+            });
+            yield createStatusHistory(tx, {
+                ticketDbId: ticketId,
+                status: ticket.status,
+                changedBy: (_b = (_a = user.employeeID) !== null && _a !== void 0 ? _a : user.name) !== null && _b !== void 0 ? _b : "system",
+                changedById: user.employeeDbId,
+                note: collectionNotes || "Asset collection logged by raiser",
+            });
+            return u;
+        }));
+        res.json(updated);
+    }
+    catch (e) {
+        res.status(400).json({ message: e.message || "Failed to log collection note" });
+    }
+});
+exports.addCollectionNote = addCollectionNote;

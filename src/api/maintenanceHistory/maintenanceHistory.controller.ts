@@ -27,7 +27,25 @@ const PUBLIC_MAINT_REPORT_BASE =
   "https://smartassets.inventionminds.com/maintenance_reports";
 
 export const getMaintenanceHistory = async (req: Request, res: Response) => {
+  const user = (req as any).user;
+
+  // Department scoping: non-admin sees only their department's assets
+  let scopedAssetIds: number[] | undefined;
+  if (user?.role !== "ADMIN" && user?.departmentId) {
+    const deptAssets = await prisma.asset.findMany({
+      where: { departmentId: Number(user.departmentId) },
+      select: { id: true },
+    });
+    scopedAssetIds = deptAssets.map(a => a.id);
+  }
+
+  const where: any = {};
+  if (scopedAssetIds) {
+    where.assetId = { in: scopedAssetIds };
+  }
+
   const history = await prisma.maintenanceHistory.findMany({
+    where,
     include: { asset: true, ticket: true },
     orderBy: { id: "desc" },
   });

@@ -29,9 +29,12 @@ enum AssignmentAction {
 }
 
 enum EmployeeRole {
+  CEO_COO
   HOD
   SUPERVISOR
   EXECUTIVE
+  FINANCE
+  OPERATIONS
 }
 
 enum AssignmentStage {
@@ -115,9 +118,9 @@ model Asset {
   purchaseDate      DateTime?
   modeOfProcurement String        @default("PURCHASE") // PURCHASE | DONATION | LEASE | RENTAL 
 
-  manufacturer     String?
-  modelNumber      String?
-  countryOfOrigin  String?
+  manufacturer       String?
+  modelNumber        String?
+  countryOfOrigin    String?
   regulatoryApproval String? // FDA/CE/BIS certification number
 
   referenceCode String?  @unique
@@ -157,6 +160,16 @@ model Asset {
   rentalEndDate      DateTime?
   rentalAmount       Decimal?  @db.Decimal(12, 2)
   rentalAgreementDoc String?
+
+  // Physical + Functional Inspection (for Donation / Lease / Rental)
+  inspectionDoneBy           String? // who performed the inspection
+  inspectionCondition        String? // SEALED | UNSEALED | DAMAGED | GOOD | FAIR
+  inspectionRemark           String?   @db.Text
+  physicalInspectionStatus   String? // PASS | FAIL | PENDING
+  physicalInspectionDate     DateTime?
+  functionalInspectionStatus String? // PASS | FAIL | PENDING
+  functionalInspectionDate   DateTime?
+  functionalTestNotes        String?   @db.Text
 
   vendorId Int?
   vendor   Vendor? @relation(fields: [vendorId], references: [id])
@@ -209,8 +222,8 @@ model Asset {
   lastSlaServiceDate DateTime?
 
   // Audit / verification
-  lastAuditDate DateTime?
-  auditedBy     String?
+  lastAuditDate  DateTime?
+  auditedBy      String?
   warrantyStatus String? // UNDER_WARRANTY | EXPIRED | NO_WARRANTY
 
   // Retirement / disposal
@@ -218,9 +231,16 @@ model Asset {
   retiredReason        String?
   expectedLifetime     Int?
   expectedLifetimeUnit String?
+  // Service coverage type (e.g. 24/7, 8/5, 9/6)
+  serviceCoverageType  String? // 24/7 | 8/5 | 9/6 | 12/7 | CUSTOM
+  // HOD approval tracking before Asset ID is issued
+  hodApprovalStatus    String? // PENDING | APPROVED | REJECTED
+  hodApprovalById      Int?
+  hodApprovalAt        DateTime?
+  hodApprovalRemarks   String?   @db.Text
   retiredBy            String?
   disposalMethod       String? // SOLD | SCRAPPED | DONATED | RETURNED_TO_VENDOR | AUCTION
-  disposalValue        Decimal? @db.Decimal(12, 2)
+  disposalValue        Decimal?  @db.Decimal(12, 2)
   disposalDate         DateTime?
   disposalApprovedBy   String?
   disposalCertificate  String? // URL for certificate of destruction
@@ -229,6 +249,10 @@ model Asset {
   parentAssetId Int?
   parentAsset   Asset?  @relation("SubAssets", fields: [parentAssetId], references: [id])
   subAssets     Asset[] @relation("SubAssets")
+
+  replacedBySubAsset  SubAssetReplacement[] @relation("OldSubAsset")
+  replacingSubAsset   SubAssetReplacement[] @relation("NewSubAsset")
+  parentOfReplacement SubAssetReplacement[] @relation("ParentOfReplacement")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -275,7 +299,26 @@ model Asset {
   calibrationTemplates         CalibrationChecklistTemplate[]
   supportMatrixes              AssetSupportMatrix[]
   disposals                    AssetDisposal[]
-  auditItems                   AssetAuditItem[] @relation("AuditItems")
+  auditItems                   AssetAuditItem[]               @relation("AuditItems")
+  indentFulfillments           AssetIndent[]                  @relation("IndentFulfilledAsset")
+  exitAssets                   EmployeeExitAsset[]            @relation("ExitAssets")
+  serviceVisits                ServiceVisit[]                 @relation("AssetServiceVisits")
+  revenueEntries               AssetRevenueEntry[]
+  decisionLogs                 DecisionEngineLog[]            @relation("DecisionLogs")
+
+  // Procurement linkage (optional — nullable FKs, Asset works without PO/GRA)
+  purchaseOrderId   Int?
+  purchaseOrderRef  PurchaseOrder? @relation("POAssets", fields: [purchaseOrderId], references: [id])
+  goodsReceiptId    Int?
+  goodsReceiptRef   GoodsReceipt?  @relation("GRAAssets", fields: [goodsReceiptId], references: [id])
+  workOrderCapexId  Int?
+  workOrderCapexRef WorkOrder?     @relation("CapExAssets", fields: [workOrderCapexId], references: [id])
+
+  // Work orders on this asset
+  workOrders      WorkOrder[]           @relation("AssetWorkOrders")
+  costAllocations AssetCostAllocation[] @relation("CostAllocations")
+  rateCard        AssetRateCard?        @relation("AssetRateCard")
+  dailyUsageLogs  AssetDailyUsageLog[]  @relation("DailyUsageLogs")
 
   @@index([status])
   @@index([assetCategoryId])
@@ -371,10 +414,33 @@ model Ticket {
   slaCategory     AssetSlaCategory?
   currentSlaLevel SlaLevel?
 
-  slaExpectedValue Int? // numeric value
-  slaExpectedUnit  String? // e.g., "HOURS", "DAYS", "MONTHS", "YEARS"
+  // Governing SLA (stricter of internal vs vendor, used for breach tracking)
+  slaExpectedValue Int?
+  slaExpectedUnit  String? // HOURS | DAYS
   slaResolvedAt    DateTime?
   slaBreached      Boolean?
+
+  // SLA source tracking
+  slaSource String? // INTERNAL | VENDOR | BOTH
+
+  // Internal SLA (from AssetSlaMatrix by category + priority)
+  internalSlaValue Int?
+  internalSlaUnit  String?
+
+  // Vendor SLA (from active AMC/CMC contract)
+  vendorSlaValue    Int?
+  vendorSlaUnit     String?
+  vendorSlaBreached Boolean?
+
+  // Asset collection by supervisor (for external service center cases)
+  collectionNotes           String?   @db.Text // notes by the ticket raiser on supervisor collecting the asset
+  collectedAt               DateTime?
+  collectedById             Int?
+  collectedBy               Employee? @relation("TicketCollectedBy", fields: [collectedById], references: [id])
+  collectionHandoverRemarks String?   @db.Text
+
+  // Ticket work category (PM vs Breakdown — determines asset status flow)
+  workCategory String? // PREVENTIVE_MAINTENANCE | BREAKDOWN | CORRECTIVE | CALIBRATION
 
   // Downtime (useful for hospital ops + finance reporting)
   downtimeStart DateTime?
@@ -387,10 +453,10 @@ model Ticket {
   totalCost   Decimal? @db.Decimal(12, 2)
 
   // Resolution knowledge
-  rootCause          String?  @db.Text
-  resolutionSummary  String?  @db.Text
-  customerSatisfaction Int?   // 1-5 feedback rating
-  followUpDate       DateTime?
+  rootCause            String?   @db.Text
+  resolutionSummary    String?   @db.Text
+  customerSatisfaction Int? // 1-5 feedback rating
+  followUpDate         DateTime?
 
   // Closure / approvals (who/why)
   approvedBy     String?
@@ -408,6 +474,9 @@ model Ticket {
   ticketAssignmentHistories TicketAssignmentHistory[]
   maintenanceHistories      MaintenanceHistory[]
   ticketTransferHistories   TicketTransferHistory[]
+  rootCauseAnalyses         RootCauseAnalysis[]
+  materialRequests          MaterialRequest[]
+  workOrders                WorkOrder[]               @relation("TicketWorkOrders")
 
   @@index([assetId, createdAt])
   @@index([departmentId, status])
@@ -524,6 +593,8 @@ model AssetCategory {
   calibrationChecklistTemplates CalibrationChecklistTemplate[]
   supportMatrixes               AssetSupportMatrix[]
   assetSlaMatrices              AssetSlaMatrix[]
+  assetIndents                  AssetIndent[]
+  decisionEngineConfigs         DecisionEngineConfig[]         @relation("DecisionEngineCategory")
 
   @@map("assetcategory")
 }
@@ -548,6 +619,10 @@ model Department {
   ownedTickets       Ticket[]                @relation("TicketOwningDept")
   transferFrom       TicketTransferHistory[] @relation("TicketTransferFromDept")
   transferTo         TicketTransferHistory[] @relation("TicketTransferToDept")
+  assetTransferFrom  AssetTransferHistory[]  @relation("AssetTransferFromDept")
+  assetTransferTo    AssetTransferHistory[]  @relation("AssetTransferToDept")
+  assetIndents       AssetIndent[]
+  purchaseOrders     PurchaseOrder[]         @relation("PODepartment")
 
   @@map("department")
 }
@@ -611,11 +686,25 @@ model Employee {
   assetSupportMatrixes     AssetSupportMatrix[]
   transferRequests         AssetTransferHistory[]    @relation("TransferRequestedBy")
   transferApprovals        AssetTransferHistory[]    @relation("TransferApprovedBy")
+  transferMgmtApprovals    AssetTransferHistory[]    @relation("TransferMgmtApprovedBy")
   locationRequests         AssetLocation[]           @relation("LocationRequestedBy")
   locationApprovals        AssetLocation[]           @relation("LocationApprovedBy")
   locationRejections       AssetLocation[]           @relation("LocationRejectedBy")
   modulePermissions        ModulePermission[]
   notificationPreference   NotificationPreference?
+
+  collectedTickets            Ticket[]              @relation("TicketCollectedBy")
+  gatePassesApproved          GatePass[]            @relation("GatePassApprover")
+  assetIndents                AssetIndent[]         @relation("IndentRaisedBy")
+  assetIndentApprovals        AssetIndent[]         @relation("IndentApprovedBy")
+  employeeExits               EmployeeExit[]        @relation("ExitEmployee")
+  employeeExitHandledBy       EmployeeExit[]        @relation("ExitHandledBy")
+  serviceVisitsAsEngineer     ServiceVisit[]        @relation("ServiceVisitEngineer")
+  serviceVisitChargeApprovals ServiceVisit[]        @relation("ServiceVisitChargeApprover")
+  serviceVisitsCreated        ServiceVisit[]        @relation("ServiceVisitCreatedBy")
+  subAssetReplacements        SubAssetReplacement[]
+  decisionEvaluations         DecisionEngineLog[]   @relation("DecisionEvaluator")
+  usageLogsRecorded           AssetDailyUsageLog[]  @relation("UsageLoggedBy")
 
   @@map("employee")
 }
@@ -633,8 +722,8 @@ model Vendor {
   pincode        String?
   gstNumber      String?
   panNumber      String?
-  vendorType     String?  // OEM | DISTRIBUTOR | SERVICE_PROVIDER | RESELLER
-  rating         Int?     // 1-5 performance rating
+  vendorType     String? // OEM | DISTRIBUTOR | SERVICE_PROVIDER | RESELLER
+  rating         Int? // 1-5 performance rating
   isActive       Boolean  @default(true)
   bankName       String?
   bankAccount    String?
@@ -653,6 +742,8 @@ model Vendor {
   calibrationHistories    CalibrationHistory[]    @relation("VendorCalibrationHistory")
   ticketTransferHistories TicketTransferHistory[]
   warranties              Warranty[]
+  purchaseOrders          PurchaseOrder[]
+  goodsReceipts           GoodsReceipt[]
 
   @@map("vendor")
 }
@@ -790,14 +881,14 @@ model InsuranceClaim {
 }
 
 model Branch {
-  id      Int    @id @default(autoincrement())
-  name    String @unique
-  code    String? @unique
-  address String? @db.Text
-  city    String?
-  state   String?
-  pincode String?
-  phone   String?
+  id       Int     @id @default(autoincrement())
+  name     String  @unique
+  code     String? @unique
+  address  String? @db.Text
+  city     String?
+  state    String?
+  pincode  String?
+  phone    String?
   isActive Boolean @default(true)
 
   locations     AssetLocation[]
@@ -881,6 +972,12 @@ model AssetTransferHistory {
   toBranchId Int?
   toBranch   Branch? @relation("ToBranch", fields: [toBranchId], references: [id])
 
+  // Department-level transfer tracking
+  fromDepartmentId Int?
+  fromDepartment   Department? @relation("AssetTransferFromDept", fields: [fromDepartmentId], references: [id])
+  toDepartmentId   Int?
+  toDepartment     Department? @relation("AssetTransferToDept", fields: [toDepartmentId], references: [id])
+
   destinationType          String? // BRANCH | VENDOR | SERVICE_CENTER | EVENT | CAMP | PATIENT_HOME | OTHER
   destinationName          String?
   destinationAddress       String?
@@ -893,6 +990,13 @@ model AssetTransferHistory {
   transferDate DateTime? @default(now())
 
   status String @default("REQUESTED")
+
+  // Management approval — required when temporary=false (permanent transfer)
+  managementApprovalStatus String?
+  managementApprovedById   Int?
+  managementApprovedBy     Employee? @relation("TransferMgmtApprovedBy", fields: [managementApprovedById], references: [id])
+  managementApprovedAt     DateTime?
+  managementRemarks        String?   @db.Text
 
   requestedById Int?
   requestedBy   Employee? @relation("TransferRequestedBy", fields: [requestedById], references: [id])
@@ -933,11 +1037,14 @@ model MaintenanceSchedule {
   frequencyValue Int
   frequencyUnit  String // DAYS | MONTHS | YEARS
 
+  startDate DateTime?  // the date from which the schedule begins
   nextDueAt DateTime
   isActive  Boolean  @default(true)
 
-  createdBy String?
-  reason    String?
+  createdBy   String?
+  createdById Int?
+  reason      String?
+  description String?  @db.Text
 
   reminderDays Int? @default(7)
 
@@ -971,14 +1078,22 @@ model ServiceContract {
   includesParts Boolean? // typically false for AMC, true for CMC
   includesLabor Boolean?
 
-  visitsPerYear Int?
-  cost          Decimal? @db.Decimal(12, 2) // If free/warranty, keep null or 0
-  currency      String?
+  visitsPerYear          Int? // kept for backward compat
+  regularVisitsPerYear   Int? // planned preventive maintenance visits
+  emergencyVisitsPerYear Int? // emergency call-out visits included
+  cost                   Decimal? @db.Decimal(12, 2) // If free/warranty, keep null or 0
+  currency               String?
 
   document String?
   terms    String? @db.Text
 
   status String? // ACTIVE | EXPIRED | TERMINATED
+
+  // Vendor SLA commitments (contractual)
+  vendorResponseValue   Int? // e.g. 4
+  vendorResponseUnit    String? // HOURS | DAYS
+  vendorResolutionValue Int? // e.g. 24
+  vendorResolutionUnit  String? // HOURS | DAYS
 
   createdBy String?
   reason    String?
@@ -987,9 +1102,48 @@ model ServiceContract {
   updatedAt DateTime @default(now()) @updatedAt
 
   maintenanceHistories MaintenanceHistory[]
+  serviceVisits        ServiceVisit[]
 
   @@index([assetId, endDate])
   @@map("servicecontract")
+}
+
+/**
+ * =========================
+ * NEW: Service Visit (individual visits logged under a contract)
+ * =========================
+ */
+model ServiceVisit {
+  id                Int             @id @default(autoincrement())
+  serviceContractId Int
+  serviceContract   ServiceContract @relation(fields: [serviceContractId], references: [id])
+
+  assetId Int
+  asset   Asset @relation("AssetServiceVisits", fields: [assetId], references: [id])
+
+  visitType   String // PREVENTIVE_MAINTENANCE | REPAIR
+  visitDate   DateTime
+  visitedById Int?
+  visitedBy   Employee? @relation("ServiceVisitEngineer", fields: [visitedById], references: [id])
+
+  workDone      String? @db.Text
+  partsReplaced String? @db.Text
+  outcome       String? // RESOLVED | PENDING_PARTS | ESCALATED
+
+  // Chargeable logic
+  isChargeable         Boolean   @default(false)
+  chargeableReason     String? // NO_WARRANTY | NO_CONTRACT | ACCIDENTAL_DAMAGE
+  chargeAmount         Decimal?  @db.Decimal(10, 2)
+  chargeApprovalStatus String? // PENDING | APPROVED | REJECTED (for amounts > 1000)
+  chargeApprovedById   Int?
+  chargeApprovedBy     Employee? @relation("ServiceVisitChargeApprover", fields: [chargeApprovedById], references: [id])
+  chargeApprovedAt     DateTime?
+
+  createdById Int?
+  createdBy   Employee? @relation("ServiceVisitCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+
+  @@map("servicevisit")
 }
 
 /**
@@ -1016,11 +1170,22 @@ model GatePass {
 
   courierDetails String?
   vehicleNo      String?
+  vehicleType    String? // HOSPITAL_VEHICLE | OUTSIDE_VEHICLE
 
-  approvedBy String?
-  issuedBy   String?
+  approvedBy         String?
+  issuedBy           String?
+  approvedById       Int?
+  approvedByEmployee Employee? @relation("GatePassApprover", fields: [approvedById], references: [id])
+
+  // Return tracking
+  returnedAt      DateTime?
+  returnedBy      String?
+  returnCondition String? // GOOD | DAMAGED | PARTIAL
 
   reason String?
+
+  // Auto-generated from transfer
+  transferHistoryId Int?
 
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @default(now()) @updatedAt
@@ -1056,11 +1221,43 @@ model SparePart {
   createdById Int?
   updatedById Int?
 
-  usages       SparePartUsage[]
-  transactions InventoryTransaction[]
+  usages               SparePartUsage[]
+  transactions         InventoryTransaction[]
+  subAssetReplacements SubAssetReplacement[]
+  materialIssues       MaterialIssue[]  @relation("MaterialIssueSparePart")
 
   @@index([vendorId])
   @@map("sparepart")
+}
+
+// Tracks when a sub-asset (component) is replaced — either with a new part or from inventory
+model SubAssetReplacement {
+  id Int @id @default(autoincrement())
+
+  parentAssetId Int
+  parentAsset   Asset @relation("ParentOfReplacement", fields: [parentAssetId], references: [id])
+
+  oldSubAssetId Int?
+  oldSubAsset   Asset? @relation("OldSubAsset", fields: [oldSubAssetId], references: [id])
+
+  newSubAssetId Int?
+  newSubAsset   Asset? @relation("NewSubAsset", fields: [newSubAssetId], references: [id])
+
+  // If replaced from spare part inventory (not creating a new asset record)
+  sparePartId Int?
+  sparePart   SparePart? @relation(fields: [sparePartId], references: [id])
+
+  replacementDate DateTime  @default(now())
+  reason          String?   @db.Text
+  cost            Decimal?  @db.Decimal(12, 2)
+  replacedById    Int?
+  replacedBy      Employee? @relation(fields: [replacedById], references: [id])
+  notes           String?   @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([parentAssetId])
+  @@map("subassetreplacement")
 }
 
 model SparePartUsage {
@@ -1103,8 +1300,9 @@ model Consumable {
   createdById Int?
   updatedById Int?
 
-  batches      ConsumableBatch[]
-  transactions InventoryTransaction[]
+  batches        ConsumableBatch[]
+  transactions   InventoryTransaction[]
+  materialIssues MaterialIssue[] @relation("MaterialIssueConsumable")
 
   @@unique([name])
   @@map("consumable")
@@ -1142,8 +1340,12 @@ model InventoryTransaction {
 
   quantity Decimal @db.Decimal(12, 2)
 
-  referenceType String? // PURCHASE | TICKET | MANUAL | RETURN
+  referenceType String? // PURCHASE | TICKET | MANUAL | RETURN | GRA | WORK_ORDER | STORE_TRANSFER
   referenceId   Int?
+
+  storeId         Int?
+  workOrderId     Int?
+  storeTransferId Int?
 
   performedById Int?
   performedBy   Employee? @relation(fields: [performedById], references: [id])
@@ -1154,6 +1356,7 @@ model InventoryTransaction {
 
   @@index([sparePartId])
   @@index([consumableId])
+  @@index([storeId])
   @@map("inventorytransaction")
 }
 
@@ -1299,19 +1502,19 @@ model NotificationRecipient {
 }
 
 model NotificationPreference {
-  id         Int @id @default(autoincrement())
-  employeeId Int @unique
+  id         Int      @id @default(autoincrement())
+  employeeId Int      @unique
   employee   Employee @relation(fields: [employeeId], references: [id])
 
-  warrantyExpiry    Boolean @default(true)
-  insuranceExpiry   Boolean @default(true)
-  amcCmcExpiry      Boolean @default(true)
-  maintenanceDue    Boolean @default(true)
-  slaBreach         Boolean @default(true)
-  lowStock          Boolean @default(true)
-  gatepassOverdue   Boolean @default(true)
-  ticketUpdates     Boolean @default(true)
-  assetTransfer     Boolean @default(true)
+  warrantyExpiry  Boolean @default(true)
+  insuranceExpiry Boolean @default(true)
+  amcCmcExpiry    Boolean @default(true)
+  maintenanceDue  Boolean @default(true)
+  slaBreach       Boolean @default(true)
+  lowStock        Boolean @default(true)
+  gatepassOverdue Boolean @default(true)
+  ticketUpdates   Boolean @default(true)
+  assetTransfer   Boolean @default(true)
 
   channelInApp    Boolean @default(true)
   channelEmail    Boolean @default(false)
@@ -1330,7 +1533,7 @@ model EmailTemplate {
   name String
 
   subject  String
-  bodyHtml String @db.Text
+  bodyHtml String  @db.Text
   bodyText String? @db.Text
 
   isActive Boolean @default(true)
@@ -1342,13 +1545,13 @@ model EmailTemplate {
 }
 
 model SmtpConfig {
-  id       Int    @id @default(autoincrement())
-  host     String
-  port     Int
-  secure   Boolean @default(true)
-  username String
-  password String
-  fromName String  @default("Smart Assets")
+  id        Int     @id @default(autoincrement())
+  host      String
+  port      Int
+  secure    Boolean @default(true)
+  username  String
+  password  String
+  fromName  String  @default("Smart Assets")
   fromEmail String
 
   isActive Boolean @default(true)
@@ -1460,6 +1663,15 @@ model EscalationMatrix {
   notifyEmployeeId Int?
   notifyEmployee   Employee? @relation(fields: [notifyEmployeeId], references: [id])
 
+  // SLA type this rule applies to
+  slaType      String? // INTERNAL | VENDOR  (null = both)
+  applicableTo String? // TICKET | MAINTENANCE  (null = both)
+
+  // Vendor contact for escalation (used when slaType=VENDOR)
+  vendorContactName  String?
+  vendorContactEmail String?
+  vendorContactPhone String?
+
   createdAt DateTime @default(now())
 
   @@index([departmentId, assetCategoryId, priority])
@@ -1567,6 +1779,9 @@ model PreventiveChecklistTemplate {
 
   isActive Boolean @default(true)
 
+  // Maintenance SLA: how many days after scheduledDue before considered SLA breach
+  slaOverdueDays Int? @default(3)
+
   items PreventiveChecklistItem[]
   runs  PreventiveChecklistRun[]
 
@@ -1664,6 +1879,10 @@ model TicketTransferHistory {
   // EXTERNAL transfer
   vendorId Int?
   vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  // EXTERNAL_SERVICE specific
+  serviceCenterName  String?
+  expectedReturnDate DateTime?
 
   comment       String    @db.Text // ✅ mandatory
   requestedById Int?
@@ -1965,13 +2184,13 @@ model AssetSlaMatrix {
 // ─── Module Access Control ────────────────────────────────────────────────────
 
 model AppModule {
-  id    Int    @id @default(autoincrement())
-  name  String @unique // e.g. "assets", "tickets", "calibration"
-  label String          // Display name e.g. "Assets Master"
-  icon  String?         // PrimeNG icon class e.g. "pi pi-database"
-  path  String?         // Route path e.g. "/assets/view"
-  sortOrder Int?        @default(0)
-  isActive  Boolean     @default(true)
+  id        Int     @id @default(autoincrement())
+  name      String  @unique // e.g. "assets", "tickets", "calibration"
+  label     String // Display name e.g. "Assets Master"
+  icon      String? // PrimeNG icon class e.g. "pi pi-database"
+  path      String? // Route path e.g. "/assets/view"
+  sortOrder Int?    @default(0)
+  isActive  Boolean @default(true)
 
   subItems    AppModuleItem[]
   permissions ModulePermission[]
@@ -1987,8 +2206,8 @@ model AppModuleItem {
   moduleId Int
   module   AppModule @relation(fields: [moduleId], references: [id])
 
-  name      String  // e.g. "view", "create", "edit", "delete"
-  label     String  // Display name e.g. "View Assets"
+  name      String // e.g. "view", "create", "edit", "delete"
+  label     String // Display name e.g. "View Assets"
   path      String? // Sub-route e.g. "/assets/view"
   icon      String?
   sortOrder Int?    @default(0)
@@ -2001,24 +2220,24 @@ model AppModuleItem {
 }
 
 model ModulePermission {
-  id           Int            @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
-  moduleId     Int?
-  module       AppModule?     @relation(fields: [moduleId], references: [id])
+  moduleId Int?
+  module   AppModule? @relation(fields: [moduleId], references: [id])
 
   moduleItemId Int?
   moduleItem   AppModuleItem? @relation(fields: [moduleItemId], references: [id])
 
   // Either role-based OR employee-specific (not both required)
-  role         String?        // HOD | SUPERVISOR | EXECUTIVE | ADMIN
-  employeeId   Int?
-  employee     Employee?      @relation(fields: [employeeId], references: [id])
+  role       String? // HOD | SUPERVISOR | EXECUTIVE | ADMIN
+  employeeId Int?
+  employee   Employee? @relation(fields: [employeeId], references: [id])
 
-  canAccess    Boolean @default(true)
+  canAccess Boolean @default(true)
 
-  createdById  Int?
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @default(now()) @updatedAt
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
 
   @@unique([moduleId, moduleItemId, role, employeeId])
   @@index([role])
@@ -2030,22 +2249,22 @@ model ModulePermission {
 // NEW: Audit Log — tracks all important actions across the application
 // ═══════════════════════════════════════════════════════════════════════════════
 model AuditLog {
-  id          Int      @id @default(autoincrement())
+  id Int @id @default(autoincrement())
 
-  entityType  String   // ASSET | TICKET | EMPLOYEE | VENDOR | DEPARTMENT | WARRANTY | INSURANCE | TRANSFER | ASSIGNMENT | GATE_PASS | SERVICE_CONTRACT
-  entityId    Int
-  action      String   // CREATE | UPDATE | DELETE | STATUS_CHANGE | ASSIGN | TRANSFER | APPROVE | REJECT | LOGIN | LOGOUT
+  entityType String // ASSET | TICKET | EMPLOYEE | VENDOR | DEPARTMENT | WARRANTY | INSURANCE | TRANSFER | ASSIGNMENT | GATE_PASS | SERVICE_CONTRACT
+  entityId   Int
+  action     String // CREATE | UPDATE | DELETE | STATUS_CHANGE | ASSIGN | TRANSFER | APPROVE | REJECT | LOGIN | LOGOUT
 
-  description String?  @db.Text
-  oldValue    String?  @db.LongText // JSON of previous state
-  newValue    String?  @db.LongText // JSON of new state
+  description String? @db.Text
+  oldValue    String? @db.LongText // JSON of previous state
+  newValue    String? @db.LongText // JSON of new state
 
   performedBy   String?
   performedById Int?
   ipAddress     String?
   userAgent     String?
 
-  createdAt   DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([entityType, entityId])
   @@index([performedById, createdAt])
@@ -2057,36 +2276,38 @@ model AuditLog {
 // NEW: Asset Disposal — formal condemnation/disposal workflow
 // ═══════════════════════════════════════════════════════════════════════════════
 model AssetDisposal {
-  id       Int   @id @default(autoincrement())
-  assetId  Int
-  asset    Asset @relation(fields: [assetId], references: [id])
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
 
-  disposalType   String   // CONDEMN | AUCTION | SCRAP | DONATE | RETURN_TO_VENDOR
-  reason         String   @db.Text
-  status         String   @default("REQUESTED") // REQUESTED | COMMITTEE_REVIEW | APPROVED | REJECTED | COMPLETED
+  disposalType String // CONDEMN | AUCTION | SCRAP | DONATE | RETURN_TO_VENDOR
+  reason       String @db.Text
+  status       String @default("REQUESTED") // REQUESTED | COMMITTEE_REVIEW | APPROVED | REJECTED | COMPLETED
 
   estimatedScrapValue Decimal? @db.Decimal(12, 2)
   actualSaleValue     Decimal? @db.Decimal(12, 2)
+  bookValueAtDisposal Decimal? @db.Decimal(12, 2) // current book value when disposal was requested
+  netGainLoss         Decimal? @db.Decimal(12, 2) // actualSaleValue - bookValueAtDisposal
   buyerName           String?
   buyerContact        String?
 
   // Committee approval
-  committeeMembers   String?  @db.Text // JSON array of approver names/IDs
-  committeeRemarks   String?  @db.Text
+  committeeMembers      String?   @db.Text // JSON array of approver names/IDs
+  committeeRemarks      String?   @db.Text
   committeeApprovalDate DateTime?
 
-  requestedById   Int?
-  approvedById    Int?
-  completedById   Int?
+  requestedById Int?
+  approvedById  Int?
+  completedById Int?
 
-  certificateUrl  String?  // Certificate of destruction / disposal proof
-  documents       String?  @db.Text // JSON array of document URLs
+  certificateUrl String? // Certificate of destruction / disposal proof
+  documents      String? @db.Text // JSON array of document URLs
 
-  requestedAt   DateTime  @default(now())
-  approvedAt    DateTime?
-  completedAt   DateTime?
-  rejectedAt    DateTime?
-  rejectionReason String? @db.Text
+  requestedAt     DateTime  @default(now())
+  approvedAt      DateTime?
+  completedAt     DateTime?
+  rejectedAt      DateTime?
+  rejectionReason String?   @db.Text
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -2094,6 +2315,31 @@ model AssetDisposal {
   @@index([assetId])
   @@index([status])
   @@map("assetdisposal")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Asset Revenue Entry — manual provision to record revenue generated by an asset
+// ═══════════════════════════════════════════════════════════════════════════════
+model AssetRevenueEntry {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  entryDate    DateTime
+  revenueType  String // PROCEDURE | TEST | BED_CHARGE | RENTAL | SERVICE | OTHER
+  description  String?  @db.Text
+  quantity     Int      @default(1)
+  unitRate     Decimal  @db.Decimal(12, 2)
+  totalRevenue Decimal  @db.Decimal(12, 2) // quantity * unitRate
+
+  referenceNo  String? // bill/invoice/order ref
+  recordedById Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([assetId, entryDate])
+  @@map("assetrevenueentry")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2111,10 +2357,10 @@ model AssetAudit {
   conductedById Int?
   remarks       String? @db.Text
 
-  totalAssets     Int @default(0)
-  verifiedCount   Int @default(0)
-  missingCount    Int @default(0)
-  mismatchCount   Int @default(0)
+  totalAssets   Int @default(0)
+  verifiedCount Int @default(0)
+  missingCount  Int @default(0)
+  mismatchCount Int @default(0)
 
   completedAt DateTime?
 
@@ -2127,20 +2373,20 @@ model AssetAudit {
 }
 
 model AssetAuditItem {
-  id       Int        @id @default(autoincrement())
-  auditId  Int
-  audit    AssetAudit @relation(fields: [auditId], references: [id])
+  id      Int        @id @default(autoincrement())
+  auditId Int
+  audit   AssetAudit @relation(fields: [auditId], references: [id])
 
-  assetId  Int
-  asset    Asset    @relation("AuditItems", fields: [assetId], references: [id])
-  status   String   @default("PENDING") // PENDING | VERIFIED | MISSING | MISMATCH
+  assetId   Int
+  asset     Asset     @relation("AuditItems", fields: [assetId], references: [id])
+  status    String    @default("PENDING") // PENDING | VERIFIED | MISSING | MISMATCH
   scannedAt DateTime?
 
-  locationMatch     Boolean?
-  conditionMatch    Boolean?
-  actualLocation    String?
-  actualCondition   String?
-  remarks           String?
+  locationMatch   Boolean?
+  conditionMatch  Boolean?
+  actualLocation  String?
+  actualCondition String?
+  remarks         String?
 
   verifiedById Int?
 
@@ -2150,4 +2396,893 @@ model AssetAuditItem {
   @@index([auditId, status])
   @@index([assetId])
   @@map("assetaudititem")
+}
+
+// ═══════════════════════════════════════════════════════
+// ASSET INDENT — New asset requirement / requisition
+// ═══════════════════════════════════════════════════════
+model AssetIndent {
+  id           Int    @id @default(autoincrement())
+  indentNumber String @unique // IND-FY2025-26-001
+
+  // Requester
+  raisedById   Int
+  raisedBy     Employee   @relation("IndentRaisedBy", fields: [raisedById], references: [id])
+  departmentId Int
+  department   Department @relation(fields: [departmentId], references: [id])
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  assetName       String // what asset is needed
+  quantity        Int       @default(1)
+  justification   String    @db.Text // why it's needed
+  urgency         String    @default("NORMAL") // NORMAL | URGENT | CRITICAL
+  estimatedBudget Decimal?  @db.Decimal(12, 2)
+  requiredByDate  DateTime?
+  specifications  String?   @db.Text
+
+  // Approval chain
+  status String @default("DRAFT") // DRAFT | SUBMITTED | HOD_APPROVED | MANAGEMENT_APPROVED | PROCUREMENT | FULFILLED | REJECTED | CANCELLED
+
+  hodApprovalStatus String? // PENDING | APPROVED | REJECTED
+  hodApprovedById   Int?
+  hodApprovedBy     Employee? @relation("IndentApprovedBy", fields: [hodApprovedById], references: [id])
+  hodApprovedAt     DateTime?
+  hodRemarks        String?   @db.Text
+
+  managementApprovalStatus String?
+  managementApprovedBy     String?
+  managementApprovedAt     DateTime?
+  managementRemarks        String?   @db.Text
+
+  // Fulfillment
+  fulfilledAt      DateTime?
+  fulfilledAssetId Int?
+  fulfilledAsset   Asset?    @relation("IndentFulfilledAsset", fields: [fulfilledAssetId], references: [id])
+
+  rejectionReason String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  purchaseOrders PurchaseOrder[]
+
+  @@index([departmentId, status])
+  @@index([raisedById])
+  @@map("assetindent")
+}
+
+// ═══════════════════════════════════════════════════════
+// EMPLOYEE EXIT — Offboarding / asset handover process
+// ═══════════════════════════════════════════════════════
+model EmployeeExit {
+  id         Int    @id @default(autoincrement())
+  exitNumber String @unique // EXIT-2025-001
+
+  employeeId Int
+  employee   Employee @relation("ExitEmployee", fields: [employeeId], references: [id])
+
+  exitType      String // RESIGNATION | TERMINATION | RETIREMENT | TRANSFER | DEPUTATION
+  exitDate      DateTime // last working date
+  initiatedDate DateTime @default(now())
+
+  handledById Int?
+  handledBy   Employee? @relation("ExitHandledBy", fields: [handledById], references: [id])
+
+  status String @default("INITIATED") // INITIATED | ASSETS_LISTED | HANDOVER_IN_PROGRESS | CLEARED | CLOSED | PENDING_DUES
+
+  // Asset handover summary
+  totalAssetsAssigned Int @default(0)
+  assetsReturned      Int @default(0)
+  assetsPending       Int @default(0)
+
+  // Handover items (assets to return)
+  handoverItems EmployeeExitAsset[]
+
+  exitRemarks   String? @db.Text
+  clearanceNote String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([employeeId, status])
+  @@map("employeeexit")
+}
+
+model EmployeeExitAsset {
+  id     Int          @id @default(autoincrement())
+  exitId Int
+  exit   EmployeeExit @relation(fields: [exitId], references: [id])
+
+  assetId Int
+  asset   Asset @relation("ExitAssets", fields: [assetId], references: [id])
+
+  status            String    @default("PENDING") // PENDING | RETURNED | TRANSFERRED | WRITTEN_OFF
+  returnedAt        DateTime?
+  conditionOnReturn String? // GOOD | DAMAGED | MISSING
+  handoverToId      Int? // employee the asset is reassigned to
+  remarks           String?   @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([exitId, status])
+  @@map("employeeexitasset")
+}
+
+// ═══════════════════════════════════════════════════════
+// DECISION ENGINE — Configurable thresholds per category
+// ═══════════════════════════════════════════════════════
+model DecisionEngineConfig {
+  id Int @id @default(autoincrement())
+
+  // Scope — NULL means global default; set categoryId for per-category overrides
+  categoryId Int?           @unique
+  category   AssetCategory? @relation("DecisionEngineCategory", fields: [categoryId], references: [id])
+
+  // Signal weights (must sum to 100)
+  weightMaintenanceRatio Int @default(30)
+  weightAgeFactor        Int @default(20)
+  weightBreakdownFreq    Int @default(20)
+  weightDowntimeImpact   Int @default(15)
+  weightCostTrend        Int @default(15)
+
+  // Decision thresholds (composite score ranges)
+  thresholdMonitor Int @default(36) // score >= this → MONITOR
+  thresholdReview  Int @default(56) // score >= this → REVIEW_FOR_REPLACEMENT
+  thresholdReplace Int @default(76) // score >= this → REPLACE_IMMEDIATELY
+
+  // Signal-specific tuning
+  maintenanceRatioCeiling Float @default(1.5) // maintenance/bookValue ratio that maps to score 100
+  breakdownHighPerYear    Int   @default(6) // breakdowns/year that maps to score 100
+  downtimeHighHours       Int   @default(720) // hours/year downtime that maps to score 100
+  costTrendHighPct        Float @default(50) // YoY cost increase % that maps to score 100
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("decision_engine_config")
+}
+
+// Decision engine evaluation log — stores each run result for auditing
+model DecisionEngineLog {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation("DecisionLogs", fields: [assetId], references: [id])
+
+  // Individual signal scores (0–100)
+  scoreMaintenanceRatio Float
+  scoreAgeFactor        Float
+  scoreBreakdownFreq    Float
+  scoreDowntimeImpact   Float
+  scoreCostTrend        Float
+  compositeScore        Float
+
+  decision String // CONTINUE_MAINTENANCE | MONITOR | REVIEW_FOR_REPLACEMENT | REPLACE_IMMEDIATELY
+
+  // Snapshot of key data at evaluation time
+  maintenanceCost   Float
+  bookValue         Float
+  assetAgeYears     Float
+  expectedLifeYears Float
+  breakdownCount12m Int
+  downtimeHours12m  Float
+  costTrendPct      Float?
+
+  reasons Json // string[] — human-readable reasons
+
+  evaluatedAt   DateTime  @default(now())
+  evaluatedById Int?
+  evaluatedBy   Employee? @relation("DecisionEvaluator", fields: [evaluatedById], references: [id])
+
+  @@index([assetId, evaluatedAt])
+  @@map("decision_engine_log")
+}
+
+// ═══════════════════════════════════════════════════════
+// TENANT CONFIG — Feature flags per client/tenant
+// ═══════════════════════════════════════════════════════
+model TenantConfig {
+  id    Int     @id @default(autoincrement())
+  key   String  @unique
+  value String
+  label String?
+  group String? // PROCUREMENT | STORE | WORKORDER | ANALYTICS | RCA
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("tenantconfig")
+}
+
+// ═══════════════════════════════════════════════════════
+// STORE — Multi-tier warehouse hierarchy
+// ═══════════════════════════════════════════════════════
+model Store {
+  id        Int     @id @default(autoincrement())
+  name      String  @unique
+  code      String? @unique
+  storeType String  @default("MAIN_STORE") // MAIN_STORE | SUB_STORE
+
+  parentStoreId Int?
+  parentStore   Store?  @relation("StoreHierarchy", fields: [parentStoreId], references: [id])
+  childStores   Store[] @relation("StoreHierarchy")
+
+  branchId     Int?
+  departmentId Int?
+  managerId    Int?
+  address      String? @db.Text
+  isActive     Boolean @default(true)
+
+  createdById Int?
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  locations          StoreLocation[]
+  stockPositions     StoreStockPosition[]
+  transfersFrom      StoreTransfer[]      @relation("TransferFromStore")
+  transfersTo        StoreTransfer[]      @relation("TransferToStore")
+  materialIssues     MaterialIssue[]
+  goodsReceiptLines  GoodsReceiptLine[]   @relation("GRALineStore")
+  purchaseOrderLines PurchaseOrderLine[]  @relation("POLineStore")
+
+  @@map("store")
+}
+
+model StoreLocation {
+  id       Int     @id @default(autoincrement())
+  storeId  Int
+  store    Store   @relation(fields: [storeId], references: [id])
+  rack     String?
+  shelf    String?
+  bin      String?
+  label    String?
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@unique([storeId, rack, shelf, bin])
+  @@map("storelocation")
+}
+
+// ═══════════════════════════════════════════════════════
+// ROOT CAUSE ANALYSIS — 5 Whys + 6M structured framework
+// ═══════════════════════════════════════════════════════
+model RootCauseAnalysis {
+  id       Int    @id @default(autoincrement())
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
+
+  workOrderId Int?
+  workOrder   WorkOrder? @relation(fields: [workOrderId], references: [id])
+
+  framework        String // FIVE_WHYS | SIX_M | COMBINED
+  summary          String? @db.Text
+  conclusion       String? @db.Text
+  correctiveAction String? @db.Text
+  preventiveAction String? @db.Text
+
+  performedById Int?
+  performedAt   DateTime?
+  status        String    @default("DRAFT") // DRAFT | COMPLETED | REVIEWED
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  fiveWhys  RcaFiveWhy[]
+  sixMItems RcaSixMItem[]
+
+  @@index([ticketId])
+  @@map("rootcauseanalysis")
+}
+
+model RcaFiveWhy {
+  id    Int               @id @default(autoincrement())
+  rcaId Int
+  rca   RootCauseAnalysis @relation(fields: [rcaId], references: [id])
+
+  whyNumber Int
+  question  String @db.Text
+  answer    String @db.Text
+
+  @@index([rcaId])
+  @@map("rcafivewhy")
+}
+
+model RcaSixMItem {
+  id    Int               @id @default(autoincrement())
+  rcaId Int
+  rca   RootCauseAnalysis @relation(fields: [rcaId], references: [id])
+
+  category String // MAN | MACHINE | MATERIAL | METHOD | MEASUREMENT | MOTHER_NATURE
+  cause    String  @db.Text
+  isRoot   Boolean @default(false)
+
+  @@index([rcaId])
+  @@map("rcasixmitem")
+}
+
+// ═══════════════════════════════════════════════════════
+// PURCHASE ORDER — Separate procurement module
+// ═══════════════════════════════════════════════════════
+model PurchaseOrder {
+  id       Int      @id @default(autoincrement())
+  poNumber String   @unique
+  poDate   DateTime @default(now())
+
+  vendorId Int
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  status String @default("DRAFT") // DRAFT | SUBMITTED | HOD_APPROVED | MGMT_APPROVED | SENT_TO_VENDOR | PARTIALLY_RECEIVED | FULLY_RECEIVED | CANCELLED | CLOSED
+
+  // Optional linkage to indent
+  indentId Int?
+  indent   AssetIndent? @relation(fields: [indentId], references: [id])
+
+  departmentId Int?
+  department   Department? @relation("PODepartment", fields: [departmentId], references: [id])
+
+  // Financial
+  subtotal    Decimal? @db.Decimal(14, 2)
+  taxAmount   Decimal? @db.Decimal(14, 2)
+  totalAmount Decimal? @db.Decimal(14, 2)
+  currency    String   @default("INR")
+
+  // Approval chain (amount-based routing)
+  hodApprovedById   Int?
+  hodApprovedAt     DateTime?
+  hodRemarks        String?   @db.Text
+  mgmtApprovedById  Int?
+  mgmtApprovedAt    DateTime?
+  mgmtRemarks       String?   @db.Text
+  cooApprovedById   Int?
+  cooApprovedAt     DateTime?
+  cooRemarks        String?   @db.Text
+  cfoApprovedById   Int?
+  cfoApprovedAt     DateTime?
+  cfoRemarks        String?   @db.Text
+  approvalLevel     String?   // HOD | MANAGEMENT | COO | CFO — highest level needed based on amount
+
+  // Amendment tracking
+  amendmentCount    Int       @default(0)
+  isAmended         Boolean   @default(false)
+  originalAmount    Decimal?  @db.Decimal(14, 2)
+
+  deliveryDate    DateTime?
+  paymentTerms    String?   @db.Text
+  shippingAddress String?   @db.Text
+  notes           String?   @db.Text
+
+  createdById Int?
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  lines         PurchaseOrderLine[]
+  goodsReceipts GoodsReceipt[]
+  assets        Asset[]             @relation("POAssets")
+  amendments    PurchaseOrderAmendment[]
+
+  @@index([vendorId])
+  @@index([status])
+  @@index([indentId])
+  @@map("purchaseorder")
+}
+
+model PurchaseOrderAmendment {
+  id              Int           @id @default(autoincrement())
+  purchaseOrderId Int
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+
+  amendmentNumber Int           // 1, 2, 3...
+  reason          String        @db.Text
+  previousAmount  Decimal       @db.Decimal(14, 2)
+  newAmount       Decimal       @db.Decimal(14, 2)
+  changeAmount    Decimal       @db.Decimal(14, 2) // newAmount - previousAmount (can be negative)
+
+  // Snapshot of what changed
+  changesJson     Json?         // { linesAdded: [], linesModified: [], linesRemoved: [] }
+
+  status          String        @default("PENDING") // PENDING | APPROVED | REJECTED
+  approvedById    Int?
+  approvedAt      DateTime?
+  remarks         String?       @db.Text
+
+  createdById     Int?
+  createdAt       DateTime      @default(now())
+
+  @@index([purchaseOrderId])
+  @@map("purchaseorderamendment")
+}
+
+model PurchaseOrderLine {
+  id              Int           @id @default(autoincrement())
+  purchaseOrderId Int
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+
+  lineNumber  Int
+  itemType    String // ASSET | SPARE_PART | CONSUMABLE | SERVICE
+  description String
+
+  assetCategoryId Int?
+  sparePartId     Int?
+  consumableId    Int?
+
+  storeId Int?
+  store   Store? @relation("POLineStore", fields: [storeId], references: [id])
+
+  quantity   Int
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  taxPercent Decimal? @db.Decimal(5, 2)
+  lineTotal  Decimal  @db.Decimal(14, 2)
+
+  receivedQty Int  @default(0)
+  pendingQty  Int?
+
+  hsnCode        String?
+  specifications String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  goodsReceiptLines GoodsReceiptLine[]
+
+  @@index([purchaseOrderId])
+  @@map("purchaseorderline")
+}
+
+// ═══════════════════════════════════════════════════════
+// GOODS RECEIPT (GRA/GRN) — Receipt and inspection
+// ═══════════════════════════════════════════════════════
+model GoodsReceipt {
+  id        Int      @id @default(autoincrement())
+  grnNumber String   @unique
+  grnDate   DateTime @default(now())
+
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  status String @default("DRAFT") // DRAFT | INSPECTION_PENDING | INSPECTION_PASSED | INSPECTION_FAILED | ACCEPTED | PARTIALLY_ACCEPTED | REJECTED
+
+  inspectedById     Int?
+  inspectedAt       DateTime?
+  inspectionRemarks String?   @db.Text
+
+  deliveryChallanNo String?
+  deliveryDate      DateTime?
+  receivedById      Int?
+
+  invoiceNumber String?
+  invoiceDate   DateTime?
+  invoiceValue  Decimal?  @db.Decimal(14, 2)
+
+  totalValue Decimal? @db.Decimal(14, 2)
+  notes      String?  @db.Text
+
+  createdById Int?
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  lines  GoodsReceiptLine[]
+  assets Asset[]            @relation("GRAAssets")
+
+  @@index([purchaseOrderId])
+  @@index([status])
+  @@map("goodsreceipt")
+}
+
+model GoodsReceiptLine {
+  id             Int          @id @default(autoincrement())
+  goodsReceiptId Int
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+
+  poLineId Int?
+  poLine   PurchaseOrderLine? @relation(fields: [poLineId], references: [id])
+
+  itemType    String // ASSET | SPARE_PART | CONSUMABLE
+  description String
+
+  receivedQty Int
+  acceptedQty Int @default(0)
+  rejectedQty Int @default(0)
+
+  storeId Int?
+  store   Store? @relation("GRALineStore", fields: [storeId], references: [id])
+
+  unitPrice Decimal? @db.Decimal(12, 2)
+  lineTotal Decimal? @db.Decimal(14, 2)
+
+  inspectionStatus  String? // PASS | FAIL | PARTIAL
+  inspectionRemarks String? @db.Text
+
+  createdAssetId Int?
+  serialNumber   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([goodsReceiptId])
+  @@index([poLineId])
+  @@map("goodsreceiptline")
+}
+
+// ═══════════════════════════════════════════════════════
+// WORK ORDER — OpEx maintenance + CapEx project works
+// ═══════════════════════════════════════════════════════
+model WorkOrder {
+  id       Int      @id @default(autoincrement())
+  woNumber String   @unique
+  woDate   DateTime @default(now())
+  woType   String // OPEX | CAPEX
+
+  assetId  Int?
+  asset    Asset?  @relation("AssetWorkOrders", fields: [assetId], references: [id])
+  ticketId Int?
+  ticket   Ticket? @relation("TicketWorkOrders", fields: [ticketId], references: [id])
+
+  description String @db.Text
+  priority    String @default("MEDIUM") // LOW | MEDIUM | HIGH | CRITICAL
+
+  departmentId Int?
+  assignedToId Int?
+
+  status String @default("DRAFT") // DRAFT | SUBMITTED | APPROVED | IN_PROGRESS | PENDING_MATERIAL | WORK_COMPLETED | WCC_ISSUED | CLOSED | CANCELLED
+
+  // Financial
+  estimatedCost Decimal? @db.Decimal(14, 2)
+  actualCost    Decimal? @db.Decimal(14, 2)
+  budgetCode    String?
+
+  // CAPEX specific
+  capitalizeAsAsset  Boolean @default(false)
+  assetCategoryId    Int?
+  capitalizedAssetId Int?
+
+  // CapEx assets created from this WO
+  capitalizedAssets Asset[] @relation("CapExAssets")
+
+  // Approval
+  approvedById    Int?
+  approvedAt      DateTime?
+  approvalRemarks String?   @db.Text
+
+  // Scheduling
+  scheduledStart DateTime?
+  scheduledEnd   DateTime?
+  actualStart    DateTime?
+  actualEnd      DateTime?
+
+  // Contractor / vendor
+  contractorVendorId Int?
+  contractorName     String?
+  laborCost          Decimal? @db.Decimal(12, 2)
+  nonMaterialCost    Decimal? @db.Decimal(12, 2)
+
+  createdById Int?
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  materialIssues MaterialIssue[]
+  wcc            WorkCompletionCertificate?
+  rcas           RootCauseAnalysis[]
+
+  @@index([assetId])
+  @@index([ticketId])
+  @@index([status])
+  @@map("workorder")
+}
+
+model WorkCompletionCertificate {
+  id          Int       @id @default(autoincrement())
+  workOrderId Int       @unique
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  wccNumber String   @unique
+  wccDate   DateTime @default(now())
+
+  workSummary          String   @db.Text
+  materialsUsedSummary String?  @db.Text
+  totalLaborCost       Decimal? @db.Decimal(12, 2)
+  totalMaterialCost    Decimal? @db.Decimal(12, 2)
+  totalCost            Decimal? @db.Decimal(14, 2)
+
+  qualityCheckStatus String? // PASS | FAIL | CONDITIONAL
+  qualityRemarks     String? @db.Text
+
+  certifiedById Int?
+  certifiedAt   DateTime?
+  acceptedById  Int?
+  acceptedAt    DateTime?
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@map("workcompletioncertificate")
+}
+
+model MaterialIssue {
+  id          Int       @id @default(autoincrement())
+  workOrderId Int
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  storeId Int
+  store   Store @relation(fields: [storeId], references: [id])
+
+  issueType    String // SPARE_PART | CONSUMABLE
+  sparePartId  Int?
+  sparePart    SparePart?  @relation("MaterialIssueSparePart", fields: [sparePartId], references: [id])
+  consumableId Int?
+  consumable   Consumable? @relation("MaterialIssueConsumable", fields: [consumableId], references: [id])
+  description  String?
+
+  quantity  Decimal  @db.Decimal(12, 2)
+  unitCost  Decimal? @db.Decimal(12, 2)
+  totalCost Decimal? @db.Decimal(12, 2)
+
+  issuedById Int?
+  issuedAt   DateTime @default(now())
+  remarks    String?
+
+  inventoryTransactionId Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([workOrderId])
+  @@index([storeId])
+  @@map("materialissue")
+}
+
+// ═══════════════════════════════════════════════════════
+// STORE STOCK & TRANSFERS — Inventory management
+// ═══════════════════════════════════════════════════════
+model StoreStockPosition {
+  id      Int   @id @default(autoincrement())
+  storeId Int
+  store   Store @relation(fields: [storeId], references: [id])
+
+  itemType     String // SPARE_PART | CONSUMABLE
+  sparePartId  Int?
+  consumableId Int?
+
+  currentQty   Decimal @default(0) @db.Decimal(12, 2)
+  reservedQty  Decimal @default(0) @db.Decimal(12, 2)
+  availableQty Decimal @default(0) @db.Decimal(12, 2)
+
+  reorderLevel Decimal? @db.Decimal(12, 2)
+  maxLevel     Decimal? @db.Decimal(12, 2)
+
+  lastUpdatedAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([storeId, itemType, sparePartId, consumableId])
+  @@index([storeId])
+  @@map("storestockposition")
+}
+
+model StoreTransfer {
+  id             Int    @id @default(autoincrement())
+  transferNumber String @unique
+
+  fromStoreId Int
+  fromStore   Store @relation("TransferFromStore", fields: [fromStoreId], references: [id])
+  toStoreId   Int
+  toStore     Store @relation("TransferToStore", fields: [toStoreId], references: [id])
+
+  toDepartmentId Int?
+
+  status       String @default("REQUESTED") // REQUESTED | APPROVED | IN_TRANSIT | RECEIVED | CANCELLED
+  transferType String // STORE_TO_STORE | STORE_TO_DEPARTMENT
+
+  requestedById Int?
+  approvedById  Int?
+  receivedById  Int?
+
+  requestedAt DateTime  @default(now())
+  approvedAt  DateTime?
+  receivedAt  DateTime?
+  remarks     String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  items StoreTransferItem[]
+
+  @@index([fromStoreId])
+  @@index([toStoreId])
+  @@map("storetransfer")
+}
+
+model StoreTransferItem {
+  id              Int           @id @default(autoincrement())
+  storeTransferId Int
+  storeTransfer   StoreTransfer @relation(fields: [storeTransferId], references: [id])
+
+  itemType     String // SPARE_PART | CONSUMABLE | ASSET
+  sparePartId  Int?
+  consumableId Int?
+  assetId      Int?
+
+  quantity    Decimal  @db.Decimal(12, 2)
+  receivedQty Decimal? @db.Decimal(12, 2)
+  remarks     String?
+
+  createdAt DateTime @default(now())
+
+  @@index([storeTransferId])
+  @@map("storetransferitem")
+}
+
+// ═══════════════════════════════════════════════════════
+// TCO COST ALLOCATION — Track non-standard cost types
+// ═══════════════════════════════════════════════════════
+model AssetCostAllocation {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation("CostAllocations", fields: [assetId], references: [id])
+
+  costType    String // LABOR | UTILITY_POWER | SPACE_FACILITY | OUTSOURCED_SERVICE | CONSUMABLE | OTHER
+  description String?
+  amount      Decimal  @db.Decimal(14, 2)
+  period      String? // e.g. "2025-Q1", "2025-03", "FY2025-26"
+  entryDate   DateTime @default(now())
+
+  referenceType String? // WORK_ORDER | INVOICE | MANUAL
+  referenceId   Int?
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  @@index([assetId, costType])
+  @@map("assetcostallocation")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASSET RATE CARD — Revenue configuration per asset
+// ═══════════════════════════════════════════════════════════════════════════════
+model AssetRateCard {
+  id      Int   @id @default(autoincrement())
+  assetId Int   @unique
+  asset   Asset @relation("AssetRateCard", fields: [assetId], references: [id])
+
+  // Revenue rate
+  avgRevenuePerUnit  Decimal  @db.Decimal(12, 2) // average revenue per procedure/use/hour
+  revenueUnit        String   @default("PER_USE") // PER_USE | PER_HOUR | PER_DAY | PER_PROCEDURE | PER_TEST | PER_BED_DAY
+  currency           String   @default("INR")
+
+  // Capacity configuration
+  maxHoursPerDay     Decimal  @db.Decimal(5, 2) @default(24)  // max operable hours per day
+  maxUsesPerDay      Int?     // max procedures/tests per day (if applicable)
+  plannedHoursPerDay Decimal  @db.Decimal(5, 2) @default(8)   // planned/scheduled hours per day
+
+  // Operating schedule
+  operatingDaysPerWeek  Int   @default(6)  // 5, 6, or 7
+  shiftsPerDay          Int   @default(1)  // 1, 2, or 3
+  shiftDurationHours    Decimal @db.Decimal(4, 2) @default(8)
+
+  // Benchmarks
+  targetUtilizationPct  Decimal @db.Decimal(5, 2) @default(70)  // target % utilization
+  targetOeeScore        Decimal @db.Decimal(5, 2) @default(80)  // target OEE score (0-100)
+
+  // Quality metric (for OEE)
+  qualityPassRatePct    Decimal @db.Decimal(5, 2) @default(98)  // % of output that meets quality standards
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@map("assetratecard")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DAILY USAGE LOG — End-user reports daily asset usage
+// ═══════════════════════════════════════════════════════════════════════════════
+model AssetDailyUsageLog {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation("DailyUsageLogs", fields: [assetId], references: [id])
+
+  logDate    DateTime // the day being reported (DATE only, no time)
+
+  // Usage metrics
+  hoursUsed      Decimal  @db.Decimal(5, 2) // actual hours the asset was operated
+  procedureCount Int?     // number of procedures/tests/uses (if applicable)
+  patientsServed Int?     // number of patients (for medical equipment)
+
+  // Shift-wise breakdown (optional granularity)
+  shift1Hours    Decimal? @db.Decimal(4, 2) // morning shift hours
+  shift2Hours    Decimal? @db.Decimal(4, 2) // afternoon shift hours
+  shift3Hours    Decimal? @db.Decimal(4, 2) // night shift hours
+
+  // Revenue from this day's usage
+  revenueGenerated Decimal? @db.Decimal(12, 2) // actual revenue (if known)
+  estimatedRevenue Decimal? @db.Decimal(12, 2) // calculated: hoursUsed * avgRevenuePerUnit (or procedureCount * rate)
+
+  // Downtime tracking
+  downtimeHours      Decimal? @db.Decimal(5, 2) @default(0)
+  downtimeType       String?  // PLANNED | UNPLANNED | MAINTENANCE | CALIBRATION | NO_DEMAND | POWER_OUTAGE | STAFF_UNAVAILABLE
+  downtimeRemarks    String?  @db.Text
+
+  // OEE components (computed per day)
+  availabilityPct  Decimal? @db.Decimal(5, 2) // (plannedHours - downtimeHours) / plannedHours * 100
+  performancePct   Decimal? @db.Decimal(5, 2) // actualOutput / theoreticalMaxOutput * 100
+  qualityPct       Decimal? @db.Decimal(5, 2) // goodOutput / totalOutput * 100
+  oeeScore         Decimal? @db.Decimal(5, 2) // availability * performance * quality / 10000
+
+  // Condition after use
+  conditionAfterUse String? // GOOD | NEEDS_ATTENTION | DEGRADED | CRITICAL
+
+  // Who logged it
+  loggedById   Int?
+  loggedBy     Employee? @relation("UsageLoggedBy", fields: [loggedById], references: [id])
+  verifiedById Int?
+  verifiedAt   DateTime?
+  status       String   @default("LOGGED") // LOGGED | VERIFIED | FLAGGED
+
+  remarks String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([assetId, logDate])
+  @@index([assetId, logDate])
+  @@index([loggedById])
+  @@map("assetdailyusagelog")
+}
+
+model MaterialRequest {
+  id         Int      @id @default(autoincrement())
+  ticketId   Int
+  ticket     Ticket   @relation(fields: [ticketId], references: [id])
+
+  itemType       String   // SPARE_PART | CONSUMABLE | NEW_MATERIAL
+  sparePartId    Int?
+  consumableId   Int?
+  description    String   @db.Text
+  quantity       Decimal  @db.Decimal(12, 2)
+  estimatedCost  Decimal? @db.Decimal(12, 2)
+
+  status         String   @default("PENDING") // PENDING | OPERATIONS_APPROVED | REJECTED | DELIVERED
+
+  // Operations approval
+  approvedById      Int?
+  approvedAt        DateTime?
+  approvalRemarks   String?  @db.Text
+
+  // Delivery timeframe
+  expectedDelivery  DateTime?
+  actualDelivery    DateTime?
+  deliveryRemarks   String?
+
+  requestedById  Int?
+  requestedAt    DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([ticketId])
+  @@index([status])
+  @@map("materialrequest")
+}
+
+model ApprovalConfig {
+  id         Int    @id @default(autoincrement())
+  module     String // PURCHASE_ORDER | WORK_ORDER | DISPOSAL | MATERIAL_REQUEST
+  level      Int    // 1, 2, 3...
+  roleName   String // HOD | OPERATIONS | FINANCE | CEO_COO | ADMIN
+  minAmount  Decimal @db.Decimal(14, 2) // from this amount
+  maxAmount  Decimal? @db.Decimal(14, 2) // up to this amount (null = unlimited)
+  isActive   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([module, level])
+  @@map("approvalconfig")
 }

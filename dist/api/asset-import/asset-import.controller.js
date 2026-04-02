@@ -812,40 +812,78 @@ function importAssetsExcel(req, res) {
                         });
                         continue;
                     }
-                    yield prismaClient_1.default.warranty.upsert({
-                        where: { assetId: asset.id },
-                        update: {
-                            isUnderWarranty,
-                            warrantyStart: warrantyStart || new Date(),
-                            warrantyEnd: warrantyEnd || new Date(),
-                            warrantyType: toStringOrNull(row.warrantyType),
-                            warrantyProvider: toStringOrNull(row.warrantyProvider),
-                            vendorId,
-                            warrantyReference: toStringOrNull(row.warrantyReference),
-                            coverageDetails: toStringOrNull(row.coverageDetails),
-                            exclusions: toStringOrNull(row.exclusions),
-                            supportContact: toStringOrNull(row.supportContact),
-                            supportEmail: toStringOrNull(row.supportEmail),
-                            termsUrl: toStringOrNull(row.termsUrl),
-                            remarks: toStringOrNull(row.remarks),
-                        },
-                        create: {
+                    // await prisma.warranty.upsert({
+                    //     where: {
+                    //         assetId: asset.id,
+                    //         isActive: true,
+                    //     },
+                    //     update: {
+                    //         isUnderWarranty,
+                    //         warrantyStart: warrantyStart || new Date(),
+                    //         warrantyEnd: warrantyEnd || new Date(),
+                    //         warrantyType: toStringOrNull(row.warrantyType),
+                    //         warrantyProvider: toStringOrNull(row.warrantyProvider),
+                    //         vendorId,
+                    //         warrantyReference: toStringOrNull(row.warrantyReference),
+                    //         coverageDetails: toStringOrNull(row.coverageDetails),
+                    //         exclusions: toStringOrNull(row.exclusions),
+                    //         supportContact: toStringOrNull(row.supportContact),
+                    //         supportEmail: toStringOrNull(row.supportEmail),
+                    //         termsUrl: toStringOrNull(row.termsUrl),
+                    //         remarks: toStringOrNull(row.remarks),
+                    //     },
+                    //     create: {
+                    //         assetId: asset.id,
+                    //         isUnderWarranty,
+                    //         warrantyStart: warrantyStart || new Date(),
+                    //         warrantyEnd: warrantyEnd || new Date(),
+                    //         warrantyType: toStringOrNull(row.warrantyType),
+                    //         warrantyProvider: toStringOrNull(row.warrantyProvider),
+                    //         vendorId,
+                    //         warrantyReference: toStringOrNull(row.warrantyReference),
+                    //         coverageDetails: toStringOrNull(row.coverageDetails),
+                    //         exclusions: toStringOrNull(row.exclusions),
+                    //         supportContact: toStringOrNull(row.supportContact),
+                    //         supportEmail: toStringOrNull(row.supportEmail),
+                    //         termsUrl: toStringOrNull(row.termsUrl),
+                    //         remarks: toStringOrNull(row.remarks),
+                    //     }
+                    // });
+                    const payload = {
+                        isUnderWarranty,
+                        warrantyStart: warrantyStart || new Date(),
+                        warrantyEnd: warrantyEnd || new Date(),
+                        warrantyType: toStringOrNull(row.warrantyType),
+                        warrantyProvider: toStringOrNull(row.warrantyProvider),
+                        vendorId,
+                        warrantyReference: toStringOrNull(row.warrantyReference),
+                        coverageDetails: toStringOrNull(row.coverageDetails),
+                        exclusions: toStringOrNull(row.exclusions),
+                        supportContact: toStringOrNull(row.supportContact),
+                        supportEmail: toStringOrNull(row.supportEmail),
+                        termsUrl: toStringOrNull(row.termsUrl),
+                        remarks: toStringOrNull(row.remarks),
+                    };
+                    const existingActive = yield prismaClient_1.default.warranty.findFirst({
+                        where: {
                             assetId: asset.id,
-                            isUnderWarranty,
-                            warrantyStart: warrantyStart || new Date(),
-                            warrantyEnd: warrantyEnd || new Date(),
-                            warrantyType: toStringOrNull(row.warrantyType),
-                            warrantyProvider: toStringOrNull(row.warrantyProvider),
-                            vendorId,
-                            warrantyReference: toStringOrNull(row.warrantyReference),
-                            coverageDetails: toStringOrNull(row.coverageDetails),
-                            exclusions: toStringOrNull(row.exclusions),
-                            supportContact: toStringOrNull(row.supportContact),
-                            supportEmail: toStringOrNull(row.supportEmail),
-                            termsUrl: toStringOrNull(row.termsUrl),
-                            remarks: toStringOrNull(row.remarks),
-                        }
+                            isActive: true,
+                        },
+                        orderBy: {
+                            createdAt: 'desc',
+                        },
                     });
+                    if (existingActive) {
+                        yield prismaClient_1.default.warranty.update({
+                            where: { id: existingActive.id },
+                            data: payload,
+                        });
+                    }
+                    else {
+                        yield prismaClient_1.default.warranty.create({
+                            data: Object.assign({ assetId: asset.id, isActive: true }, payload),
+                        });
+                    }
                     summary.warrantiesUpserted++;
                 }
                 catch (err) {

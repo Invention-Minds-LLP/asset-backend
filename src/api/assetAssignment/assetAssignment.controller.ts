@@ -421,10 +421,48 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       });
     }
 
+    // 3. If this is the HOD of the asset's department acknowledging, issue the real Asset ID
+    let issuedAssetId: string | null = null;
+
+    const currentAsset = await prisma.asset.findUnique({
+      where: { id: assignment.assetId },
+      select: { assetId: true, departmentId: true },
+    });
+
+    if (currentAsset?.assetId.startsWith("TEMP-") && currentAsset.departmentId) {
+      const acknowledger = await prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: { role: true, departmentId: true },
+      });
+
+      if (acknowledger?.role === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
+        const now = new Date();
+        const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+        const fyEnd = fyStart + 1;
+        const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
+
+        const latestAsset = await prisma.asset.findFirst({
+          where: { assetId: { startsWith: `AST-${process.env.HOSPITAL_CODE}-${fyStr}` }, parentAssetId: null },
+          orderBy: { id: "desc" },
+        });
+        let nextSeq = 1;
+        if (latestAsset) {
+          nextSeq = parseInt(latestAsset.assetId.split("-")[3], 10) + 1;
+        }
+        issuedAssetId = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-${nextSeq.toString().padStart(5, "0")}`;
+
+        await prisma.asset.update({
+          where: { id: assignment.assetId },
+          data: { assetId: issuedAssetId } as any,
+        });
+      }
+    }
+
     res.json({
       message: "Acknowledged with checklist",
       assignment: updatedAssignment,
       acknowledgementRun,
+      ...(issuedAssetId ? { issuedAssetId } : {}),
     });
   } catch (e: any) {
     console.error(e);

@@ -21,7 +21,8 @@ import {
   getPendingTransferApprovals,
   getTicketMetrics,
   completeTicketWork,
-  resolveTicket
+  resolveTicket,
+  addCollectionNote
 } from "./tickets.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -53,6 +54,7 @@ router.post("/:id/reassign", authenticateToken, reassignTicket);
 
 router.patch('/:id/complete-work', authenticateToken, completeTicketWork);
 router.patch('/:id/resolve', authenticateToken, resolveTicket);
+router.post('/:id/collection-note', authenticateToken, addCollectionNote);
 
 // Terminate / Close
 router.post("/:id/terminate", authenticateToken, terminateTicket);

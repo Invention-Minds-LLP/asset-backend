@@ -5,6 +5,8 @@ import fs from "fs";
 import path from "path";
 import { Client } from "basic-ftp";
 import { AcknowledgementPurpose } from "@prisma/client";
+import { logAction } from "../audit-trail/audit-trail.controller";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 
 const FTP_CONFIG = {
@@ -82,6 +84,8 @@ export const requestAssetTransfer = async (
         temporary: !!temporary,
         expiresAt: temporary ? toDateOrNull(expiresAt) : null,
 
+        // Permanent transfers need management approval before HOD can approve
+        managementApprovalStatus: (!temporary) ? "PENDING" : null,
         status: "REQUESTED",
         requestedById: req.user?.employeeDbId ?? null,
         reason: reason || null,
@@ -94,6 +98,12 @@ export const requestAssetTransfer = async (
         requestedBy: true
       }
     });
+
+    logAction({ entityType: "TRANSFER", entityId: transfer.id, action: "CREATE", description: `Transfer request for asset #${assetId} (${transferType})`, performedById: req.user?.employeeDbId });
+
+    // Notify HODs about transfer request
+    const hodIds = await getDepartmentHODs(asset.departmentId);
+    notify({ type: "TRANSFER", title: "Transfer Request", message: `Asset transfer requested for ${asset.assetName || asset.assetId} (${transferType})`, recipientIds: hodIds, assetId: asset.id, createdById: req.user?.employeeDbId, channel: "BOTH", templateCode: "TRANSFER_REQUEST", templateData: { assetName: asset.assetName || asset.assetId, transferType } });
 
     res.status(201).json({
       message: "Transfer request submitted",
@@ -200,8 +210,37 @@ export const approveAssetTransfer = async (
         });
       }
 
-      return { updatedTransfer, newLocation };
+      // Auto-generate gate pass for external transfers (non-DEAD)
+      let gatePass = null;
+      if (transfer.transferType === "EXTERNAL" && transfer.externalType !== "DEAD") {
+        const today = new Date();
+        const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
+        const gpCount = await tx.gatePass.count({
+          where: { gatePassNo: { startsWith: `GP-${dateStr}` } },
+        });
+        const gatePassNo = `GP-${dateStr}-${String(gpCount + 1).padStart(4, "0")}`;
+
+        gatePass = await tx.gatePass.create({
+          data: {
+            gatePassNo,
+            type: "OUTWARD",
+            status: "ISSUED",
+            assetId: transfer.assetId,
+            issuedTo: transfer.destinationName ?? transfer.destinationContactPerson ?? "External",
+            purpose: transfer.reason ?? `Transfer: ${transfer.externalType}`,
+            approvedBy: String(req.user?.employeeDbId ?? "HOD"),
+            transferHistoryId: transfer.id,
+          } as any,
+        });
+      }
+
+      return { updatedTransfer, newLocation, gatePass };
     });
+
+    logAction({ entityType: "TRANSFER", entityId: transferId, action: "APPROVE", description: `Transfer #${transferId} approved for asset #${transfer.assetId}`, performedById: req.user?.employeeDbId });
+
+    // Notify requester that transfer is approved
+    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Approved", message: `Transfer #${transferId} for asset #${transfer.assetId} has been approved`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
 
     res.json({
       message: "Transfer approved successfully",
@@ -258,6 +297,11 @@ export const rejectAssetTransfer = async (
         approvedBy: true
       }
     });
+
+    logAction({ entityType: "TRANSFER", entityId: transferId, action: "STATUS_CHANGE", description: `Transfer #${transferId} rejected`, performedById: req.user?.employeeDbId });
+
+    // Notify requester that transfer is rejected
+    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Rejected", message: `Transfer #${transferId} for asset #${transfer.assetId} has been rejected`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
 
     res.json({
       message: "Transfer rejected",
@@ -920,6 +964,8 @@ export const completeTransferredAssetReturn = async (
       });
     }
 
+    logAction({ entityType: "TRANSFER", entityId: returnTransferId, action: "STATUS_CHANGE", description: `Transfer return #${returnTransferId} completed for asset #${returnRequest.assetId}`, performedById: req.user?.employeeDbId });
+
     res.json({
       message: "Asset return completed with checklist",
       completedReturn,
@@ -1044,5 +1090,74 @@ export const getTransferredAssetReturnChecklist = async (
       message: "Failed to fetch transfer return checklist",
       error: err.message
     });
+  }
+};
+
+// POST /api/transfers/assets/transfer/:id/management-approve
+// Management approves or rejects a permanent transfer before HOD approval
+export const getPendingMgmtApprovals = async (
+  _req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const rows = await prisma.assetTransferHistory.findMany({
+      where: { managementApprovalStatus: "PENDING" } as any,
+      include: {
+        asset: true,
+        fromBranch: true,
+        toBranch: true,
+        requestedBy: true,
+      },
+      orderBy: { requestedAt: "desc" },
+    });
+    res.json(rows);
+  } catch (err) {
+    console.error("getPendingMgmtApprovals error:", err);
+    res.status(500).json({ message: "Failed to fetch pending management approvals" });
+  }
+};
+
+export const managementApproveTransfer = async (
+  req: AuthenticatedRequest,
+  res: Response
+) => {
+  try {
+    const transferId = Number(req.params.id);
+    const { decision, remarks } = req.body; // APPROVED | REJECTED
+
+    if (!["APPROVED", "REJECTED"].includes(decision)) {
+      res.status(400).json({ message: "decision must be APPROVED or REJECTED" });
+      return;
+    }
+
+    const transfer = await prisma.assetTransferHistory.findUnique({
+      where: { id: transferId },
+    });
+
+    if (!transfer) {
+      res.status(404).json({ message: "Transfer not found" });
+      return;
+    }
+    if ((transfer as any).managementApprovalStatus !== "PENDING") {
+      res.status(400).json({ message: "Management approval not pending for this transfer" });
+      return;
+    }
+
+    const updated = await prisma.assetTransferHistory.update({
+      where: { id: transferId },
+      data: {
+        managementApprovalStatus: decision,
+        managementApprovedById: req.user?.employeeDbId ?? null,
+        managementApprovedAt: new Date(),
+        managementRemarks: remarks ?? null,
+        // If rejected, close the transfer
+        status: decision === "REJECTED" ? "REJECTED" : "REQUESTED",
+      } as any,
+    });
+
+    res.json({ message: `Transfer ${decision.toLowerCase()} by management`, transfer: updated });
+  } catch (err: any) {
+    console.error("managementApproveTransfer error:", err);
+    res.status(500).json({ message: "Failed to process management approval" });
   }
 };

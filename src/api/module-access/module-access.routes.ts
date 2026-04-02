@@ -2,6 +2,7 @@ import express from "express";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import {
   seedDefaultModules,
+  resetAndReseed,
   getAllModules,
   createModule,
   updateModule,
@@ -20,6 +21,7 @@ const router = express.Router();
 
 // Seed (one-time setup)
 router.post("/seed", authenticateToken, seedDefaultModules);
+router.post("/reset-and-reseed", authenticateToken, resetAndReseed);
 
 // App Modules CRUD
 router.get("/modules", authenticateToken, getAllModules);

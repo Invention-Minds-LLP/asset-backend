@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.triggerPMNotifications = exports.getServiceContract = exports.getHistoryByAsset = exports.executeMaintenance = exports.getDueSchedules = exports.getAllSchedules = exports.createSchedule = void 0;
+exports.triggerPMNotifications = exports.getAllMaintenanceHistory = exports.updateSchedule = exports.rescheduleMaintenance = exports.getCalendarView = exports.getServiceContract = exports.getHistoryByAsset = exports.executeMaintenance = exports.getDueSchedules = exports.getAllSchedules = exports.createSchedule = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const client_1 = require("@prisma/client");
 /** =========================
@@ -282,6 +282,190 @@ exports.getServiceContract = getServiceContract;
 /** =========================
  * 7. Trigger Notifications (cron-ready)
  * ========================= */
+/** =========================
+ * Calendar View (month-based)
+ * ========================= */
+const getCalendarView = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { month, year } = req.query;
+        const m = Number(month) || new Date().getMonth() + 1;
+        const y = Number(year) || new Date().getFullYear();
+        const startDate = new Date(y, m - 1, 1);
+        const endDate = new Date(y, m, 0, 23, 59, 59);
+        const schedules = yield prismaClient_1.default.maintenanceSchedule.findMany({
+            where: {
+                nextDueAt: { gte: startDate, lte: endDate },
+                isActive: true,
+            },
+            include: {
+                asset: {
+                    select: {
+                        id: true,
+                        assetId: true,
+                        assetName: true,
+                        departmentId: true,
+                        department: { select: { name: true } },
+                        currentLocation: true,
+                    },
+                },
+            },
+            orderBy: { nextDueAt: "asc" },
+        });
+        const now = new Date();
+        const events = schedules.map((s) => {
+            var _a;
+            const dueDate = new Date(s.nextDueAt);
+            let status;
+            if (dueDate < now) {
+                status = "OVERDUE";
+            }
+            else {
+                const daysUntil = Math.ceil((dueDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+                status = daysUntil <= (s.reminderDays || 7) ? "UPCOMING" : "SCHEDULED";
+            }
+            return {
+                id: s.id,
+                assetId: s.asset.id,
+                assetCode: s.asset.assetId,
+                assetName: s.asset.assetName,
+                department: ((_a = s.asset.department) === null || _a === void 0 ? void 0 : _a.name) || "",
+                location: s.asset.currentLocation || "",
+                dueDate: s.nextDueAt,
+                frequencyValue: s.frequencyValue,
+                frequencyUnit: s.frequencyUnit,
+                status,
+                reason: s.reason,
+            };
+        });
+        const overdue = events.filter((e) => e.status === "OVERDUE").length;
+        const upcoming = events.filter((e) => e.status === "UPCOMING").length;
+        const scheduled = events.filter((e) => e.status === "SCHEDULED").length;
+        res.json({ month: m, year: y, overdue, upcoming, scheduled, total: events.length, events });
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.getCalendarView = getCalendarView;
+/** =========================
+ * Reschedule a PM
+ * ========================= */
+const rescheduleMaintenance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const user = mustUser(req);
+        const id = Number(req.params.id);
+        const { newDueDate, reason } = req.body;
+        if (!newDueDate) {
+            res.status(400).json({ message: "newDueDate is required" });
+            return;
+        }
+        const schedule = yield prismaClient_1.default.maintenanceSchedule.findUnique({ where: { id } });
+        if (!schedule) {
+            res.status(404).json({ message: "Schedule not found" });
+            return;
+        }
+        const updated = yield prismaClient_1.default.maintenanceSchedule.update({
+            where: { id },
+            data: {
+                nextDueAt: new Date(newDueDate),
+                reason: reason || schedule.reason,
+            },
+        });
+        res.json(updated);
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.rescheduleMaintenance = rescheduleMaintenance;
+/** =========================
+ * Update schedule (toggle active, change frequency)
+ * ========================= */
+const updateSchedule = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const id = Number(req.params.id);
+        const { frequencyValue, frequencyUnit, nextDueAt, reminderDays, reason, isActive } = req.body;
+        const data = {};
+        if (frequencyValue !== undefined)
+            data.frequencyValue = frequencyValue;
+        if (frequencyUnit !== undefined)
+            data.frequencyUnit = frequencyUnit;
+        if (nextDueAt !== undefined)
+            data.nextDueAt = new Date(nextDueAt);
+        if (reminderDays !== undefined)
+            data.reminderDays = reminderDays;
+        if (reason !== undefined)
+            data.reason = reason;
+        if (isActive !== undefined)
+            data.isActive = isActive;
+        const updated = yield prismaClient_1.default.maintenanceSchedule.update({
+            where: { id },
+            data,
+        });
+        res.json(updated);
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.updateSchedule = updateSchedule;
+/** =========================
+ * PM History with pagination & CSV export
+ * ========================= */
+const getAllMaintenanceHistory = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { assetId, serviceType, page = "1", limit = "25", search, exportCsv } = req.query;
+        const where = {};
+        if (assetId)
+            where.assetId = Number(assetId);
+        if (serviceType)
+            where.serviceType = String(serviceType);
+        if (search) {
+            where.OR = [
+                { performedBy: { contains: String(search) } },
+                { notes: { contains: String(search) } },
+                { asset: { assetName: { contains: String(search) } } },
+            ];
+        }
+        const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+        const take = parseInt(String(limit));
+        const [total, history] = yield Promise.all([
+            prismaClient_1.default.maintenanceHistory.count({ where }),
+            prismaClient_1.default.maintenanceHistory.findMany(Object.assign({ where, include: {
+                    asset: { select: { assetId: true, assetName: true } },
+                }, orderBy: { actualDoneAt: "desc" } }, (exportCsv !== "true" ? { skip, take } : {}))),
+        ]);
+        if (exportCsv === "true") {
+            const csvRows = history.map((h) => {
+                var _a, _b;
+                return ({
+                    AssetId: ((_a = h.asset) === null || _a === void 0 ? void 0 : _a.assetId) || "",
+                    AssetName: ((_b = h.asset) === null || _b === void 0 ? void 0 : _b.assetName) || "",
+                    ScheduledDue: h.scheduledDue ? new Date(h.scheduledDue).toISOString().split("T")[0] : "",
+                    ActualDone: h.actualDoneAt ? new Date(h.actualDoneAt).toISOString().split("T")[0] : "",
+                    WasLate: h.wasLate ? "Yes" : "No",
+                    PerformedBy: h.performedBy || "",
+                    ServiceType: h.serviceType || "",
+                    ServiceCost: h.serviceCost ? Number(h.serviceCost) : "",
+                    PartsCost: h.partsCost ? Number(h.partsCost) : "",
+                    TotalCost: h.totalCost ? Number(h.totalCost) : "",
+                    Notes: h.notes || "",
+                });
+            });
+            const headers = Object.keys(csvRows[0] || {}).join(",");
+            const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
+            res.setHeader("Content-Type", "text/csv");
+            res.setHeader("Content-Disposition", "attachment; filename=maintenance-history.csv");
+            res.send(headers + "\n" + rows);
+            return;
+        }
+        res.json({ data: history, total, page: parseInt(String(page)), limit: take });
+    }
+    catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+exports.getAllMaintenanceHistory = getAllMaintenanceHistory;
 const triggerPMNotifications = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const now = new Date();
     const schedules = yield prismaClient_1.default.maintenanceSchedule.findMany({

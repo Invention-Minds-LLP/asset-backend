@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 export const addInsurancePolicy = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -44,6 +45,16 @@ export const addInsurancePolicy = async (req: AuthenticatedRequest, res: Respons
       }
     });
 
+    // Fire-and-forget: notify admins about new insurance policy
+    getAdminIds().then(adminIds =>
+      notify({
+        type: "INSURANCE",
+        title: "Insurance Policy Created",
+        message: `Insurance policy "${policyNumber}" created for asset #${assetId}`,
+        recipientIds: adminIds,
+        createdById: (req as any).user?.employeeDbId,
+      })
+    ).catch(() => {});
 
     res.status(201).json(insurance);
 
@@ -285,6 +296,17 @@ export const createInsuranceClaim = async (req: AuthenticatedRequest, res: Respo
       }
     });
 
+    // Fire-and-forget: notify admins about new insurance claim
+    getAdminIds().then(adminIds =>
+      notify({
+        type: "INSURANCE",
+        title: "Insurance Claim Filed",
+        message: `Claim "${claimNumber}" filed for policy #${insuranceId} (₹${amount})`,
+        recipientIds: adminIds,
+        createdById: req.user?.employeeDbId,
+      })
+    ).catch(() => {});
+
     res.status(201).json(claim);
     return;
 
@@ -336,9 +358,23 @@ export const getClaimsByAsset = async (req: AuthenticatedRequest, res: Response)
 // ─── Get All Insurance Policies (standalone page) ─────────────────────────────
 export const getAllInsurancePolicies = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = (req as any).user;
     const { status, assetId, provider, page = "1", limit = "25", search, exportCsv } = req.query;
 
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
+    }
+
     const where: any = {};
+    if (scopedAssetIds) {
+      where.assetId = { in: scopedAssetIds };
+    }
     if (status) where.policyStatus = String(status);
     if (assetId) where.assetId = Number(assetId);
     if (provider) where.provider = { contains: String(provider) };
@@ -399,9 +435,23 @@ export const getAllInsurancePolicies = async (req: AuthenticatedRequest, res: Re
 // ─── Get All Insurance Claims (standalone page) ──────────────────────────────
 export const getAllInsuranceClaims = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = (req as any).user;
     const { status, assetId, page = "1", limit = "25", search, exportCsv } = req.query;
 
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds: number[] | undefined;
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({
+        where: { departmentId: Number(user.departmentId) },
+        select: { id: true },
+      });
+      scopedAssetIds = deptAssets.map(a => a.id);
+    }
+
     const where: any = {};
+    if (scopedAssetIds) {
+      where.assetId = { in: scopedAssetIds };
+    }
     if (status) where.claimStatus = String(status);
     if (assetId) where.assetId = Number(assetId);
     if (search) {
@@ -460,14 +510,26 @@ export const getAllInsuranceClaims = async (req: AuthenticatedRequest, res: Resp
 // ─── Insurance Dashboard Stats ───────────────────────────────────────────────
 export const getInsuranceStats = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const user = req.user as any;
+
+    // Department scoping
+    let scope: any = {};
+    let claimScope: any = {};
+    if (user?.role !== "ADMIN" && user?.departmentId) {
+      const deptAssets = await prisma.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
+      const ids = deptAssets.map(a => a.id);
+      scope = { assetId: { in: ids } };
+      claimScope = { assetId: { in: ids } };
+    }
+
     const [totalPolicies, activePolicies, expiredPolicies, totalClaims, pendingClaims, approvedClaims, settledClaims] = await Promise.all([
-      prisma.assetInsurance.count(),
-      prisma.assetInsurance.count({ where: { policyStatus: "ACTIVE" } }),
-      prisma.assetInsurance.count({ where: { policyStatus: "EXPIRED" } }),
-      prisma.insuranceClaim.count(),
-      prisma.insuranceClaim.count({ where: { claimStatus: "SUBMITTED" } }),
-      prisma.insuranceClaim.count({ where: { claimStatus: "APPROVED" } }),
-      prisma.insuranceClaim.count({ where: { claimStatus: "SETTLED" } }),
+      prisma.assetInsurance.count({ where: { ...scope } }),
+      prisma.assetInsurance.count({ where: { policyStatus: "ACTIVE", ...scope } }),
+      prisma.assetInsurance.count({ where: { policyStatus: "EXPIRED", ...scope } }),
+      prisma.insuranceClaim.count({ where: { ...claimScope } }),
+      prisma.insuranceClaim.count({ where: { claimStatus: "SUBMITTED", ...claimScope } }),
+      prisma.insuranceClaim.count({ where: { claimStatus: "APPROVED", ...claimScope } }),
+      prisma.insuranceClaim.count({ where: { claimStatus: "SETTLED", ...claimScope } }),
     ]);
 
     // Expiring soon (within 30 days)
@@ -479,6 +541,7 @@ export const getInsuranceStats = async (req: AuthenticatedRequest, res: Response
       where: {
         policyStatus: "ACTIVE",
         endDate: { gte: now, lte: thirtyDaysLater },
+        ...scope,
       },
     });
 

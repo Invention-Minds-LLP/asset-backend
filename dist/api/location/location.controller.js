@@ -16,7 +16,7 @@ exports.getBranches = exports.createBranch = exports.getLocationHistory = export
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const addAssetLocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { assetId, branchId, block, floor, room, employeeResponsibleId, rfid } = req.body;
+        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid } = req.body;
         if (!assetId) {
             res.status(400).json({ message: "assetId is required" });
             return;
@@ -36,6 +36,7 @@ const addAssetLocation = (req, res) => __awaiter(void 0, void 0, void 0, functio
                     floor,
                     room,
                     employeeResponsibleId,
+                    departmentSnapshot,
                     isActive: true
                 }
             });
@@ -59,7 +60,7 @@ exports.addAssetLocation = addAssetLocation;
 const updateCurrentLocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const locationId = Number(req.params.locationId);
-        const { assetId, branchId, block, floor, room, employeeResponsibleId, rfid } = req.body;
+        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid } = req.body;
         // Option A: if frontend sends assetId
         if (!assetId) {
             res.status(400).json({ message: "assetId is required" });
@@ -80,6 +81,7 @@ const updateCurrentLocation = (req, res) => __awaiter(void 0, void 0, void 0, fu
                     floor,
                     room,
                     employeeResponsibleId,
+                    departmentSnapshot,
                     isActive: true
                 },
                 include: { branch: true, employeeResponsible: true }

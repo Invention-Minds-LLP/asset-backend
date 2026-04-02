@@ -21,6 +21,7 @@ const authenticateToken = (req, res, next) => {
             employeeDbId: decoded.employeeDbId,
             role: decoded.role,
             name: decoded.name,
+            departmentId: decoded.departmentId
         };
         // attach decoded payload to request
         next();

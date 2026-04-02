@@ -81,3 +81,37 @@ export const deleteDepartment = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to delete department" });
   }
 };
+
+// GET /api/departments/:id/assets  — all assets assigned to a department
+export const getDepartmentAssets = async (req: Request, res: Response) => {
+  try {
+    const deptId = Number(req.params.id);
+    const { status, categoryId } = req.query;
+
+    const where: any = { departmentId: deptId };
+    if (status) where.status = String(status);
+    if (categoryId) where.assetCategoryId = Number(categoryId);
+
+    const assets = await prisma.asset.findMany({
+      where,
+      include: {
+        assetCategory: { select: { id: true, name: true } },
+        allottedTo: { select: { id: true, name: true, employeeID: true, designation: true } },
+        supervisor: { select: { id: true, name: true } },
+      },
+      orderBy: { assetName: "asc" },
+    });
+
+    const summary = {
+      total: assets.length,
+      byStatus: assets.reduce((acc: Record<string, number>, a: any) => {
+        acc[a.status] = (acc[a.status] || 0) + 1;
+        return acc;
+      }, {}),
+    };
+
+    res.json({ summary, assets });
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to fetch department assets" });
+  }
+};

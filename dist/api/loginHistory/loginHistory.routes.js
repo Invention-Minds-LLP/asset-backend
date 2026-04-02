@@ -8,4 +8,5 @@ const loginHistory_controller_1 = require("./loginHistory.controller");
 const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = express_1.default.Router();
 router.get("/", authMiddleware_1.authenticateToken, loginHistory_controller_1.getAllLoginHistory);
+router.get("/stats", authMiddleware_1.authenticateToken, loginHistory_controller_1.getUserActivityStats);
 exports.default = router;

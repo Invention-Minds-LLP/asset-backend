@@ -5,6 +5,7 @@ import fs from "fs";
 import path from "path";
 import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { logAction } from "../audit-trail/audit-trail.controller";
 
 
 const FTP_CONFIG = {
@@ -34,9 +35,9 @@ export const getAllAssets = async (req: Request, res: Response) => {
 
     let where: any = {};
 
-    if (role === 'ADMIN' || departmentId === 5) {
+    if (role === 'ADMIN' || role === 'CEO_COO') {
       where = {};
-    } else if (role === 'HOD') {
+    } else if (role === 'HOD' || role === 'FINANCE' || role === 'OPERATIONS') {
       where = {
         departmentId: Number(departmentId)
       };
@@ -45,9 +46,10 @@ export const getAllAssets = async (req: Request, res: Response) => {
         supervisorId: Number(employeeDbId)
       };
     } else {
-      where = {
-        id: -1
-      };
+      // EXECUTIVE — see assets in their department
+      where = departmentId
+        ? { departmentId: Number(departmentId) }
+        : { allottedToId: Number(employeeDbId) };
     }
 
     const assets = await prisma.asset.findMany({
@@ -67,6 +69,32 @@ export const getAllAssets = async (req: Request, res: Response) => {
     res.status(500).json({ message: 'Failed to fetch assets' });
   }
 };
+
+// GET /assets/all-dropdown — lightweight list of ALL assets for dropdowns (ticket form, etc.)
+export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
+  try {
+    const assets = await prisma.asset.findMany({
+      where: { status: { notIn: ["DISPOSED", "SCRAPPED"] } },
+      select: {
+        id: true,
+        assetId: true,
+        assetName: true,
+        serialNumber: true,
+        status: true,
+        departmentId: true,
+        department: { select: { name: true } },
+        assetCategory: { select: { name: true } },
+        currentLocation: true,
+      },
+      orderBy: { assetName: "asc" },
+    });
+    res.json(assets);
+  } catch (error) {
+    console.error("getAllAssetsForDropdown error:", error);
+    res.status(500).json({ message: "Failed to fetch assets" });
+  }
+};
+
 export const getAssetById = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   const asset = await prisma.asset.findUnique(
@@ -140,52 +168,55 @@ export const getAssetById = async (req: Request, res: Response) => {
 
 export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    // if (req.user.role !== "store_user" && req.user.role !== "superadmin") {
-    //   res.status(403).json({ message: "Only store users can create assets" });
-    //   return
-    // }
+    const data = req.body;
 
-    // Financial Year ID (AST-FY2025-26-001)
-    const now = new Date();
-    const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-    const fyEnd = fyStart + 1;
-    const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-
-    const latest = await prisma.asset.findFirst({
-      where: {
-        assetId: { startsWith: `AST-${fyStr}` },
-        parentAssetId: null
-      },
-      orderBy: { id: "desc" }
-    });
-
-    console.log(latest)
-
-    let next = 1;
-    if (latest) {
-      next = parseInt(latest.assetId.split("-")[3], 10) + 1;
+    // ── 7-year lifetime guard ────────────────────────────────────────────────
+    if (data.expectedLifetime && data.expectedLifetimeUnit) {
+      let lifetimeYears = Number(data.expectedLifetime);
+      if (data.expectedLifetimeUnit === "MONTHS") lifetimeYears = lifetimeYears / 12;
+      if (lifetimeYears > 7) {
+        res.status(400).json({ message: "Asset expected lifetime cannot exceed 7 years as per hospital policy." });
+        return;
+      }
     }
 
-    const assetId = `AST-${fyStr}-${next.toString().padStart(3, "0")}`;
+    // ── Temp Asset ID — real ID issued when HOD acknowledges the assignment ──
+    const newAssetId = `TEMP-${Date.now()}`;
 
-    const data = req.body;
+    // Auto-assign supervisor for department
+    let supervisorId: number | null = null;
+    if (data.departmentId) {
+      const supervisor = await prisma.employee.findFirst({
+        where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
+      });
+      supervisorId = supervisor?.id ?? null;
+    }
+
+    // For DONATION / LEASE / RENTAL, inspection checklist must be completed first
+    const requiresInspection = ["DONATION", "LEASE", "RENTAL"].includes(data.modeOfProcurement || "PURCHASE");
+    if (requiresInspection) {
+      if (!data.physicalInspectionStatus) {
+        res.status(400).json({ message: "Physical inspection status is required for Donation, Lease, and Rental assets." });
+        return;
+      }
+      if (!data.functionalInspectionStatus) {
+        res.status(400).json({ message: "Functional inspection status is required for Donation, Lease, and Rental assets." });
+        return;
+      }
+    }
 
     const asset = await prisma.asset.create({
       data: {
-        assetId,
+        assetId: newAssetId,
         assetName: data.assetName,
         assetType: data.assetType,
         assetCategoryId: data.assetCategoryId,
-
-        // rfidCode: data.rfidCode ?? null,
-        rfidCode: data.rfidCode && String(data.rfidCode).trim() !== ""
-          ? String(data.rfidCode).trim()
-          : null,
+        rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
         referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
         serialNumber: data.serialNumber,
         assetPhoto: data.assetPhoto ?? null,
-
-        modeOfProcurement: data.modeOfProcurement,
+        modeOfProcurement: data.modeOfProcurement ?? "PURCHASE",
+        serviceCoverageType: data.serviceCoverageType ?? null,
 
         // PURCHASE
         invoiceNumber: data.invoiceNumber,
@@ -216,18 +247,32 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         rentalAmount: data.rentalAmount,
         rentalAgreementDoc: data.rentalAgreementDoc,
 
+        // Inspection (for Donation / Lease / Rental)
+        inspectionDoneBy: data.inspectionDoneBy ?? null,
+        inspectionCondition: data.inspectionCondition ?? null,
+        inspectionRemark: data.inspectionRemark ?? null,
+        physicalInspectionStatus: data.physicalInspectionStatus ?? null,
+        physicalInspectionDate: data.physicalInspectionDate ? new Date(data.physicalInspectionDate) : null,
+        functionalInspectionStatus: data.functionalInspectionStatus ?? null,
+        functionalInspectionDate: data.functionalInspectionDate ? new Date(data.functionalInspectionDate) : null,
+        functionalTestNotes: data.functionalTestNotes ?? null,
+
         // GRN
         grnNumber: data.grnNumber,
         grnDate: data.grnDate ? new Date(data.grnDate) : null,
         grnValue: data.grnValue,
         inspectionStatus: data.inspectionStatus,
-        inspectionRemarks: data.inspectionRemarks,
 
         departmentId: data.departmentId ? Number(data.departmentId) : null,
+        supervisorId: supervisorId,
+        expectedLifetime: data.expectedLifetime ? Number(data.expectedLifetime) : null,
+        expectedLifetimeUnit: data.expectedLifetimeUnit ?? null,
 
-        status: "PENDING_COMPLETION"
-      }
+        status: "IN_STORE",
+      } as any
     });
+
+    logAction({ entityType: "ASSET", entityId: asset.id, action: "CREATE", description: `Asset ${asset.assetId} created`, newValue: JSON.stringify(asset), performedById: (req as any).user?.employeeDbId });
 
     res.status(201).json(asset);
     return;
@@ -235,6 +280,78 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Error creating asset" });
+  }
+};
+
+// ── HOD Approve / Reject Asset (issues the real Asset ID on approval) ─────────
+export const hodApproveAsset = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { action, remarks } = req.body; // action: APPROVED | REJECTED
+    const user = req.user as any;
+
+    const asset = await prisma.asset.findUnique({ where: { id } });
+    if (!asset) { res.status(404).json({ message: "Asset not found" }); return; }
+    if ((asset as any).hodApprovalStatus !== "PENDING") {
+      res.status(400).json({ message: "Asset is not pending HOD approval" }); return;
+    }
+
+    if (action === "APPROVED") {
+      // Now generate the real Asset ID
+      const now = new Date();
+      const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+      const fyEnd = fyStart + 1;
+      const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
+
+      const latest = await prisma.asset.findFirst({
+        where: { assetId: { startsWith: `AST-${process.env.HOSPITAL_CODE}-${fyStr}` }, parentAssetId: null },
+        orderBy: { id: "desc" }
+      });
+      let next = 1;
+      if (latest && !latest.assetId.startsWith("TEMP-")) {
+        next = parseInt(latest.assetId.split("-")[3], 10) + 1;
+      }
+      const newAssetId = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-${next.toString().padStart(5, "0")}`;
+
+      // Auto-assign supervisor for location
+      let supervisorId = (asset as any).supervisorId;
+      if (!supervisorId && asset.departmentId) {
+        const supervisor = await prisma.employee.findFirst({
+          where: { departmentId: asset.departmentId, role: "SUPERVISOR" }
+        });
+        supervisorId = supervisor?.id ?? null;
+      }
+
+      const updated = await prisma.asset.update({
+        where: { id },
+        data: {
+          assetId: newAssetId,
+          hodApprovalStatus: "APPROVED",
+          hodApprovalById: user?.employeeDbId ?? null,
+          hodApprovalAt: new Date(),
+          hodApprovalRemarks: remarks ?? null,
+          supervisorId,
+          status: "IN_STORE",
+        } as any
+      });
+
+      res.json({ message: "Asset approved and Asset ID issued", asset: updated });
+    } else {
+      const updated = await prisma.asset.update({
+        where: { id },
+        data: {
+          hodApprovalStatus: "REJECTED",
+          hodApprovalById: user?.employeeDbId ?? null,
+          hodApprovalAt: new Date(),
+          hodApprovalRemarks: remarks ?? null,
+          status: "REJECTED",
+        } as any
+      });
+      res.json({ message: "Asset rejected", asset: updated });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to process HOD approval" });
   }
 };
 // export const completeAssetDetails = async (req: AuthenticatedRequest, res: Response) => {
@@ -503,6 +620,8 @@ export const updateAsset = async (req: Request, res: Response) => {
       },
     });
 
+    logAction({ entityType: "ASSET", entityId: id, action: "UPDATE", description: `Asset updated`, performedById: (req as any).user?.employeeDbId });
+
     res.json(updated);
 
   } catch (err: any) {
@@ -517,6 +636,7 @@ export const deleteAsset = async (req: Request, res: Response) => {
   await prisma.asset.delete(
     { where: { id } }
   );
+  logAction({ entityType: "ASSET", entityId: id, action: "DELETE", description: `Asset deleted`, performedById: (req as any).user?.employeeDbId });
   res.status(204).send();
 };
 
