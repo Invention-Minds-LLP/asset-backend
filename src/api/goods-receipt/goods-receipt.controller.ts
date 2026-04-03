@@ -3,6 +3,7 @@ import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { generateAssetId } from "../../utilis/assetIdGenerator";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -327,18 +328,7 @@ export const acceptGRA = async (req: AuthenticatedRequest, res: Response) => {
 
           for (let i = 0; i < acceptedQty; i++) {
             // Generate assetId
-            const now = new Date();
-            const month = now.getMonth() + 1;
-            const fy = month >= 4
-              ? `FY${now.getFullYear().toString().slice(2)}-${(now.getFullYear() + 1).toString().slice(2)}`
-              : `FY${(now.getFullYear() - 1).toString().slice(2)}-${now.getFullYear().toString().slice(2)}`;
-
-            const lastAsset = await tx.asset.findFirst({
-              where: { assetId: { startsWith: `AST-${process.env.HOSPITAL_CODE}-${fy}` } },
-              orderBy: { assetId: "desc" },
-            });
-            const seq = lastAsset ? parseInt(lastAsset.assetId.split("-").pop() || "0") + 1 : 1;
-            const assetId = `AST-${process.env.HOSPITAL_CODE}-${fy}-${seq.toString().padStart(5, "0")}`;
+            const assetId = await generateAssetId(tx);
 
             // Generate unique serial number if not provided
             const serialNumber = line.serialNumber && acceptedQty === 1

@@ -6,6 +6,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
+import { generateAssetId } from "../../utilis/assetIdGenerator";
 
 
 const FTP_CONFIG = {
@@ -298,20 +299,7 @@ export const hodApproveAsset = async (req: AuthenticatedRequest, res: Response) 
 
     if (action === "APPROVED") {
       // Now generate the real Asset ID
-      const now = new Date();
-      const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-      const fyEnd = fyStart + 1;
-      const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-
-      const latest = await prisma.asset.findFirst({
-        where: { assetId: { startsWith: `AST-${process.env.HOSPITAL_CODE}-${fyStr}` }, parentAssetId: null },
-        orderBy: { id: "desc" }
-      });
-      let next = 1;
-      if (latest && !latest.assetId.startsWith("TEMP-")) {
-        next = parseInt(latest.assetId.split("-")[3], 10) + 1;
-      }
-      const newAssetId = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-${next.toString().padStart(5, "0")}`;
+      const newAssetId = await generateAssetId();
 
       // Auto-assign supervisor for location
       let supervisorId = (asset as any).supervisorId;

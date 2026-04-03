@@ -7,6 +7,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { AssignmentAction, AssignmentStage, AssignmentStatus, AcknowledgementPurpose } from "@prisma/client";
+import { generateAssetId } from "../../utilis/assetIdGenerator";
 
 
 const FTP_CONFIG = {
@@ -436,20 +437,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       });
 
       if (acknowledger?.role === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
-        const now = new Date();
-        const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-        const fyEnd = fyStart + 1;
-        const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-
-        const latestAsset = await prisma.asset.findFirst({
-          where: { assetId: { startsWith: `AST-${process.env.HOSPITAL_CODE}-${fyStr}` }, parentAssetId: null },
-          orderBy: { id: "desc" },
-        });
-        let nextSeq = 1;
-        if (latestAsset) {
-          nextSeq = parseInt(latestAsset.assetId.split("-")[3], 10) + 1;
-        }
-        issuedAssetId = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-${nextSeq.toString().padStart(5, "0")}`;
+        issuedAssetId = await generateAssetId();
 
         await prisma.asset.update({
           where: { id: assignment.assetId },

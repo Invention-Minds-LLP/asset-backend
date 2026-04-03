@@ -4,6 +4,7 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { Prisma } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { generateAssetId } from "../../utilis/assetIdGenerator";
 
 // ─── helpers ───────────────────────────────────────────────
 function getFY(): string {
@@ -509,7 +510,7 @@ export const issueWCC = async (req: AuthenticatedRequest, res: Response) => {
 
       // CAPEX capitalization
       if (wo.woType === "CAPEX" && wo.capitalizeAsAsset === true && wo.assetCategoryId) {
-        const assetId = `CAPEX-${wo.woNumber}`;
+        const assetId = await generateAssetId(tx);
         const newAsset = await tx.asset.create({
           data: {
             assetId,

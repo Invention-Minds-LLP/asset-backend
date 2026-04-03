@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
+import { generateSubAssetId as generateSubAssetIdShared } from "../../utilis/assetIdGenerator";
 
 /**
  * GET /assets/:assetId/children
@@ -1121,31 +1122,5 @@ export const getSparePartOptions = async (req: Request, res: Response) => {
 };
 
 async function generateSubAssetId(parentAsset: { id: number; assetId: string }): Promise<string> {
-  const existingSubAssets = await prisma.asset.findMany({
-    where: {
-      parentAssetId: parentAsset.id
-    },
-    select: {
-      assetId: true
-    }
-  });
-
-  let maxSeq = 0;
-  const prefix = `${parentAsset.assetId}-`;
-
-  for (const item of existingSubAssets) {
-    // only consider IDs that actually belong to this parent's generated sub-asset series
-    if (!item.assetId.startsWith(prefix)) continue;
-
-    const suffix = item.assetId.slice(prefix.length);
-
-    // only accept exact 3-digit suffix like 001, 002
-    if (/^\d{3}$/.test(suffix)) {
-      const num = Number(suffix);
-      if (num > maxSeq) maxSeq = num;
-    }
-  }
-
-  const next = String(maxSeq + 1).padStart(3, "0");
-  return `${parentAsset.assetId}-${next}`;
+  return generateSubAssetIdShared(parentAsset.assetId, parentAsset.id);
 }

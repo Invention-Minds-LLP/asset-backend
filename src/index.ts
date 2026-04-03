@@ -69,7 +69,7 @@ const port = 3001;
 app.use(express.json());
 
 app.use(cors({
-  origin: ["http://localhost:4200", "https://sademo.inventionminds.com"], // Allow your Angular app
+  origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in"], // Allow your Angular app
   credentials: true               // Optional: if you plan to send cookies
 }));
 

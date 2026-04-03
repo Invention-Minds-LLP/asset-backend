@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import XLSX from 'xlsx';
 import prisma from '../../prismaClient';
+import { generateAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
 
 function parseDate(value: any): Date | null {
     if (value === null || value === undefined || value === '') return null;
@@ -48,134 +49,15 @@ function getFinancialYearParts(date = new Date()) {
 }
 
 async function createAssetWithGeneratedId(assetData: any) {
-    const now = new Date();
-
-    const fyStart = now.getMonth() >= 3
-        ? now.getFullYear()
-        : now.getFullYear() - 1;
-
-    const fyEnd = fyStart + 1;
-    const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-    const prefix = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-`;
-
-    const existing = await prisma.asset.findMany({
-        where: {
-            assetId: {
-                startsWith: prefix
-            }
-        },
-        select: {
-            assetId: true
+    const assetId = await generateAssetId();
+    return await prisma.asset.create({
+        data: {
+            assetId,
+            ...assetData
         }
     });
-
-    let maxSeq = 0;
-
-    for (const row of existing) {
-        const parts = row.assetId.split("-");
-
-        if (parts.length !== 4) continue;
-
-        const seq = Number(parts[3]);
-
-        if (Number.isInteger(seq) && seq > maxSeq) {
-            maxSeq = seq;
-        }
-    }
-
-    for (let seq = maxSeq + 1; seq <= maxSeq + 100; seq++) {
-        const candidate = `${prefix}${String(seq).padStart(5, "0")}`;
-
-        const exists = await prisma.asset.findUnique({
-            where: { assetId: candidate },
-            select: { id: true }
-        });
-
-        if (exists) continue;
-
-        try {
-            return await prisma.asset.create({
-                data: {
-                    assetId: candidate,
-                    ...assetData
-                }
-            });
-        } catch (err: any) {
-            if (err.code === 'P2002') continue;
-            throw err;
-        }
-    }
-
-    throw new Error('Unable to generate unique assetId after scanning available sequence range');
 }
 
-async function generateAssetId(): Promise<string> {
-    const now = new Date();
-
-    const fyStart = now.getMonth() >= 3
-        ? now.getFullYear()
-        : now.getFullYear() - 1;
-
-    const fyEnd = fyStart + 1;
-    const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-    const prefix = `AST-${process.env.HOSPITAL_CODE}-${fyStr}-`;
-
-    const existing = await prisma.asset.findMany({
-        where: {
-            assetId: {
-                startsWith: prefix
-            }
-        },
-        select: {
-            assetId: true
-        }
-    });
-
-    let maxSeq = 0;
-
-    for (const row of existing) {
-        const parts = row.assetId.split("-");
-
-        // Expect: AST-FY2025-26-007  => 4 parts
-        if (parts.length !== 4) continue;
-
-        const lastPart = parts[3];
-        const seq = Number(lastPart);
-
-        if (Number.isInteger(seq) && seq > maxSeq) {
-            maxSeq = seq;
-        }
-    }
-
-    return `${prefix}${String(maxSeq + 1).padStart(5, "0")}`;
-}
-async function generateSubAssetId(parentAsset: any): Promise<string> {
-
-    const existingSubAssets = await prisma.asset.findMany({
-        where: {
-            parentAssetId: parentAsset.id
-        },
-        select: {
-            assetId: true
-        }
-    });
-
-    let maxSeq = 0;
-
-    for (const item of existingSubAssets) {
-
-        const suffix = item.assetId.split("-").pop();
-
-        if (suffix && /^\d{3}$/.test(suffix)) {
-            const num = Number(suffix);
-            if (num > maxSeq) maxSeq = num;
-        }
-    }
-
-    const next = String(maxSeq + 1).padStart(3, "0");
-
-    return `${parentAsset.assetId}-${next}`;
-}
 
 async function getOrCreateVendor(row: any): Promise<number | null> {
     if (!row.vendorName) return null;
@@ -1169,7 +1051,7 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     });
                     summary.subAssetsUpdated++;
                 } else {
-                    const generatedSubAssetId = await generateSubAssetId(parent);
+                    const generatedSubAssetId = await generateSubAssetId(parent.assetId, parent.id);
 
                     await prisma.asset.create({
                         data: {
