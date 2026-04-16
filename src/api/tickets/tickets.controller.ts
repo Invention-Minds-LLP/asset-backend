@@ -331,7 +331,7 @@ export const getAllTickets = async (req: any, res: Response) => {
       });
       if (!me?.departmentId) { res.json(exportCsv ? [] : []); return; }
       where.departmentId = me.departmentId;
-    } else if (role !== "ADMIN") {
+    } else if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(role)) {
       where.OR = [{ assignedToId: employeeDbId }, { raisedById: employeeDbId }];
     }
 
@@ -966,6 +966,11 @@ export const reassignTicket = async (req: any, res: Response) => {
       return upd;
     });
 
+    // Notify old assignee about reassignment
+    if (ticket.assignedToId && ticket.assignedToId !== toEmployeeId) {
+      notify({ type: "TICKET_UPDATE", title: "Ticket Reassigned", message: `Ticket ${ticket.ticketId} has been reassigned to another technician`, recipientIds: [ticket.assignedToId], ticketId: ticket.id, createdById: user.employeeDbId });
+    }
+
     res.json(updated);
   } catch (e: any) {
     res.status(400).json({ message: e.message || "Failed to reassign" });
@@ -982,7 +987,7 @@ export const terminateTicket = async (req: any, res: Response) => {
       return;
     }
 
-    await requireAssetDeptHod(user, ticketId);
+    const ticket = await requireAssetDeptHod(user, ticketId);
 
     const upd = await prisma.$transaction(async (tx) => {
       const u = await tx.ticket.update({
@@ -1005,6 +1010,12 @@ export const terminateTicket = async (req: any, res: Response) => {
 
       return u;
     });
+
+    // Notify raiser + assignee about termination
+    const notifyIds = [ticket.raisedById, ticket.assignedToId].filter((id): id is number => !!id && id !== user.employeeDbId);
+    if (notifyIds.length > 0) {
+      notify({ type: "TICKET_UPDATE", title: "Ticket Terminated", message: `Ticket ${ticket.ticketId} has been terminated. Reason: ${note}`, recipientIds: notifyIds, ticketId: ticket.id, createdById: user.employeeDbId });
+    }
 
     res.json(upd);
   } catch (e: any) {

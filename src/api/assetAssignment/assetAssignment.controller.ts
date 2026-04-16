@@ -128,9 +128,10 @@ export const initiateDepartmentAcknowledgement = async (req: AuthenticatedReques
         }
 
         // set initial (source) department
-        await prisma.asset.update({
+        const updatedAsset = await prisma.asset.update({
             where: { id: assetId },
             data: { departmentId: Number(departmentId) },
+            select: { assetId: true, assetName: true },
         });
 
         const hodId = await getDepartmentHodEmployeeId(Number(departmentId));
@@ -149,7 +150,7 @@ export const initiateDepartmentAcknowledgement = async (req: AuthenticatedReques
         await createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset requires acknowledgement (Source HOD)",
-            message: `Asset #${assetId} has been assigned to your department. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been assigned to your department. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user?.employeeDbId ?? null,
             recipientEmployeeIds: [hodId],
@@ -437,7 +438,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       });
 
       if (acknowledger?.role === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
-        issuedAssetId = await generateAssetId();
+        issuedAssetId = await generateAssetId((currentAsset as any).modeOfProcurement || "PURCHASE");
 
         await prisma.asset.update({
           where: { id: assignment.assetId },
@@ -554,9 +555,10 @@ export const hodAssignSupervisor = async (req: AuthenticatedRequest, res: Respon
             return;
         }
 
-        await prisma.asset.update({
+        const updatedAsset = await prisma.asset.update({
             where: { id: assetId },
             data: { supervisorId: Number(supervisorId) },
+            select: { assetId: true, assetName: true },
         });
 
         await deactivateOtherActiveAssignments(assetId);
@@ -573,7 +575,7 @@ export const hodAssignSupervisor = async (req: AuthenticatedRequest, res: Respon
         await createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset assigned to you (Supervisor acknowledgement)",
-            message: `Asset #${assetId} has been assigned to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been assigned to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(supervisorId)],
@@ -631,11 +633,12 @@ export const supervisorAssignTargetDepartment = async (req: AuthenticatedRequest
 
         // Move asset ownership to target department (this is the “handover”)
         // Also clear supervisorId/allottedToId because new dept will decide
-        await prisma.asset.update({
+        const updatedAsset = await prisma.asset.update({
             where: { id: assetId },
             data: {
                 targetDepartmentId: targetDepartmentId
             },
+            select: { assetId: true, assetName: true },
         });
 
         await deactivateOtherActiveAssignments(assetId);
@@ -652,7 +655,7 @@ export const supervisorAssignTargetDepartment = async (req: AuthenticatedRequest
         await createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset requires acknowledgement (Target HOD)",
-            message: `Asset #${assetId} is being transferred to your department. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} is being transferred to your department. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [targetHodId],
@@ -719,9 +722,10 @@ export const targetHodAssignEndUser = async (req: AuthenticatedRequest, res: Res
             return;
         }
 
-        await prisma.asset.update({
+        const updatedAsset = await prisma.asset.update({
             where: { id: assetId },
             data: { allottedToId: Number(allottedToId) },
+            select: { assetId: true, assetName: true },
         });
 
         await deactivateOtherActiveAssignments(assetId);
@@ -738,7 +742,7 @@ export const targetHodAssignEndUser = async (req: AuthenticatedRequest, res: Res
         await createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset allocated to you (End User acknowledgement)",
-            message: `Asset #${assetId} has been allocated to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been allocated to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(allottedToId)],
@@ -799,9 +803,10 @@ export const supervisorAssignEndUser = async (req: AuthenticatedRequest, res: Re
             return;
         }
 
-        await prisma.asset.update({
+        const updatedAsset = await prisma.asset.update({
             where: { id: assetId },
             data: { allottedToId: Number(allottedToId) },
+            select: { assetId: true, assetName: true },
         });
 
         await deactivateOtherActiveAssignments(assetId);
@@ -818,7 +823,7 @@ export const supervisorAssignEndUser = async (req: AuthenticatedRequest, res: Re
         await createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset allocated to you (End User acknowledgement)",
-            message: `Asset #${assetId} has been allocated to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been allocated to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(allottedToId)],

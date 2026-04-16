@@ -34,6 +34,7 @@ import financialDashboardRoutes from "./api/financial-dashboard/financial-dashbo
 import auditTrailRoutes from "./api/audit-trail/audit-trail.routes";
 import reportRoutes from "./api/reports/reports.routes";
 import disposalRoutes from "./api/disposal/disposal.routes";
+import eWasteRoutes from "./api/e-waste/e-waste.routes";
 import assetAuditRoutes from "./api/asset-audit/asset-audit.routes";
 import preventiveMaintenanceRoutes from "./api/preventive-maintenance/preventive-maintenance.routes";
 import pmChecklistRoutes from "./api/pm-checklist/pm-checklist.routes";
@@ -44,6 +45,7 @@ import globalSearchRoutes from "./api/global-search/global-search.routes";
 import quickActionRoutes from "./api/quick-actions/quick-actions.routes";
 import cronJobRoutes from "./api/cron-jobs/cron-jobs.routes";
 import assetIndentRoutes from "./api/asset-indent/asset-indent.routes";
+import assetPoolRoutes from "./api/asset-pool/asset-pool.routes";
 import employeeExitRoutes from "./api/employee-exit/employee-exit.routes";
 import decisionEngineRoutes from "./api/decision-engine/decision-engine.routes";
 import tenantConfigRoutes from "./api/tenant-config/tenant-config.routes";
@@ -59,8 +61,17 @@ import revenueLogRoutes from "./api/revenue-log/revenue-log.routes";
 import hierarchyConfigRoutes from "./api/hierarchy-config/hierarchy-config.routes";
 import materialRequestRoutes from "./api/material-request/material-request.routes";
 import approvalConfigRoutes from "./api/approval-config/approval-config.routes";
+import mobileAuthRoutes from "./api/mobile-auth/mobile-auth.routes";
+import chartOfAccountsRoutes from "./api/accounts/chart-of-accounts/chart-of-accounts.routes";
+import purchaseVouchersRoutes from "./api/accounts/purchase-vouchers/purchase-vouchers.routes";
+import paymentVouchersRoutes from "./api/accounts/payment-vouchers/payment-vouchers.routes";
+import journalEntriesRoutes from "./api/accounts/journal-entries/journal-entries.routes";
+import accountsSummaryRoutes from "./api/accounts/accounts-summary/accounts-summary.routes";
+import financeRoutes from "./api/finance/finance.routes";
+import serviceInvoiceRoutes from "./api/service-invoices/service-invoices.routes";
 
 import cors from "cors";
+import path from "path";
 
 const app = express();
 const port = 3001;
@@ -68,8 +79,11 @@ const port = 3001;
 // Middleware to parse JSON bodies
 app.use(express.json());
 
+// Serve uploaded files
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
 app.use(cors({
-  origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in"], // Allow your Angular app
+  origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100'], // Allow your Angular app
   credentials: true               // Optional: if you plan to send cookies
 }));
 
@@ -110,6 +124,7 @@ app.use("/api/financial-dashboard", financialDashboardRoutes);
 app.use("/api/audit-trail", auditTrailRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/disposal", disposalRoutes);
+app.use("/api/e-waste", eWasteRoutes);
 app.use("/api/asset-audit", assetAuditRoutes);
 app.use("/api/preventive-maintenance", preventiveMaintenanceRoutes);
 app.use("/api/pm-checklist", pmChecklistRoutes);
@@ -135,6 +150,21 @@ app.use("/api/revenue-log", revenueLogRoutes);
 app.use("/api/hierarchy-config", hierarchyConfigRoutes);
 app.use("/api/material-request", materialRequestRoutes);
 app.use("/api/approval-config", approvalConfigRoutes);
+app.use("/api/mobile", mobileAuthRoutes);
+app.use("/api/asset-pool", assetPoolRoutes);
+
+// ── Accounts Module ─────────────────────────────────────────────────────────
+app.use("/api/accounts/chart-of-accounts", chartOfAccountsRoutes);
+app.use("/api/accounts/purchase-vouchers", purchaseVouchersRoutes);
+app.use("/api/accounts/payment-vouchers", paymentVouchersRoutes);
+app.use("/api/accounts/journal-entries", journalEntriesRoutes);
+app.use("/api/accounts/summary", accountsSummaryRoutes);
+
+// ── Finance Engine ───────────────────────────────────────────────────────────
+app.use("/api/finance", financeRoutes);
+
+// ── Service Invoices ─────────────────────────────────────────────────────────
+app.use("/api/service-invoices", serviceInvoiceRoutes);
 
 // Default route
 app.get("/", (req, res) => {

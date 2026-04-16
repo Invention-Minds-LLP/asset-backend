@@ -2,6 +2,22 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
+export const getAllRca = async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rcas = await prisma.rootCauseAnalysis.findMany({
+      include: {
+        fiveWhys: { orderBy: { whyNumber: "asc" } },
+        sixMItems: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ data: rcas });
+  } catch (error) {
+    console.error("getAllRca error:", error);
+    res.status(500).json({ message: "Failed to fetch RCAs" });
+  }
+};
+
 interface FiveWhyInput {
   whyNumber: number;
   question: string;

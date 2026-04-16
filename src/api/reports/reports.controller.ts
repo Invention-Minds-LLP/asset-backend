@@ -2,6 +2,7 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import XLSX from "xlsx";
+import ExcelJS from "exceljs";
 
 // ─── Role-based Filter Helper ───────────────────────────────────────────────
 
@@ -80,9 +81,10 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
     }
 
     if (query.dateFrom || query.dateTo) {
-      where.purchaseDate = {};
-      if (query.dateFrom) where.purchaseDate.gte = new Date(query.dateFrom as string);
-      if (query.dateTo) where.purchaseDate.lte = new Date(query.dateTo as string);
+      const dateField = String(query.dateField || 'purchaseDate') as 'purchaseDate' | 'installedAt';
+      where[dateField] = {};
+      if (query.dateFrom) where[dateField].gte = new Date(query.dateFrom as string);
+      if (query.dateTo)   where[dateField].lte = new Date(query.dateTo as string);
     }
 
     const [total, assets] = await Promise.all([
@@ -538,6 +540,13 @@ export const getDepreciationReport = async (req: AuthenticatedRequest, res: Resp
     const assetWhere: any = { ...buildRoleFilter(user) };
     if (query.departmentId) assetWhere.departmentId = Number(query.departmentId);
     if (query.categoryId) assetWhere.assetCategoryId = Number(query.categoryId);
+    if (query.status) assetWhere.status = query.status;
+    if (query.dateFrom || query.dateTo) {
+      const dateField = String(query.dateField || 'purchaseDate') as 'purchaseDate' | 'installedAt';
+      assetWhere[dateField] = {};
+      if (query.dateFrom) assetWhere[dateField].gte = new Date(query.dateFrom as string);
+      if (query.dateTo)   assetWhere[dateField].lte = new Date(query.dateTo as string);
+    }
 
     const assets = await prisma.asset.findMany({
       where: assetWhere,
@@ -620,6 +629,489 @@ export const getDepreciationReport = async (req: AuthenticatedRequest, res: Resp
   }
 };
 
+// ─── 7. Fixed Assets Schedule ───────────────────────────────────────────────
+
+async function sendFixedAssetsScheduleExcel(
+  res: Response,
+  rows: any[],
+  grandTotal: any,
+  fiscalYear: number
+) {
+  const fyEndYear = fiscalYear + 1;
+  const fyStartLabel = `01.04.${fiscalYear}`;
+  const fyEndLabel = `31.03.${fyEndYear}`;
+  const prevFyEnd = `31.03.${fiscalYear}`;
+  const fyLabel = `${fiscalYear}-${String(fyEndYear).slice(2)}`;
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("Fixed Assets Schedule");
+
+  // Column widths
+  ws.columns = [
+    { width: 34 }, { width: 16 }, { width: 18 }, { width: 18 }, { width: 16 },
+    { width: 9 },  { width: 16 }, { width: 16 }, { width: 16 },
+    { width: 16 }, { width: 16 },
+  ];
+
+  // ── Row 1: Title ──────────────────────────────────────────
+  const titleRow = ws.addRow(["SCHEDULE OF FIXED ASSETS"]);
+  ws.mergeCells(1, 1, 1, 11);
+  titleRow.height = 24;
+  const titleCell = titleRow.getCell(1);
+  titleCell.font = { bold: true, size: 14 };
+  titleCell.alignment = { horizontal: "center", vertical: "middle" };
+  titleCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A237E" } };
+  titleCell.font = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
+
+  // ── Row 2: FY label ───────────────────────────────────────
+  const fyRow = ws.addRow([`FOR THE YEAR ENDED ${fyEndLabel}`]);
+  ws.mergeCells(2, 1, 2, 11);
+  fyRow.height = 18;
+  const fyCell = fyRow.getCell(1);
+  fyCell.font = { bold: true, size: 11, color: { argb: "FF1A237E" } };
+  fyCell.alignment = { horizontal: "center", vertical: "middle" };
+  fyCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8EAF6" } };
+
+  // ── Row 3: blank ──────────────────────────────────────────
+  ws.addRow([]);
+
+  // ── Row 4: Group headers ──────────────────────────────────
+  const GROSS_BG  = "FF1565C0"; // deep blue
+  const DEP_BG    = "FFE65100"; // deep orange
+  const NET_BG    = "FF1B5E20"; // deep green
+  const WHITE     = "FFFFFFFF";
+
+  const grpRow = ws.addRow(["PARTICULARS", "GROSS BLOCK", "", "", "", "DEPRECIATION", "", "", "", "NET BLOCK", ""]);
+  grpRow.height = 20;
+
+  ws.mergeCells(4, 1, 5, 1);  // PARTICULARS spans 2 rows
+  ws.mergeCells(4, 2, 4, 5);  // GROSS BLOCK
+  ws.mergeCells(4, 6, 4, 9);  // DEPRECIATION
+  ws.mergeCells(4, 10, 4, 11); // NET BLOCK
+
+  const styleGroupCell = (cell: ExcelJS.Cell, bg: string) => {
+    cell.font = { bold: true, color: { argb: WHITE }, size: 11 };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+    cell.border = { bottom: { style: "medium", color: { argb: "FF000000" } } };
+  };
+
+  styleGroupCell(grpRow.getCell(1), "FF37474F");  // Particulars: dark grey
+  styleGroupCell(grpRow.getCell(2), GROSS_BG);
+  styleGroupCell(grpRow.getCell(6), DEP_BG);
+  styleGroupCell(grpRow.getCell(10), NET_BG);
+
+  // ── Row 5: Sub-headers ────────────────────────────────────
+  const GROSS_LIGHT = "FFBBDEFB";
+  const DEP_LIGHT   = "FFFFE0B2";
+  const NET_LIGHT   = "FFC8E6C9";
+  const PART_LIGHT  = "FFECEFF1";
+
+  const subRow = ws.addRow([
+    "",
+    `AS ON\n${fyStartLabel}`, `ADDITIONS\nDURING YEAR`, `DELETIONS\nDURING YEAR`, `UPTO\n${fyEndLabel}`,
+    "RATE %",
+    `UPTO\n${prevFyEnd}`, `FOR THE\nPERIOD`, `UPTO\n${fyEndLabel}`,
+    `AS ON\n${fyEndLabel}`, `AS ON\n${prevFyEnd}`,
+  ]);
+  subRow.height = 36;
+
+  const styleSubCell = (cell: ExcelJS.Cell, bg: string, fgColor = "FF0D0D0D") => {
+    cell.font = { bold: true, size: 9, color: { argb: fgColor } };
+    cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+    cell.border = { bottom: { style: "medium" } };
+  };
+
+  styleSubCell(subRow.getCell(1), PART_LIGHT);
+  for (let c = 2; c <= 5; c++) styleSubCell(subRow.getCell(c), GROSS_LIGHT, "FF0D47A1");
+  styleSubCell(subRow.getCell(6), DEP_LIGHT, "FFBF360C");
+  for (let c = 7; c <= 9; c++) styleSubCell(subRow.getCell(c), DEP_LIGHT, "FFBF360C");
+  for (let c = 10; c <= 11; c++) styleSubCell(subRow.getCell(c), NET_LIGHT, "FF1B5E20");
+
+  // ── Data rows ─────────────────────────────────────────────
+  const numFmt = '#,##0.00';
+  const styleDataCell = (cell: ExcelJS.Cell, bg: string, bold = false) => {
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+    cell.alignment = { horizontal: "right", vertical: "middle" };
+    cell.font = { bold, size: 10 };
+    cell.border = { bottom: { style: "thin", color: { argb: "FFE0E0E0" } } };
+    cell.numFmt = numFmt;
+  };
+
+  const GROSS_ROW  = "FFE3F2FD";
+  const DEP_ROW    = "FFFFF3E0";
+  const NET_ROW    = "FFE8F5E9";
+  const PART_ROW   = "FFF5F5F5";
+
+  for (const row of rows) {
+    const r = ws.addRow([
+      row.category,
+      row.openingGross, row.additions, row.deletions, row.closingGross,
+      row.rate > 0 ? row.rate : "",
+      row.openingDep, row.periodDep, row.closingDep,
+      row.netCurrent, row.netPrevious,
+    ]);
+    r.height = 16;
+
+    const partCell = r.getCell(1);
+    partCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: PART_ROW } };
+    partCell.font = { size: 10 };
+    partCell.border = { right: { style: "medium" }, bottom: { style: "thin", color: { argb: "FFE0E0E0" } } };
+
+    styleDataCell(r.getCell(2), GROSS_ROW);
+    styleDataCell(r.getCell(3), GROSS_ROW);
+    styleDataCell(r.getCell(4), GROSS_ROW);
+    styleDataCell(r.getCell(5), GROSS_ROW, true);  // closing gross: bold
+
+    const rateCell = r.getCell(6);
+    rateCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: DEP_ROW } };
+    rateCell.alignment = { horizontal: "center" };
+    rateCell.font = { size: 10 };
+    if (row.rate > 0) { rateCell.value = `${row.rate}%`; }
+
+    styleDataCell(r.getCell(7), DEP_ROW);
+    styleDataCell(r.getCell(8), DEP_ROW);
+    r.getCell(8).font = { size: 10, color: { argb: "FFBF360C" }, bold: true };
+    styleDataCell(r.getCell(9), DEP_ROW, true);  // closing dep: bold
+
+    styleDataCell(r.getCell(10), NET_ROW, true); // net current: bold
+    r.getCell(10).font = { size: 10, color: { argb: "FF1B5E20" }, bold: true };
+    styleDataCell(r.getCell(11), NET_ROW);
+  }
+
+  // ── Grand total row ───────────────────────────────────────
+  const totRow = ws.addRow([
+    "TOTAL",
+    grandTotal.openingGross, grandTotal.additions, grandTotal.deletions, grandTotal.closingGross,
+    "",
+    grandTotal.openingDep, grandTotal.periodDep, grandTotal.closingDep,
+    grandTotal.netCurrent, grandTotal.netPrevious,
+  ]);
+  totRow.height = 18;
+
+  const styleTotalCell = (cell: ExcelJS.Cell) => {
+    cell.font = { bold: true, size: 10 };
+    cell.alignment = { horizontal: "right", vertical: "middle" };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE0E0E0" } };
+    cell.border = { top: { style: "medium" }, bottom: { style: "double" } };
+    cell.numFmt = numFmt;
+  };
+
+  totRow.getCell(1).font = { bold: true, size: 10 };
+  totRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE0E0E0" } };
+  totRow.getCell(1).border = { top: { style: "medium" }, bottom: { style: "double" } };
+  for (let c = 2; c <= 11; c++) styleTotalCell(totRow.getCell(c));
+  totRow.getCell(6).value = ""; // no rate in total
+
+  const buf = await wb.xlsx.writeBuffer();
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename=fixed-assets-schedule-${fyLabel}.xlsx`);
+  res.send(buf);
+}
+
+// ─── Indian IT Act 180-day convention helpers ─────────────────────────────────
+// Assets purchased Oct–Mar (second half of Indian FY Apr–Mar) get 50% rate in year 1.
+function _faIsSecondHalfFY(date: Date): boolean {
+  const m = date.getMonth(); // 0=Jan … 11=Dec
+  return m >= 9 || m <= 2;  // Oct(9), Nov(10), Dec(11), Jan(0), Feb(1), Mar(2)
+}
+
+// Replay annual WDV from depStart and return the WDV at targetDate (before that period's dep).
+function _wdvAtDate(cost: number, salvage: number, rate: number, depStart: Date, targetDate: Date): number {
+  let wdv = cost;
+  let periodStart = new Date(depStart);
+  let yearNum = 0;
+
+  while (wdv > salvage) {
+    const periodEnd = new Date(periodStart);
+    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    if (periodEnd > targetDate) break; // targetDate is inside this period — stop before applying dep
+
+    yearNum++;
+    const effectiveRate = (yearNum === 1 && _faIsSecondHalfFY(depStart)) ? rate / 200 : rate / 100;
+    const dep = Math.min(wdv * effectiveRate, Math.max(0, wdv - salvage));
+    wdv = Math.max(salvage, wdv - dep);
+    periodStart = periodEnd;
+  }
+
+  return wdv;
+}
+
+export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const query = req.query;
+    const exportFormat = query.export as string;
+
+    // Default fiscal year: current FY (Apr–Mar)
+    const now = new Date();
+    const defaultFY = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+    const fiscalYear = Number(query.fiscalYear) || defaultFY;
+
+    const fyStart = new Date(`${fiscalYear}-04-01T00:00:00.000`);
+    const fyEnd = new Date(`${fiscalYear + 1}-03-31T23:59:59.999`);
+
+    // Fetch all assets that could appear in this FY schedule
+    const assets = await prisma.asset.findMany({
+      where: {
+        purchaseDate: { lte: fyEnd },
+      },
+      select: {
+        id: true,
+        assetName: true,
+        assetNature: true,
+        purchaseCost: true,
+        purchaseDate: true,
+        disposalDate: true,
+        status: true,
+        assetPoolId: true,
+        assetCategory: { select: { id: true, name: true } },
+        depreciation: {
+          select: {
+            depreciationRate: true,
+            depreciationMethod: true,
+            depreciationStart: true,
+            salvageValue: true,
+            accumulatedDepreciation: true,
+            currentBookValue: true,
+          },
+        },
+      },
+      orderBy: [{ assetCategory: { name: "asc" } }, { purchaseDate: "asc" }],
+    });
+
+    // ── Fetch pool depreciation schedules for this FY ──────────────────────────
+    // The FA schedule stored per pool is the auditor-certified source of truth for
+    // undigitized (not-yet-individualized) asset balances.
+    const fyLabel = `FY${fiscalYear}-${String(fiscalYear + 1).slice(2)}`;
+    const poolSchedules = await prisma.assetPoolDepreciationSchedule.findMany({
+      where: { financialYear: fyLabel },
+      include: {
+        pool: {
+          select: {
+            id: true,
+            poolCode: true,
+            categoryId: true,
+            category: { select: { name: true } },
+            assets: {
+              select: { id: true, purchaseCost: true, depreciation: { select: { accumulatedDepreciation: true } } },
+            },
+          },
+        },
+      },
+    });
+
+    // Build a map: categoryName → pool remainder rows (to merge after individual rows)
+    // For each pool schedule, subtract what's already individualized so we don't double-count.
+    const poolRemainderMap = new Map<string, {
+      openingGross: number; additions: number; deletions: number; closingGross: number;
+      openingDep: number; periodDep: number; closingDep: number;
+      openingNetBlock: number; closingNetBlock: number; rate: number;
+      poolCode: string;
+    }[]>();
+
+    for (const sched of poolSchedules) {
+      const pool = sched.pool;
+      const catName = pool.category?.name || "Uncategorized";
+
+      // Sum costs of individual assets already extracted from this pool
+      const extractedGross    = pool.assets.reduce((s: number, a: any) => s + Number(a.purchaseCost ?? 0), 0);
+      const extractedAccDep   = pool.assets.reduce((s: number, a: any) => s + Number(a.depreciation?.accumulatedDepreciation ?? 0), 0);
+
+      // Proportion of pool that is still undigitized
+      const poolClosingGross  = Number(sched.closingGrossBlock);
+      const remainingGross    = Math.max(0, poolClosingGross - extractedGross);
+      const remainingRatio    = poolClosingGross > 0 ? remainingGross / poolClosingGross : 0;
+
+      // Apply same ratio to all dep figures
+      const remainingCloseDep    = +(Number(sched.closingAccumulatedDep) * remainingRatio - extractedAccDep).toFixed(2);
+      const remainingOpenDep     = +(Number(sched.openingAccumulatedDep) * remainingRatio).toFixed(2);
+      const remainingPeriodDep   = +(Number(sched.depreciationForPeriod) * remainingRatio).toFixed(2);
+      const remainingOpenGross   = +(Number(sched.openingGrossBlock) * remainingRatio).toFixed(2);
+      const remainingAdditions   = +(Number(sched.additions) * remainingRatio).toFixed(2);
+      const remainingDeletions   = +(Number(sched.deletions) * remainingRatio).toFixed(2);
+      const remainingOpenNet     = +(remainingOpenGross - remainingOpenDep).toFixed(2);
+      const remainingCloseNet    = +(remainingGross - Math.max(0, remainingCloseDep)).toFixed(2);
+
+      // Only add a pool remainder row if there's actually undigitized balance left
+      if (remainingGross > 0) {
+        if (!poolRemainderMap.has(catName)) poolRemainderMap.set(catName, []);
+        poolRemainderMap.get(catName)!.push({
+          openingGross: remainingOpenGross,
+          additions: remainingAdditions,
+          deletions: remainingDeletions,
+          closingGross: +remainingGross.toFixed(2),
+          openingDep: remainingOpenDep,
+          periodDep: remainingPeriodDep,
+          closingDep: Math.max(0, remainingCloseDep),
+          openingNetBlock: remainingOpenNet,
+          closingNetBlock: remainingCloseNet,
+          rate: Number(sched.depreciationRate),
+          poolCode: pool.poolCode ?? "",
+        });
+      }
+    }
+
+    // Group assets by category
+    const categoryMap = new Map<string, typeof assets>();
+    for (const asset of assets) {
+      const catName = asset.assetCategory?.name || "Uncategorized";
+      if (!categoryMap.has(catName)) categoryMap.set(catName, []);
+      categoryMap.get(catName)!.push(asset);
+    }
+
+    // Also collect all category names from pool remainders that have no individual assets
+    const allCatNames = new Set<string>([...categoryMap.keys(), ...poolRemainderMap.keys()]);
+
+    const rows: any[] = [];
+    let gOpenGross = 0, gAdditions = 0, gDeletions = 0, gCloseGross = 0;
+    let gOpenDep = 0, gPeriodDep = 0, gCloseDep = 0;
+    let gNetCurrent = 0, gNetPrevious = 0;
+
+    for (const catName of allCatNames) {
+      let openingGross = 0, additions = 0, deletions = 0;
+      let closingAccDep = 0;
+      let catAssetPeriodDep = 0; // per-asset computed period dep (with half-year convention)
+      let totalRate = 0, rateCount = 0;
+
+      const catAssets = categoryMap.get(catName) ?? [];
+
+      for (const asset of catAssets) {
+        const cost = Number(asset.purchaseCost || 0);
+        const purchaseDate = asset.purchaseDate ? new Date(asset.purchaseDate) : null;
+        const disposalDate = asset.disposalDate ? new Date(asset.disposalDate) : null;
+
+        const isDisposedBeforeFY = disposalDate && disposalDate < fyStart;
+        const isDisposedInFY = disposalDate && disposalDate >= fyStart && disposalDate <= fyEnd;
+        const isAcquiredBeforeFY = purchaseDate && purchaseDate < fyStart;
+        const isAcquiredInFY = purchaseDate && purchaseDate >= fyStart && purchaseDate <= fyEnd;
+
+        // Opening Gross Block: acquired before FY start, not disposed before FY start
+        if (isAcquiredBeforeFY && !isDisposedBeforeFY) {
+          openingGross += cost;
+        }
+
+        // Additions: acquired during FY
+        if (isAcquiredInFY) {
+          additions += cost;
+        }
+
+        // Deletions: disposed during FY (use original cost)
+        if (isDisposedInFY) {
+          deletions += cost;
+        }
+
+        const dep = asset.depreciation;
+        if (!dep) continue;
+
+        const assetRate    = Number(dep.depreciationRate || 0);
+        const method       = dep.depreciationMethod;
+        const depStart     = dep.depreciationStart ? new Date(dep.depreciationStart) : purchaseDate;
+        const salvageVal   = Number(dep.salvageValue ?? 0);
+
+        if (assetRate > 0) { totalRate += assetRate; rateCount++; }
+
+        // ── Per-asset period depreciation (Indian IT Act 180-day convention) ──
+        if (isAcquiredBeforeFY && !isDisposedBeforeFY) {
+          // Opening block: asset is in year 2+ → full rate on opening WDV
+          closingAccDep += Number(dep.accumulatedDepreciation || 0);
+          if (assetRate > 0 && depStart) {
+            if (method === "DB") {
+              const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
+              catAssetPeriodDep += Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
+            } else { // SL
+              catAssetPeriodDep += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+            }
+          }
+        } else if (isAcquiredInFY && assetRate > 0 && purchaseDate) {
+          // Addition: Indian IT Act half-year rule applies for DB method only
+          if (method === "DB") {
+            const halfYear = _faIsSecondHalfFY(purchaseDate);
+            catAssetPeriodDep += cost * (halfYear ? assetRate / 200 : assetRate / 100);
+          } else { // SL
+            catAssetPeriodDep += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+          }
+        }
+      }
+
+      // ── Merge pool remainder rows for this category ──────────────────────────
+      // These represent the auditor-certified balance of assets not yet individualized.
+      // Added on top of individual asset figures — no double count because
+      // pool remainder = pool total MINUS already-extracted individual asset costs.
+      const poolRemainders = poolRemainderMap.get(catName) ?? [];
+      let poolPeriodDep = 0;
+      for (const pr of poolRemainders) {
+        openingGross  += pr.openingGross;
+        additions     += pr.additions;
+        deletions     += pr.deletions;
+        closingAccDep += pr.closingDep;
+        poolPeriodDep += pr.periodDep;
+        totalRate     += pr.rate;
+        rateCount     += 1;
+      }
+
+      const closingGross = openingGross + additions - deletions;
+      const avgRate = rateCount > 0 ? +(totalRate / rateCount).toFixed(2) : 0;
+
+      // Period dep: per-asset computed (individual assets) + auditor-certified (pool remainder)
+      const periodDep = +(catAssetPeriodDep + poolPeriodDep).toFixed(2);
+      let openingDep = +(closingAccDep - periodDep).toFixed(2);
+      if (openingDep < 0) openingDep = 0;
+
+      const netCurrent  = +(closingGross - closingAccDep).toFixed(2);
+      const netPrevious = +(openingGross - openingDep).toFixed(2);
+
+      // Flag if this category has undigitized pool balance (useful for frontend warning)
+      const hasPoolBalance = poolRemainders.length > 0;
+      const poolCodes      = poolRemainders.map(p => p.poolCode);
+
+      rows.push({
+        category: catName,
+        openingGross: +openingGross.toFixed(2),
+        additions: +additions.toFixed(2),
+        deletions: +deletions.toFixed(2),
+        closingGross: +closingGross.toFixed(2),
+        rate: avgRate,
+        openingDep: +openingDep.toFixed(2),
+        periodDep: +periodDep.toFixed(2),
+        closingDep: +closingAccDep.toFixed(2),
+        netCurrent: +netCurrent.toFixed(2),
+        netPrevious: +netPrevious.toFixed(2),
+        hasPoolBalance,
+        poolCodes,
+      });
+
+      gOpenGross += openingGross; gAdditions += additions; gDeletions += deletions;
+      gCloseGross += closingGross; gOpenDep += openingDep; gPeriodDep += periodDep;
+      gCloseDep += closingAccDep; gNetCurrent += netCurrent; gNetPrevious += netPrevious;
+    }
+
+    const grandTotal = {
+      openingGross: +gOpenGross.toFixed(2), additions: +gAdditions.toFixed(2),
+      deletions: +gDeletions.toFixed(2), closingGross: +gCloseGross.toFixed(2),
+      openingDep: +gOpenDep.toFixed(2), periodDep: +gPeriodDep.toFixed(2),
+      closingDep: +gCloseDep.toFixed(2), netCurrent: +gNetCurrent.toFixed(2),
+      netPrevious: +gNetPrevious.toFixed(2),
+    };
+
+    if (exportFormat === "excel") {
+      return await sendFixedAssetsScheduleExcel(res, rows, grandTotal, fiscalYear);
+    }
+
+    res.json({
+      fiscalYear,
+      fyLabel: `FY ${fiscalYear}-${String(fiscalYear + 1).slice(2)}`,
+      fyStart: fyStart.toISOString().split("T")[0],
+      fyEnd: fyEnd.toISOString().split("T")[0],
+      rows,
+      grandTotal,
+    });
+  } catch (err: any) {
+    console.error("getFixedAssetsSchedule error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
 // ─── 6. Inventory Stock Report ──────────────────────────────────────────────
 
 export const getInventoryStockReport = async (req: AuthenticatedRequest, res: Response) => {
@@ -668,6 +1160,198 @@ export const getInventoryStockReport = async (req: AuthenticatedRequest, res: Re
     });
   } catch (err: any) {
     console.error("getInventoryStockReport error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── 7. Consolidated Asset Report ───────────────────────────────────────────
+
+export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user as any;
+    const query = req.query;
+    const exportFormat = query.export as string;
+
+    const page = Number(query.page) || 1;
+    const limit = Number(query.limit) || 25;
+
+    const where: any = { ...buildRoleFilter(user) };
+    if (query.departmentId) where.departmentId = Number(query.departmentId);
+    if (query.categoryId) where.assetCategoryId = Number(query.categoryId);
+    if (query.status) where.status = query.status;
+    if (query.search) {
+      where.OR = [
+        { assetId: { contains: String(query.search) } },
+        { assetName: { contains: String(query.search) } },
+        { serialNumber: { contains: String(query.search) } },
+      ];
+    }
+    if (query.dateFrom || query.dateTo) {
+      const dateField = String(query.dateField || 'purchaseDate') as 'purchaseDate' | 'installedAt';
+      where[dateField] = {};
+      if (query.dateFrom) where[dateField].gte = new Date(query.dateFrom as string);
+      if (query.dateTo)   where[dateField].lte = new Date(query.dateTo as string);
+    }
+
+    const [total, assets] = await Promise.all([
+      prisma.asset.count({ where }),
+      prisma.asset.findMany({
+        where,
+        ...(!exportFormat ? { skip: (page - 1) * limit, take: limit } : {}),
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true, assetId: true, assetName: true, serialNumber: true,
+          assetType: true, status: true, purchaseDate: true, purchaseCost: true,
+          modeOfProcurement: true, manufacturer: true, modelNumber: true,
+          currentLocation: true, physicalCondition: true, criticalityLevel: true,
+          workingCondition: true, warrantyStatus: true, createdAt: true,
+          assetCategory: { select: { name: true } },
+          department: { select: { name: true } },
+          vendor: { select: { name: true } },
+          allottedTo: { select: { name: true } },
+        },
+      }),
+    ]);
+
+    const assetIds = assets.map((a) => a.id);
+
+    // Fetch related data in parallel
+    const [depreciation, warranties, insurance, contracts, ticketCounts, lastTickets, lastMaintenance] =
+      await Promise.all([
+        prisma.assetDepreciation.findMany({
+          where: { assetId: { in: assetIds } },
+          select: { assetId: true, currentBookValue: true, depreciationMethod: true },
+        }),
+        prisma.warranty.findMany({
+          where: { assetId: { in: assetIds }, isActive: true },
+          select: { assetId: true, warrantyEnd: true, isUnderWarranty: true },
+          orderBy: { warrantyEnd: "desc" },
+        }),
+        prisma.assetInsurance.findMany({
+          where: { assetId: { in: assetIds }, isActive: true },
+          select: { assetId: true, endDate: true },
+          orderBy: { endDate: "desc" },
+        }),
+        prisma.serviceContract.findMany({
+          where: { assetId: { in: assetIds }, endDate: { gte: new Date() } },
+          select: { assetId: true, endDate: true },
+          orderBy: { endDate: "desc" },
+        }),
+        prisma.ticket.groupBy({
+          by: ["assetId"],
+          where: { assetId: { in: assetIds } },
+          _count: { id: true },
+        }),
+        prisma.ticket.findMany({
+          where: { assetId: { in: assetIds } },
+          select: { assetId: true, status: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          distinct: ["assetId"],
+        }),
+        prisma.maintenanceHistory.findMany({
+          where: { assetId: { in: assetIds } },
+          select: { assetId: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          distinct: ["assetId"],
+        }),
+      ]);
+
+    // Build lookup maps
+    const deprMap = new Map(depreciation.map((d) => [d.assetId, d]));
+    const warrantyMap = new Map(warranties.map((w) => [w.assetId, w]));
+    const insuranceMap = new Map(insurance.map((i) => [i.assetId, i]));
+    const contractMap = new Map(contracts.map((c) => [c.assetId, c]));
+    const ticketCountMap = new Map(ticketCounts.map((t) => [t.assetId, t._count.id]));
+    const lastTicketMap = new Map(lastTickets.map((t) => [t.assetId, t]));
+    const lastMaintenanceMap = new Map(lastMaintenance.map((m) => [m.assetId, m]));
+
+    const openStatuses = ["OPEN", "ASSIGNED", "IN_PROGRESS", "ON_HOLD", "WORK_COMPLETED"] as any[];
+
+    const openTicketCounts = await prisma.ticket.groupBy({
+      by: ["assetId"],
+      where: { assetId: { in: assetIds }, status: { in: openStatuses } },
+      _count: { id: true },
+    });
+    const openTicketMap = new Map(openTicketCounts.map((t) => [t.assetId, (t._count?.id ?? 0)]));
+
+    const data = assets.map((a) => {
+      const dep = deprMap.get(a.id);
+      const war = warrantyMap.get(a.id);
+      const ins = insuranceMap.get(a.id);
+      const con = contractMap.get(a.id);
+      const lastTkt = lastTicketMap.get(a.id);
+      const lastMaint = lastMaintenanceMap.get(a.id);
+      return {
+        assetId: a.assetId,
+        assetName: a.assetName,
+        serialNumber: a.serialNumber,
+        assetType: a.assetType,
+        category: a.assetCategory?.name || "",
+        department: a.department?.name || "",
+        vendor: a.vendor?.name || "",
+        manufacturer: a.manufacturer || "",
+        modelNumber: a.modelNumber || "",
+        modeOfProcurement: a.modeOfProcurement,
+        purchaseDate: a.purchaseDate,
+        purchaseCost: Number(a.purchaseCost || 0),
+        status: a.status,
+        location: a.currentLocation || "",
+        physicalCondition: a.physicalCondition || "",
+        criticalityLevel: a.criticalityLevel || "",
+        workingCondition: a.workingCondition || "",
+        assignedTo: a.allottedTo?.name || "",
+        currentBookValue: dep ? Number(dep.currentBookValue || 0) : null,
+        depreciationMethod: dep?.depreciationMethod || "",
+        warrantyEnd: war?.warrantyEnd || null,
+        underWarranty: war?.isUnderWarranty ?? false,
+        insuranceExpiry: ins?.endDate || null,
+        contractExpiry: con?.endDate || null,
+        totalTickets: ticketCountMap.get(a.id) ?? 0,
+        openTickets: openTicketMap.get(a.id) ?? 0,
+        lastTicketDate: lastTkt?.createdAt || null,
+        lastMaintenanceDate: lastMaint?.createdAt || null,
+      };
+    });
+
+    if (exportFormat === "csv" || exportFormat === "excel") {
+      const exportRows = data.map((d) => ({
+        "Asset ID": d.assetId,
+        "Asset Name": d.assetName,
+        "Serial Number": d.serialNumber,
+        "Asset Type": d.assetType,
+        "Category": d.category,
+        "Department": d.department,
+        "Vendor": d.vendor,
+        "Manufacturer": d.manufacturer,
+        "Model Number": d.modelNumber,
+        "Mode of Procurement": d.modeOfProcurement,
+        "Purchase Date": formatDate(d.purchaseDate),
+        "Purchase Cost (₹)": d.purchaseCost,
+        "Status": d.status,
+        "Location": d.location,
+        "Physical Condition": d.physicalCondition,
+        "Criticality": d.criticalityLevel,
+        "Working Condition": d.workingCondition,
+        "Assigned To": d.assignedTo,
+        "Current Book Value (₹)": d.currentBookValue ?? "",
+        "Depreciation Method": d.depreciationMethod,
+        "Warranty End": formatDate(d.warrantyEnd),
+        "Under Warranty": d.underWarranty ? "Yes" : "No",
+        "Insurance Expiry": formatDate(d.insuranceExpiry),
+        "Contract Expiry": formatDate(d.contractExpiry),
+        "Total Tickets": d.totalTickets,
+        "Open Tickets": d.openTickets,
+        "Last Ticket Date": formatDate(d.lastTicketDate),
+        "Last Maintenance Date": formatDate(d.lastMaintenanceDate),
+      }));
+
+      if (exportFormat === "csv") return sendCsv(res, exportRows, "consolidated-asset-report");
+      return sendExcel(res, exportRows, "consolidated-asset-report", "Consolidated Assets");
+    }
+
+    res.json({ data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
+  } catch (err: any) {
+    console.error("getConsolidatedAssetReport error:", err);
     res.status(500).json({ message: err.message });
   }
 };

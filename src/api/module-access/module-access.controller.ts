@@ -67,43 +67,61 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "coo-dashboard",       label: "COO Dashboard",      path: "/coo-dashboard",       icon: "pi pi-gauge",       sortOrder: 3 },
           { name: "cost-analysis",       label: "Cost Analysis",      path: "/cost-analysis",       icon: "pi pi-chart-bar",   sortOrder: 4 },
           { name: "decision-engine",     label: "Decision Engine",    path: "/decision-engine",     icon: "pi pi-microchip",   sortOrder: 5 },
-          { name: "batch-depreciation",  label: "Batch Depreciation", path: "/batch-depreciation",  icon: "pi pi-chart-line",  sortOrder: 6 },
-          { name: "reports",             label: "Reports",            path: "/reports",              icon: "pi pi-file",        sortOrder: 7 },
+          { name: "batch-depreciation",    label: "Batch Depreciation",   path: "/batch-depreciation",    icon: "pi pi-chart-line", sortOrder: 6 },
+          { name: "fixed-assets-schedule", label: "Fixed Assets Schedule", path: "/fixed-assets-schedule", icon: "pi pi-table",           sortOrder: 7 },
+          { name: "finance-centre",        label: "Finance Centre",        path: "/finance-centre",        icon: "pi pi-building-columns", sortOrder: 8 },
+          { name: "reports",               label: "Reports",               path: "/reports",               icon: "pi pi-file",             sortOrder: 9 },
         ]
       },
 
+      // ── Accounts ──
+      // { name: "accounts", label: "Accounts", icon: "pi pi-calculator", path: "/accounts", sortOrder: 10,
+      //   items: [
+      //     { name: "accounts-dashboard",    label: "Accounts Dashboard", path: "/accounts/dashboard",          icon: "pi pi-chart-bar",   sortOrder: 1 },
+      //     { name: "chart-of-accounts",     label: "Chart of Accounts",  path: "/accounts/chart-of-accounts",  icon: "pi pi-list",        sortOrder: 2 },
+      //     { name: "purchase-vouchers",     label: "Purchase Vouchers",  path: "/accounts/purchase-vouchers",  icon: "pi pi-file-edit",   sortOrder: 3 },
+      //     { name: "payment-vouchers",      label: "Payment Vouchers",   path: "/accounts/payment-vouchers",   icon: "pi pi-credit-card", sortOrder: 4 },
+      //     { name: "journal-entries",       label: "Journal Entries",    path: "/accounts/journal-entries",    icon: "pi pi-book",        sortOrder: 5 },
+      //     { name: "account-ledger",        label: "Account Ledger",     path: "/accounts/ledger",             icon: "pi pi-chart-line",  sortOrder: 6 },
+      //   ]
+      // },
+
       // ── Operations ──
-      { name: "operations", label: "Operations", icon: "pi pi-cog", path: "/operations", sortOrder: 10,
+      { name: "operations", label: "Operations", icon: "pi pi-cog", path: "/operations", sortOrder: 11,
         items: [
-          { name: "gate-pass",       label: "Gate Pass",       path: "/gate-pass",       icon: "pi pi-id-card",      sortOrder: 1 },
-          { name: "acknowledgement", label: "Acknowledgement", path: "/acknowledgement", icon: "pi pi-check-square", sortOrder: 2 },
-          { name: "physical-audit",  label: "Physical Audit",  path: "/asset-audit",     icon: "pi pi-clipboard",    sortOrder: 3 },
-          { name: "employee-exit",   label: "Employee Exit",   path: "/employee-exit",   icon: "pi pi-sign-out",     sortOrder: 4 },
-          { name: "document-vault",  label: "Document Vault",  path: "/document-vault",  icon: "pi pi-folder-open",  sortOrder: 5 },
-          { name: "knowledge-base",  label: "Knowledge Base",  path: "/knowledge-base",  icon: "pi pi-book",         sortOrder: 6 },
+          { name: "gate-pass",       label: "Gate Pass",           path: "/gate-pass",       icon: "pi pi-id-card",      sortOrder: 1 },
+          { name: "acknowledgement", label: "Acknowledgement",     path: "/acknowledgement", icon: "pi pi-check-square", sortOrder: 2 },
+          { name: "physical-audit",  label: "Physical Audit",      path: "/asset-audit",     icon: "pi pi-clipboard",    sortOrder: 3 },
+          { name: "employee-exit",   label: "Employee Exit",       path: "/employee-exit",   icon: "pi pi-sign-out",     sortOrder: 4 },
+          { name: "document-vault",  label: "Document Vault",      path: "/document-vault",  icon: "pi pi-folder-open",  sortOrder: 5 },
+          { name: "knowledge-base",  label: "Knowledge Base",      path: "/knowledge-base",  icon: "pi pi-book",         sortOrder: 6 },
+          { name: "rca",             label: "Root Cause Analysis", path: "/rca",             icon: "pi pi-search-minus", sortOrder: 7 },
+          { name: "bulk-operations", label: "Bulk Operations",     path: "/quick-actions",   icon: "pi pi-bolt",         sortOrder: 8 },
         ]
       },
 
       // ── Administration ──
-      { name: "administration", label: "Administration", icon: "pi pi-shield", path: "/admin", sortOrder: 11,
+      { name: "administration", label: "Administration", icon: "pi pi-shield", path: "/admin", sortOrder: 12,
         items: [
-          { name: "sla-matrix",                label: "SLA Matrix",                path: "/sla",                       icon: "pi pi-clock",      sortOrder: 1 },
-          { name: "escalation-matrix",         label: "Escalation Matrix",         path: "/escalation",                icon: "pi pi-sort-alt",   sortOrder: 2 },
-          { name: "support-matrix",            label: "Support Matrix",            path: "/support-matrix",            icon: "pi pi-users",      sortOrder: 3 },
-          { name: "master-settings",           label: "Master Settings",           path: "/master-settings",           icon: "pi pi-cog",        sortOrder: 4 },
-          { name: "module-access",             label: "Module Access",             path: "/module-access",             icon: "pi pi-lock",       sortOrder: 5 },
-          { name: "system-config",             label: "System Config",             path: "/tenant-config",             icon: "pi pi-sliders-v",  sortOrder: 6 },
-          { name: "user-activity",             label: "User Activity",             path: "/user-activity",             icon: "pi pi-users",      sortOrder: 7 },
-          { name: "audit-trail",               label: "Audit Trail",               path: "/audit-trail",               icon: "pi pi-history",    sortOrder: 8 },
-          { name: "notifications",             label: "Notifications",             path: "/notifications",             icon: "pi pi-bell",       sortOrder: 9 },
-          { name: "notification-preferences",  label: "Notification Preferences",  path: "/notification-preferences",  icon: "pi pi-sliders-h",  sortOrder: 10 },
-          { name: "email-templates",           label: "Email Templates",           path: "/email-templates",           icon: "pi pi-envelope",   sortOrder: 11 },
-          { name: "inventory-master",          label: "Inventory Master",          path: "/master",                    icon: "pi pi-box",        sortOrder: 12 },
+          { name: "sla-matrix",                label: "SLA Matrix",                path: "/sla",                       icon: "pi pi-clock",        sortOrder: 1 },
+          { name: "escalation-matrix",         label: "Escalation Matrix",         path: "/escalation",                icon: "pi pi-sort-alt",     sortOrder: 2 },
+          { name: "support-matrix",            label: "Support Matrix",            path: "/support-matrix",            icon: "pi pi-users",        sortOrder: 3 },
+          { name: "hierarchy-dashboard",       label: "Hierarchy Dashboard",       path: "/hierarchy-config",          icon: "pi pi-sitemap",      sortOrder: 4 },
+          { name: "master-settings",           label: "Master Settings",           path: "/master-settings",           icon: "pi pi-cog",          sortOrder: 5 },
+          { name: "approval-config",           label: "Approval Config",           path: "/approval-config",           icon: "pi pi-check-circle", sortOrder: 6 },
+          { name: "module-access",             label: "Module Access",             path: "/module-access",             icon: "pi pi-lock",         sortOrder: 7 },
+          { name: "system-config",             label: "System Config",             path: "/tenant-config",             icon: "pi pi-sliders-v",    sortOrder: 8 },
+          { name: "user-activity",             label: "User Activity",             path: "/user-activity",             icon: "pi pi-users",        sortOrder: 9 },
+          { name: "audit-trail",               label: "Audit Trail",               path: "/audit-trail",               icon: "pi pi-history",      sortOrder: 10 },
+          { name: "notifications",             label: "Notifications",             path: "/notifications",             icon: "pi pi-bell",         sortOrder: 11 },
+          { name: "notification-preferences",  label: "Notification Preferences",  path: "/notification-preferences",  icon: "pi pi-sliders-h",    sortOrder: 12 },
+          { name: "email-templates",           label: "Email Templates",           path: "/email-templates",           icon: "pi pi-envelope",     sortOrder: 13 },
+          { name: "inventory-master",          label: "Inventory Master",          path: "/master",                    icon: "pi pi-box",          sortOrder: 14 },
         ]
       },
 
       // ── Settings ──
-      { name: "settings", label: "Settings", icon: "pi pi-user-edit", path: "/settings", sortOrder: 12,
+      { name: "settings", label: "Settings", icon: "pi pi-user-edit", path: "/settings", sortOrder: 13,
         items: [
           { name: "profile",           label: "Profile",           path: "/settings", icon: "pi pi-user",       sortOrder: 1 },
           { name: "reset-password",    label: "Reset Password",    path: "/settings", icon: "pi pi-lock",       sortOrder: 2 },

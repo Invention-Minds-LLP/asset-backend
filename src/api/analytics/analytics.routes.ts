@@ -8,6 +8,8 @@ import {
   getIdleCapitalAnalysis,
   getInStoreAging,
   getUncoveredAssets,
+  getMaintenanceByCategory,
+  getAssetValueBuckets,
 } from "./analytics.controller";
 
 const router = Router();
@@ -19,5 +21,7 @@ router.get("/coo-dashboard", authenticateToken, getCooDashboard);
 router.get("/idle-capital", authenticateToken, getIdleCapitalAnalysis);
 router.get("/in-store-aging", authenticateToken, getInStoreAging);
 router.get("/uncovered-assets", authenticateToken, getUncoveredAssets);
+router.get("/maintenance-by-category", authenticateToken, getMaintenanceByCategory);
+router.get("/asset-value-buckets", authenticateToken, getAssetValueBuckets);
 
 export default router;

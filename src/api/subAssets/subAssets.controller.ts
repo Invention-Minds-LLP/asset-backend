@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
-import { generateSubAssetId as generateSubAssetIdShared } from "../../utilis/assetIdGenerator";
+import { generateSubAssetId as generateSubAssetIdShared, generateAssetId } from "../../utilis/assetIdGenerator";
 
 /**
  * GET /assets/:assetId/children
@@ -652,6 +652,8 @@ export const createSubAsset = async (req: Request, res: Response) => {
       return;
     }
 
+    const { forceCreate, createAsStandalone } = req.body;
+
     const parent = await prisma.asset.findUnique({
       where: { assetId: parentAssetId },
       select: {
@@ -659,11 +661,60 @@ export const createSubAsset = async (req: Request, res: Response) => {
         assetId: true,
         vendorId: true,
         departmentId: true,
+        purchaseCost: true,
+        estimatedValue: true,
       },
     });
 
     if (!parent) {
       res.status(404).json({ message: "Parent asset not found" });
+      return;
+    }
+
+    // ── 40% threshold check ────────────────────────────────────────────────────
+    if (!forceCreate && !createAsStandalone) {
+      const parentValue = Number(parent.purchaseCost ?? parent.estimatedValue ?? 0);
+      const subValue = Number(req.body.purchaseCost ?? req.body.estimatedValue ?? 0);
+      if (parentValue > 0 && subValue > 0) {
+        const pct = (subValue / parentValue) * 100;
+        if (pct >= 40) {
+          res.status(422).json({
+            thresholdWarning: true,
+            message: `Sub-asset value (₹${subValue.toLocaleString()}) is ${pct.toFixed(1)}% of the parent asset value (₹${parentValue.toLocaleString()}), which exceeds the 40% threshold. Consider creating it as a standalone Functional Asset.`,
+            parentValue,
+            subAssetValue: subValue,
+            percentage: Math.round(pct * 10) / 10,
+          });
+          return;
+        }
+      }
+    }
+
+    // If user chose standalone, create without parentAssetId
+    if (createAsStandalone) {
+      const standaloneId = await generateAssetId();
+      const standaloneChild = await prisma.asset.create({
+        data: {
+          assetId: standaloneId,
+          assetName,
+          assetType,
+          assetCategoryId: Number(assetCategoryId),
+          serialNumber,
+          referenceCode: req.body.referenceCode || null,
+          sourceType: sourceType || "NEW",
+          remarks: req.body.remarks || null,
+          modeOfProcurement: req.body.modeOfProcurement || "PURCHASE",
+          status,
+          vendorId: req.body.vendorId != null ? Number(req.body.vendorId) : parent.vendorId,
+          departmentId: req.body.departmentId != null ? Number(req.body.departmentId) : parent.departmentId,
+          invoiceNumber: req.body.invoiceNumber || null,
+          purchaseDate: req.body.purchaseDate ? new Date(req.body.purchaseDate) : null,
+          purchaseCost: req.body.purchaseCost != null ? Number(req.body.purchaseCost) : null,
+          estimatedValue: req.body.estimatedValue != null ? Number(req.body.estimatedValue) : null,
+          workingCondition: req.body.workingCondition || null,
+        },
+      });
+      res.status(201).json({ ...standaloneChild, createdAsStandalone: true });
       return;
     }
 

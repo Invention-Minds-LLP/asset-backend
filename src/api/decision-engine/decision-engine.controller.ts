@@ -1,4 +1,4 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
@@ -293,12 +293,11 @@ async function evaluateAsset(assetDbId: number, config: EngineConfig) {
   const allAssetIds = [assetDbId, ...subAssets.map((s) => s.id)];
 
   // ── Maintenance cost (all time) ───────────────────────────────────────────
-  const [maintenanceAgg, ticketAgg, spareAgg] = await Promise.all([
+  // MaintenanceHistory.ticketId links a maintenance record back to the ticket
+  // that triggered it. To avoid double-counting, ticket costs are only included
+  // for tickets that do NOT already have a linked MaintenanceHistory record.
+  const [maintenanceAgg, spareAgg, linkedTicketIds] = await Promise.all([
     prisma.maintenanceHistory.aggregate({
-      where: { assetId: { in: allAssetIds } },
-      _sum: { totalCost: true },
-    }),
-    prisma.ticket.aggregate({
       where: { assetId: { in: allAssetIds } },
       _sum: { totalCost: true },
     }),
@@ -308,7 +307,21 @@ async function evaluateAsset(assetDbId: number, config: EngineConfig) {
           _sum: { costAtUse: true },
         }).catch(() => ({ _sum: { costAtUse: null } }))
       : Promise.resolve({ _sum: { costAtUse: null } }),
+    // IDs of tickets that already have a MaintenanceHistory entry (internal fix)
+    prisma.maintenanceHistory.findMany({
+      where: { assetId: { in: allAssetIds }, ticketId: { not: null } },
+      select: { ticketId: true },
+    }).then((rows) => rows.map((r) => r.ticketId as number)),
   ]);
+
+  // Sum only ticket costs for tickets NOT covered by a MaintenanceHistory record
+  const ticketAgg = await prisma.ticket.aggregate({
+    where: {
+      assetId: { in: allAssetIds },
+      ...(linkedTicketIds.length > 0 ? { id: { notIn: linkedTicketIds } } : {}),
+    },
+    _sum: { totalCost: true },
+  });
 
   const totalMaintenanceCost =
     Number(maintenanceAgg._sum.totalCost ?? 0) +
@@ -675,7 +688,7 @@ export const evaluateAllAssets = async (
     };
 
     // Role-based filtering: scope non-ADMIN users to their department
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 
@@ -864,7 +877,7 @@ export const getDashboardSummary = async (
     };
 
     // Scope non-ADMIN users to their department
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 

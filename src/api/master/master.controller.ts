@@ -56,6 +56,7 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       totalEmployees,
       totalDepartments,
       slaBreachedTickets,
+      legacyAssetCount,
     ] = await Promise.all([
       prisma.asset.count({ where: assetWhere }),
       prisma.asset.count({ where: { ...assetWhere, status: "ACTIVE" } }),
@@ -78,7 +79,53 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       prisma.employee.count(),
       prisma.department.count(),
       prisma.ticket.count({ where: { ...ticketWhere, slaBreached: true, status: { notIn: ["CLOSED", "RESOLVED"] } } }),
+      prisma.asset.count({ where: { ...assetWhere, isLegacyAsset: true } }),
     ]);
+
+    // Earliest dataAvailableSince across all legacy assets (for dashboard banner)
+    const earliestLegacy = legacyAssetCount > 0
+      ? await prisma.asset.findFirst({
+          where: { ...assetWhere, isLegacyAsset: true, dataAvailableSince: { not: null } },
+          orderBy: { dataAvailableSince: 'asc' },
+          select: { dataAvailableSince: true },
+        })
+      : null;
+
+    // Pool summary — undigitized asset balances from FA register
+    const allPools = await prisma.assetPool.findMany({
+      select: { id: true, originalQuantity: true, totalPoolCost: true, status: true },
+    });
+    let poolTotalGrossBlock = 0, poolTotalNetBlock = 0, totalUndigitizedAssets = 0;
+    let totalPools = allPools.length, completePools = 0, partialPools = 0, pendingPools = 0;
+    for (const pool of allPools) {
+      if (pool.status === "COMPLETE") completePools++;
+      else if (pool.status === "PARTIAL") partialPools++;
+      else pendingPools++;
+      const linkedCount = await prisma.asset.count({ where: { assetPoolId: pool.id } });
+      totalUndigitizedAssets += Math.max(0, pool.originalQuantity - linkedCount);
+      const latestSched = await prisma.assetPoolDepreciationSchedule.findFirst({
+        where: { poolId: pool.id }, orderBy: { financialYearEnd: "desc" },
+      });
+      if (latestSched) {
+        const remainingRatio = pool.originalQuantity > 0
+          ? Math.max(0, pool.originalQuantity - linkedCount) / pool.originalQuantity : 0;
+        poolTotalGrossBlock += Number(latestSched.closingGrossBlock) * remainingRatio;
+        poolTotalNetBlock   += Number(latestSched.closingNetBlock) * remainingRatio;
+      }
+    }
+
+    // E-Waste summary
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const [eWastePendingHOD, eWastePendingOps, eWastePendingSec, eWasteClosedThisMonth, eWasteOpenOver30Days] =
+      await Promise.all([
+        prisma.eWasteRecord.count({ where: { status: 'PENDING_HOD' } }),
+        prisma.eWasteRecord.count({ where: { status: 'PENDING_OPERATIONS' } }),
+        prisma.eWasteRecord.count({ where: { status: 'PENDING_SECURITY' } }),
+        prisma.eWasteRecord.count({ where: { status: 'CLOSED', closedAt: { gte: startOfMonth } } }),
+        prisma.eWasteRecord.count({ where: { status: { not: 'CLOSED' }, createdAt: { lte: thirtyDaysAgo } } }),
+      ]);
 
     // Ticket status breakdown
     const ticketStatusBreakdown = await prisma.ticket.groupBy({
@@ -141,6 +188,26 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
         totalEmployees,
         totalDepartments,
         slaBreachedTickets,
+        legacyAssetCount,
+        dataAvailableSince: earliestLegacy?.dataAvailableSince ?? null,
+        eWaste: {
+          pendingHOD: eWastePendingHOD,
+          pendingOps: eWastePendingOps,
+          pendingSecurity: eWastePendingSec,
+          totalPending: eWastePendingHOD + eWastePendingOps + eWastePendingSec,
+          closedThisMonth: eWasteClosedThisMonth,
+          openOver30Days: eWasteOpenOver30Days,
+        },
+        // Pool digitization summary
+        poolSummary: {
+          totalPools, completePools, partialPools, pendingPools,
+          totalUndigitizedAssets,
+          poolTotalGrossBlock: Math.round(poolTotalGrossBlock),
+          poolTotalNetBlock:   Math.round(poolTotalNetBlock),
+          digitizationPct: totalUndigitizedAssets > 0 || allPools.reduce((s, p) => s + p.originalQuantity, 0) > 0
+            ? Math.round((1 - totalUndigitizedAssets / Math.max(1, allPools.reduce((s, p) => s + p.originalQuantity, 0))) * 100)
+            : 100,
+        },
       },
       ticketStatusBreakdown: ticketStatusBreakdown.map((t) => ({
         status: t.status,

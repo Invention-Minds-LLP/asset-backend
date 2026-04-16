@@ -1,4 +1,4 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { Prisma } from "@prisma/client";
@@ -492,7 +492,7 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
 
     // Department-based scoping for non-admin users
     let scopedAssetIds: number[] | undefined;
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },
@@ -683,7 +683,7 @@ export const getMissingLogs = async (req: AuthenticatedRequest, res: Response) =
 
     // Department-based scoping for non-admin users
     let scopedAssetIds: number[] | undefined;
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },
@@ -841,7 +841,7 @@ export const getLeaderboard = async (req: AuthenticatedRequest, res: Response) =
     let departmentId = req.query.departmentId ? Number(req.query.departmentId) : null;
 
     // Department-based scoping for non-admin users
-    if (user?.role !== "ADMIN" && user?.departmentId && !departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId && !departmentId) {
       departmentId = Number(user.departmentId);
     }
 

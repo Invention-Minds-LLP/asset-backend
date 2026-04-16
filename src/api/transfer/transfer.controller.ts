@@ -6,7 +6,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AcknowledgementPurpose } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
-import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { notify, getDepartmentHODs } from "../../utilis/notificationHelper";
 
 
 const FTP_CONFIG = {
@@ -240,7 +240,7 @@ export const approveAssetTransfer = async (
     logAction({ entityType: "TRANSFER", entityId: transferId, action: "APPROVE", description: `Transfer #${transferId} approved for asset #${transfer.assetId}`, performedById: req.user?.employeeDbId });
 
     // Notify requester that transfer is approved
-    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Approved", message: `Transfer #${transferId} for asset #${transfer.assetId} has been approved`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
+    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Approved", message: `Transfer for asset ${asset.assetId} — ${asset.assetName} has been approved`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
 
     res.json({
       message: "Transfer approved successfully",
@@ -301,7 +301,7 @@ export const rejectAssetTransfer = async (
     logAction({ entityType: "TRANSFER", entityId: transferId, action: "STATUS_CHANGE", description: `Transfer #${transferId} rejected`, performedById: req.user?.employeeDbId });
 
     // Notify requester that transfer is rejected
-    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Rejected", message: `Transfer #${transferId} for asset #${transfer.assetId} has been rejected`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
+    if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Rejected", message: `Transfer for asset ${asset.assetId} — ${asset.assetName} has been rejected`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
 
     res.json({
       message: "Transfer rejected",
@@ -440,6 +440,13 @@ export const returnTransferredAsset = async (
         approvedBy: true
       }
     });
+
+    // Notify HOD of asset's department about the return
+    const { asset: retAsset } = await getAssetDepartmentHod(originalTransfer.assetId);
+    const retHodIds = await getDepartmentHODs(retAsset.departmentId);
+    if (retHodIds.length > 0) {
+      notify({ type: "OTHER", title: "Asset Returned", message: `Asset ${retAsset.assetId} — ${retAsset.assetName} has been returned${returnReason ? `. Reason: ${returnReason}` : ""}`, recipientIds: retHodIds, assetId: originalTransfer.assetId, createdById: req.user?.employeeDbId });
+    }
 
     res.json({
       message: "Asset returned successfully",
@@ -727,7 +734,7 @@ export const getMyPendingTransferApprovals = async (
 async function getAssetDepartmentHod(assetId: number) {
   const asset = await prisma.asset.findUnique({
     where: { id: assetId },
-    select: { id: true, departmentId: true }
+    select: { id: true, departmentId: true, assetId: true, assetName: true }
   });
 
   if (!asset) {

@@ -1,4 +1,4 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
@@ -46,7 +46,7 @@ export const getAllGoodsReceipts = async (req: AuthenticatedRequest, res: Respon
     if (purchaseOrderId) where.purchaseOrderId = Number(purchaseOrderId);
 
     // Department-based scoping for non-admin users via linked PO
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptPOs = await prisma.purchaseOrder.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },
@@ -275,6 +275,11 @@ export const inspectGRA = async (req: AuthenticatedRequest, res: Response) => {
 
     logAction({ entityType: "GOODS_RECEIPT", entityId: graId, action: "UPDATE", description: `GRA ${gra.grnNumber} inspected`, performedById: (req as any).user?.employeeDbId });
 
+    // Notify GRA creator of inspection outcome
+    if (gra.createdById) {
+      notify({ type: "GRA_ACCEPTED", title: `GRA Inspection ${allPassed || anyPassed ? "Passed" : "Failed"}`, message: `GRA ${gra.grnNumber} inspection ${allPassed ? "passed" : anyPassed ? "partially passed" : "failed"}${inspectionRemarks ? `. Remarks: ${inspectionRemarks}` : ""}`, recipientIds: [gra.createdById], createdById: (req as any).user?.employeeDbId });
+    }
+
     res.json(updated);
   } catch (error: any) {
     console.error("inspectGRA error:", error);
@@ -475,6 +480,39 @@ export const acceptGRA = async (req: AuthenticatedRequest, res: Response) => {
     const assetLineCount = gra.lines.filter(l => l.itemType === "ASSET").reduce((sum, l) => sum + (l.acceptedQty > 0 ? l.acceptedQty : l.receivedQty), 0);
     logAction({ entityType: "GOODS_RECEIPT", entityId: graId, action: "APPROVE", description: `GRA ${gra.grnNumber} accepted${assetLineCount > 0 ? `, ${assetLineCount} asset(s) auto-created` : ""}`, performedById: user.employeeDbId });
 
+    // ── Auto-create Purchase Voucher if accounts module is enabled ────────────
+    const accountsCfg = await prisma.tenantConfig.findUnique({ where: { key: "ACCOUNTS_MODULE_ENABLED" } });
+    if (accountsCfg?.value === "true") {
+      try {
+        const totalAmount = gra.lines.reduce((sum: number, l: any) => sum + (Number(l.unitPrice ?? 0) * (l.acceptedQty > 0 ? l.acceptedQty : l.receivedQty)), 0);
+        // generate PV number
+        const now = new Date();
+        const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+        const fyEnd = fyStart + 1;
+        const fy = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
+        const latestPV = await (prisma as any).purchaseVoucher.findFirst({ where: { voucherNo: { startsWith: `PV-${fy}` } }, orderBy: { id: "desc" } });
+        let pvSeq = 1;
+        if (latestPV) { const parts = latestPV.voucherNo.split("-"); const last = parseInt(parts[parts.length - 1], 10); if (!isNaN(last)) pvSeq = last + 1; }
+        const pvNumber = `PV-${fy}-${pvSeq.toString().padStart(3, "0")}`;
+
+        await (prisma as any).purchaseVoucher.create({
+          data: {
+            voucherNo: pvNumber,
+            voucherDate: new Date(),
+            amount: totalAmount,
+            narration: `Auto-created from GRA ${gra.grnNumber}`,
+            goodsReceiptId: graId,
+            vendorId: (gra as any).vendorId ?? null,
+            invoiceNo: (gra as any).invoiceNumber ?? null,
+            status: "DRAFT",
+            createdById: user.employeeDbId,
+          } as any,
+        });
+      } catch (pvErr) {
+        console.error("Auto-PV creation failed (non-blocking):", pvErr);
+      }
+    }
+
     // Notify GRA creator that GRA is accepted
     notify({ type: "GRA_ACCEPTED", title: "GRA Accepted", message: `GRA ${gra.grnNumber} accepted.${assetLineCount > 0 ? ` ${assetLineCount} asset(s) created.` : ""}`, recipientIds: [gra.createdById].filter(Boolean) as number[], createdById: user.employeeDbId, channel: "BOTH" });
 
@@ -503,6 +541,11 @@ export const rejectGRA = async (req: AuthenticatedRequest, res: Response) => {
     });
 
     logAction({ entityType: "GOODS_RECEIPT", entityId: graId, action: "STATUS_CHANGE", description: `GRA ${gra.grnNumber} rejected`, performedById: (req as any).user?.employeeDbId });
+
+    // Notify GRA creator about rejection
+    if (gra.createdById) {
+      notify({ type: "GRA_ACCEPTED", title: "GRA Rejected", message: `GRA ${gra.grnNumber} has been rejected`, recipientIds: [gra.createdById], createdById: (req as any).user?.employeeDbId });
+    }
 
     res.json(updated);
   } catch (error: any) {

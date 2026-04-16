@@ -1,8 +1,9 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds, formatCurrency } from "../../utilis/notificationHelper";
+import { getRequiredApprovalLevel } from "../../utilis/approvalConfigHelper";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -33,32 +34,6 @@ async function generatePONumber(): Promise<string> {
   return `PO-${fyString}-${seq.toString().padStart(3, "0")}`;
 }
 
-// ── Approval level determination based on amount thresholds ──────────
-async function getRequiredApprovalLevel(amount: number): Promise<string> {
-  // Load threshold configs
-  const configs = await prisma.tenantConfig.findMany({
-    where: {
-      key: {
-        in: [
-          "PO_APPROVAL_HOD_MAX",       // up to this amount → HOD only
-          "PO_APPROVAL_MGMT_MAX",      // up to this → HOD + Management
-          "PO_APPROVAL_COO_MAX",       // up to this → HOD + Mgmt + COO
-          // above COO max → needs CFO
-        ],
-      },
-    },
-  });
-
-  const configMap = new Map(configs.map((c) => [c.key, Number(c.value)]));
-  const hodMax = configMap.get("PO_APPROVAL_HOD_MAX") ?? 100000;     // default ₹1L
-  const mgmtMax = configMap.get("PO_APPROVAL_MGMT_MAX") ?? 500000;   // default ₹5L
-  const cooMax = configMap.get("PO_APPROVAL_COO_MAX") ?? 2000000;    // default ₹20L
-
-  if (amount <= hodMax) return "HOD";
-  if (amount <= mgmtMax) return "MANAGEMENT";
-  if (amount <= cooMax) return "COO";
-  return "CFO";
-}
 
 // Status flow per approval level:
 // HOD only:       DRAFT → HOD_APPROVED → SENT_TO_VENDOR
@@ -79,7 +54,7 @@ export const getAllPurchaseOrders = async (req: AuthenticatedRequest, res: Respo
     if (departmentId) where.departmentId = Number(departmentId);
 
     // Department-based scoping for non-admin users
-    if (user?.role !== "ADMIN" && user?.departmentId && !departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId && !departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 
@@ -227,7 +202,7 @@ export const createPurchaseOrder = async (req: AuthenticatedRequest, res: Respon
     const totalAmount = subtotal + taxAmount;
 
     // Determine required approval level based on amount
-    const approvalLevel = await getRequiredApprovalLevel(totalAmount);
+    const approvalLevel = await getRequiredApprovalLevel("PURCHASE_ORDER", totalAmount);
 
     const po = await prisma.$transaction(async (tx) => {
       const created = await tx.purchaseOrder.create({
@@ -521,6 +496,15 @@ export const cancelPO = async (req: AuthenticatedRequest, res: Response) => {
 
     logAction({ entityType: "PURCHASE_ORDER", entityId: poId, action: "STATUS_CHANGE", description: `PO ${po.poNumber} cancelled`, performedById: (req as any).user?.employeeDbId });
 
+    // Notify PO creator + HOD about cancellation
+    const cancelPoNotifyIds: number[] = [];
+    if (po.createdById) cancelPoNotifyIds.push(po.createdById);
+    const cancelPoHodIds = await getDepartmentHODs(po.departmentId);
+    const allCancelIds = [...new Set([...cancelPoNotifyIds, ...cancelPoHodIds])].filter(id => id !== (req as any).user?.employeeDbId);
+    if (allCancelIds.length > 0) {
+      notify({ type: "PO_APPROVAL", title: "PO Cancelled", message: `PO ${po.poNumber} (${formatCurrency(Number(po.totalAmount ?? 0))}) has been cancelled`, recipientIds: allCancelIds, createdById: (req as any).user?.employeeDbId });
+    }
+
     res.json(updated);
   } catch (error: any) {
     console.error("cancelPO error:", error);
@@ -589,7 +573,7 @@ export const createPOFromIndent = async (req: AuthenticatedRequest, res: Respons
           taxAmount: 0,
           totalAmount: lineTotal,
           originalAmount: lineTotal,
-          approvalLevel: await getRequiredApprovalLevel(lineTotal),
+          approvalLevel: await getRequiredApprovalLevel("PURCHASE_ORDER", lineTotal),
           status: "DRAFT",
           createdById: user.employeeDbId,
           lines: {
@@ -696,7 +680,7 @@ export const amendPO = async (req: AuthenticatedRequest, res: Response) => {
     const changeAmount = newTotalAmount - previousAmount;
 
     // Determine if new amount needs higher approval
-    const newApprovalLevel = await getRequiredApprovalLevel(newTotalAmount);
+    const newApprovalLevel = await getRequiredApprovalLevel("PURCHASE_ORDER", newTotalAmount);
 
     const result = await prisma.$transaction(async (tx) => {
       // Create amendment record
@@ -744,6 +728,11 @@ export const amendPO = async (req: AuthenticatedRequest, res: Response) => {
     });
 
     logAction({ entityType: "PURCHASE_ORDER", entityId: poId, action: "UPDATE", description: `PO ${po.poNumber} amended (#${result.amendment.amendmentNumber}), amount ${previousAmount} -> ${newTotalAmount}`, performedById: user.employeeDbId });
+
+    // Notify PO creator about amendment
+    if (po.createdById && po.createdById !== user.employeeDbId) {
+      notify({ type: "PO_APPROVAL", title: "PO Amended", message: `PO ${po.poNumber} has been amended (#${result.amendment.amendmentNumber}). New amount: ${formatCurrency(newTotalAmount)}. Reason: ${reason}`, recipientIds: [po.createdById], createdById: user.employeeDbId });
+    }
 
     res.json({
       ...result.po,

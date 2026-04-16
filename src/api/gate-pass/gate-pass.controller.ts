@@ -165,7 +165,25 @@ export const updateGatePassStatus = async (req: AuthenticatedRequest, res: Respo
     const updated = await prisma.gatePass.update({
       where: { id },
       data: { status, reason: reason ?? existing.reason },
+      include: { asset: { select: { assetId: true, assetName: true, departmentId: true } } },
     });
+
+    // Notify HOD of asset's department for status changes
+    if (["RETURNED", "CLOSED", "CANCELLED"].includes(status)) {
+      const deptId = (updated as any).asset?.departmentId;
+      if (deptId) {
+        const statusLabels: Record<string, string> = { RETURNED: "returned", CLOSED: "closed", CANCELLED: "cancelled" };
+        getDepartmentHODs(deptId).then(hodIds =>
+          notify({
+            type: "OTHER",
+            title: `Gate Pass ${statusLabels[status] || status}`,
+            message: `Gate pass ${existing.gatePassNo} (${existing.type}) has been ${statusLabels[status] || status}${reason ? `. Reason: ${reason}` : ""}`,
+            recipientIds: hodIds,
+            createdById: (req as any).user?.employeeDbId,
+          })
+        ).catch(() => {});
+      }
+    }
 
     res.json(updated);
   } catch (error) {

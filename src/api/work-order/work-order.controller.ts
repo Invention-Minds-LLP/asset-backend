@@ -1,9 +1,10 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { Prisma } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { getRequiredApprovalLevel, canApproveAtLevel } from "../../utilis/approvalConfigHelper";
 import { generateAssetId } from "../../utilis/assetIdGenerator";
 
 // ─── helpers ───────────────────────────────────────────────
@@ -53,7 +54,7 @@ export const getAllWorkOrders = async (req: AuthenticatedRequest, res: Response)
     if (departmentId) where.departmentId = Number(departmentId);
 
     // Department-based scoping for non-admin users
-    if (user?.role !== "ADMIN" && user?.departmentId && !departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId && !departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 
@@ -252,6 +253,19 @@ export const approveWorkOrder = async (req: AuthenticatedRequest, res: Response)
       return;
     }
 
+    // Check if the current user's role has authority to approve this WO based on estimated cost
+    const userRole = (req.user as any)?.role ?? "";
+    if (wo.estimatedCost != null) {
+      const requiredLevel = await getRequiredApprovalLevel("WORK_ORDER", Number(wo.estimatedCost));
+      if (!canApproveAtLevel(userRole, requiredLevel)) {
+        res.status(403).json({
+          message: `WO estimated cost requires ${requiredLevel}-level approval. Your role (${userRole}) is not authorised.`,
+          requiredLevel,
+        });
+        return;
+      }
+    }
+
     const updated = await prisma.workOrder.update({
       where: { id },
       data: {
@@ -292,6 +306,15 @@ export const startWorkOrder = async (req: AuthenticatedRequest, res: Response) =
     });
 
     logAction({ entityType: "WORK_ORDER", entityId: id, action: "STATUS_CHANGE", description: `WO ${wo.woNumber} started`, performedById: req.user?.employeeDbId });
+
+    // Notify WO creator + HODs that work has started
+    const startNotifyIds: number[] = [];
+    if (wo.createdById) startNotifyIds.push(wo.createdById);
+    const startHodIds = await getDepartmentHODs(wo.departmentId);
+    const allStartIds = [...new Set([...startNotifyIds, ...startHodIds])];
+    if (allStartIds.length > 0) {
+      notify({ type: "WO_STATUS", title: "Work Order Started", message: `WO ${wo.woNumber} is now in progress`, recipientIds: allStartIds, assetId: wo.assetId ?? undefined, createdById: req.user?.employeeDbId });
+    }
 
     res.json(updated);
   } catch (e: any) {
@@ -590,6 +613,12 @@ export const cancelWorkOrder = async (req: AuthenticatedRequest, res: Response) 
     });
 
     logAction({ entityType: "WORK_ORDER", entityId: id, action: "STATUS_CHANGE", description: `WO ${wo.woNumber} cancelled`, performedById: req.user?.employeeDbId });
+
+    // Notify assignee + creator about cancellation
+    const cancelNotifyIds = [wo.assignedToId, wo.createdById].filter((id): id is number => !!id && id !== req.user?.employeeDbId);
+    if (cancelNotifyIds.length > 0) {
+      notify({ type: "WO_STATUS", title: "Work Order Cancelled", message: `WO ${wo.woNumber} has been cancelled`, recipientIds: cancelNotifyIds, assetId: wo.assetId ?? undefined, createdById: req.user?.employeeDbId });
+    }
 
     res.json(updated);
   } catch (e: any) {

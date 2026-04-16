@@ -1,6 +1,7 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
 function mustUser(req: AuthenticatedRequest) {
   const u = (req as any).user;
@@ -62,7 +63,7 @@ export const getExitById = async (req: AuthenticatedRequest, res: Response) => {
     const exit = await (prisma as any).employeeExit.findUnique({
       where: { id: Number(req.params.id) },
       include: {
-        employee: { select: { id: true, name: true, employeeId: true, designation: true, departmentId: true } },
+        employee: { select: { id: true, name: true, employeeID: true, designation: true, departmentId: true } },
         handledBy: { select: { id: true, name: true } },
         handoverItems: {
           include: {
@@ -123,6 +124,27 @@ export const initiateExit = async (req: AuthenticatedRequest, res: Response) => 
         handoverItems: true,
       },
     });
+
+    // Fetch employee info for notification
+    const employee = await prisma.employee.findUnique({
+      where: { id: Number(employeeId) },
+      select: { id: true, name: true, departmentId: true },
+    });
+
+    // Notify the employee being offboarded + their dept HOD about pending asset handover
+    if (employee) {
+      const notifyIds: number[] = [employee.id];
+      const hodIds = await getDepartmentHODs(employee.departmentId);
+      const allIds = [...new Set([...notifyIds, ...hodIds])];
+      notify({
+        type: "OTHER",
+        title: "Employee Exit Initiated",
+        message: `Exit process initiated for ${employee.name}. ${assignedAssets.length} asset(s) pending handover before ${new Date(exitDate).toLocaleDateString()}`,
+        recipientIds: allIds,
+        priority: "HIGH",
+        createdById: user.employeeDbId,
+      }).catch(() => {});
+    }
 
     res.status(201).json(exit);
   } catch (e: any) {
@@ -210,6 +232,19 @@ export const completeExit = async (req: AuthenticatedRequest, res: Response) => 
       where: { id: exitId },
       data: { status: "COMPLETED" },
     });
+
+    // Notify admins about exit completion (for write-off / asset reconciliation)
+    const adminIds = await getAdminIds();
+    if (adminIds.length > 0) {
+      notify({
+        type: "OTHER",
+        title: "Employee Exit Completed",
+        message: `Exit record ${exit.exitNumber} marked as completed${exit.assetsPending > 0 ? ` with ${exit.assetsPending} asset(s) still pending handover` : ""}`,
+        recipientIds: adminIds,
+        priority: exit.assetsPending > 0 ? "HIGH" : "MEDIUM",
+        createdById: user.employeeDbId,
+      }).catch(() => {});
+    }
 
     res.json(updated);
   } catch (e: any) {

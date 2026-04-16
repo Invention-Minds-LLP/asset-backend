@@ -1,4 +1,4 @@
-import { Response } from "express";
+﻿import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
@@ -26,7 +26,7 @@ export const listMaterialRequests = async (req: AuthenticatedRequest, res: Respo
     if (status) where.status = String(status);
 
     // Department scoping for non-admin users
-    if (user?.role !== "ADMIN" && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.ticket = { departmentId: Number(user.departmentId) };
     }
 
@@ -134,7 +134,10 @@ export const approveMaterialRequest = async (req: AuthenticatedRequest, res: Res
     const id = Number(req.params.id);
     const { approvalRemarks, expectedDelivery } = req.body;
 
-    const existing = await prisma.materialRequest.findUnique({ where: { id } });
+    const existing = await prisma.materialRequest.findUnique({
+      where: { id },
+      include: { ticket: { select: { ticketId: true } } },
+    });
     if (!existing) {
       res.status(404).json({ error: "Material request not found" });
       return;
@@ -168,7 +171,7 @@ export const approveMaterialRequest = async (req: AuthenticatedRequest, res: Res
       await notify({
         type: "MATERIAL_REQUEST",
         title: "Material Request Approved",
-        message: `Your material request #${id} has been approved.${approvalRemarks ? ` Remarks: ${approvalRemarks}` : ""}`,
+        message: `Your material request for ticket ${existing.ticket.ticketId} has been approved.${approvalRemarks ? ` Remarks: ${approvalRemarks}` : ""}`,
         recipientIds: [existing.requestedById],
         priority: "MEDIUM",
         ticketId: existing.ticketId,
@@ -198,7 +201,10 @@ export const rejectMaterialRequest = async (req: AuthenticatedRequest, res: Resp
     const id = Number(req.params.id);
     const { approvalRemarks } = req.body;
 
-    const existing = await prisma.materialRequest.findUnique({ where: { id } });
+    const existing = await prisma.materialRequest.findUnique({
+      where: { id },
+      include: { ticket: { select: { ticketId: true } } },
+    });
     if (!existing) {
       res.status(404).json({ error: "Material request not found" });
       return;
@@ -231,7 +237,7 @@ export const rejectMaterialRequest = async (req: AuthenticatedRequest, res: Resp
       await notify({
         type: "MATERIAL_REQUEST",
         title: "Material Request Rejected",
-        message: `Your material request #${id} has been rejected.${approvalRemarks ? ` Reason: ${approvalRemarks}` : ""}`,
+        message: `Your material request for ticket ${existing.ticket.ticketId} has been rejected.${approvalRemarks ? ` Reason: ${approvalRemarks}` : ""}`,
         recipientIds: [existing.requestedById],
         priority: "MEDIUM",
         ticketId: existing.ticketId,

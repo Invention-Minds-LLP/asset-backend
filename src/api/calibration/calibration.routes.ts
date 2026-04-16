@@ -14,6 +14,7 @@ import {
   addCalibrationTemplateItems,
   updateCalibrationTemplate,
   deleteCalibrationTemplate,
+  getCalibrationHistoryPdf,
 } from "./calibration.controller";
 
 const router = express.Router();
@@ -29,6 +30,7 @@ router.delete("/schedules/:id", authenticateToken, deleteCalibrationSchedule);
 // ── History ────────────────────────────────────────────────────────────────────
 router.post("/history", authenticateToken, logCalibrationHistory);
 router.get("/history/asset/:assetId", authenticateToken, getCalibrationHistoryByAsset);
+router.get("/history/:id/pdf", authenticateToken, getCalibrationHistoryPdf);
 
 // ── Checklist Templates ────────────────────────────────────────────────────────
 router.get("/templates", authenticateToken, getAllCalibrationTemplates);

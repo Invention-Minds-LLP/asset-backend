@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import fs from 'fs';
 import XLSX from 'xlsx';
 import prisma from '../../prismaClient';
-import { generateAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
+import { generateAssetId, generateLegacyAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
 
 function parseDate(value: any): Date | null {
     if (value === null || value === undefined || value === '') return null;
@@ -49,13 +49,10 @@ function getFinancialYearParts(date = new Date()) {
 }
 
 async function createAssetWithGeneratedId(assetData: any) {
-    const assetId = await generateAssetId();
-    return await prisma.asset.create({
-        data: {
-            assetId,
-            ...assetData
-        }
-    });
+    const assetId = assetData.isLegacyAsset
+        ? await generateLegacyAssetId(assetData.purchaseDate)
+        : await generateAssetId(assetData.modeOfProcurement || "PURCHASE");
+    return await prisma.asset.create({ data: { assetId, ...assetData } });
 }
 
 
@@ -508,6 +505,8 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     continue;
                 }
 
+                const isLegacy = String(row.isLegacyAsset || '').trim().toLowerCase() === 'true' || String(row.isLegacyAsset || '') === '1';
+
                 const modeOfProcurement = String(row.modeOfProcurement || 'PURCHASE')
                     .trim()
                     .toUpperCase();
@@ -521,50 +520,31 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     continue;
                 }
 
-                // ---------------------------
-                // Mode-based validation
-                // ---------------------------
-                if (modeOfProcurement === 'PURCHASE') {
-                    if (!row.vendorName || !row.purchaseCost) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: 'For PURCHASE, vendorName and purchaseCost are required'
-                        });
-                        continue;
+                // Mode-based validation — relaxed for legacy assets
+                if (!isLegacy) {
+                    if (modeOfProcurement === 'PURCHASE') {
+                        if (!row.vendorName || !row.purchaseCost) {
+                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For PURCHASE, vendorName and purchaseCost are required' });
+                            continue;
+                        }
                     }
-                }
-
-                if (modeOfProcurement === 'DONATION') {
-                    if (!row.donorName || !row.donationDate) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: 'For DONATION, donorName and donationDate are required'
-                        });
-                        continue;
+                    if (modeOfProcurement === 'DONATION') {
+                        if (!row.donorName || !row.donationDate) {
+                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For DONATION, donorName and donationDate are required' });
+                            continue;
+                        }
                     }
-                }
-
-                if (modeOfProcurement === 'LEASE') {
-                    if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required'
-                        });
-                        continue;
+                    if (modeOfProcurement === 'LEASE') {
+                        if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
+                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required' });
+                            continue;
+                        }
                     }
-                }
-
-                if (modeOfProcurement === 'RENTAL') {
-                    if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required'
-                        });
-                        continue;
+                    if (modeOfProcurement === 'RENTAL') {
+                        if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
+                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required' });
+                            continue;
+                        }
                     }
                 }
 
@@ -649,6 +629,19 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     inspectionStatus: toStringOrNull(row.inspectionStatus),
                     inspectionRemarks: toStringOrNull(row.inspectionRemarks),
 
+                    // Legacy onboarding fields
+                    isLegacyAsset: isLegacy,
+                    dataAvailableSince: parseDate(row.dataAvailableSince),
+                    historicalMaintenanceCost: toNumber(row.historicalMaintenanceCost),
+                    historicalSparePartsCost: toNumber(row.historicalSparePartsCost),
+                    historicalOtherCost: toNumber(row.historicalOtherCost),
+                    historicalCostAsOf: parseDate(row.historicalCostAsOf),
+                    historicalCostNote: toStringOrNull(row.historicalCostNote),
+
+                    // Asset Pool linkage
+                    financialYearAdded: toStringOrNull(row.financialYearAdded),
+                    // assetPoolId resolved below after pool lookup
+
                     //     rfidCode: toStringOrNull(row.rfidCode),
                     //     qrCode: toStringOrNull(row.qrCode),
 
@@ -658,15 +651,78 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     //     pmFormatNotes: toStringOrNull(row.pmFormatNotes),
                 };
 
+                // Resolve poolReferenceCode → assetPoolId
+                let resolvedPoolId: number | null = null;
+                if (row.poolReferenceCode) {
+                    const pool = await prisma.assetPool.findUnique({
+                        where: { poolCode: String(row.poolReferenceCode).trim() }
+                    });
+                    if (pool) {
+                        resolvedPoolId = pool.id;
+                        (assetData as any).assetPoolId = pool.id;
+                    }
+                }
+
+                let savedAssetId: number;
                 if (existing) {
                     await prisma.asset.update({
                         where: { id: existing.id },
                         data: assetData
                     });
+                    savedAssetId = existing.id;
                     summary.assetsUpdated++;
                 } else {
-                    await createAssetWithGeneratedId(assetData);
+                    const created = await createAssetWithGeneratedId(assetData);
+                    savedAssetId = created.id;
                     summary.assetsCreated++;
+                }
+
+                // Update pool status/remainingQuantity after linking an asset
+                if (resolvedPoolId) {
+                    const pool = await prisma.assetPool.findUnique({ where: { id: resolvedPoolId } });
+                    if (pool) {
+                        const linkedCount = await prisma.asset.count({ where: { assetPoolId: resolvedPoolId } });
+                        const remaining = Math.max(0, pool.originalQuantity - linkedCount);
+                        await prisma.assetPool.update({
+                            where: { id: resolvedPoolId },
+                            data: {
+                                status: remaining === 0 ? 'COMPLETE' : 'PARTIAL',
+                            }
+                        });
+                    }
+                }
+
+                // Auto-create depreciation if method + rate + life are provided and no record exists yet
+                // Normalise common aliases → canonical values (SLM→SL, WDV→DB)
+                const rawDepMethod = toStringOrNull(row.depreciationMethod)?.toUpperCase();
+                const depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod ?? null);
+                const depRate   = toNumber(row.depreciationRate);
+                const depLife   = toNumber(row.expectedLifeYears);
+                const depStart  = parseDate(row.depreciationStart);
+                if (depMethod && depRate != null && depLife != null && depStart) {
+                    const existingDep = await prisma.assetDepreciation.findUnique({ where: { assetId: savedAssetId } });
+                    if (!existingDep) {
+                        const asset = await prisma.asset.findUnique({ where: { id: savedAssetId } });
+                        const cost = Number(asset?.purchaseCost ?? asset?.estimatedValue ?? 0);
+                        const openingDep = toNumber(row.openingAccumulatedDepreciation) ?? 0;
+                        await prisma.assetDepreciation.create({
+                            data: {
+                                assetId: savedAssetId,
+                                depreciationMethod: depMethod,
+                                depreciationRate: String(depRate),
+                                expectedLifeYears: depLife,
+                                depreciationStart: depStart,
+                                depreciationFrequency: 'YEARLY',
+                                salvageValue: null,
+                                accumulatedDepreciation: String(openingDep),
+                                currentBookValue: String(Math.max(0, cost - openingDep)),
+                                lastCalculatedAt: null,
+                                roundOff: false,
+                                decimalPlaces: 2,
+                                isActive: true,
+                            },
+                        });
+                    }
                 }
             } catch (err: any) {
                 summary.errors.push({
@@ -1606,3 +1662,133 @@ export async function importChecklistWorkbook(req: Request, res: Response) {
         return;
     }
 }
+// ─── Download Legacy Asset Import Template ───────────────────────────────────
+export const downloadLegacyTemplate = (req: Request, res: Response) => {
+    // Assets sheet — standard columns + legacy columns
+    const assetsHeaders = [
+        // Required
+        'referenceCode', 'assetName', 'assetType', 'assetCategory',
+        // Optional basic
+        'serialNumber', 'modeOfProcurement', 'department',
+        'purchaseDate', 'purchaseCost', 'vendorName',
+        'manufacturer', 'modelNumber', 'currentLocation', 'status',
+        // Legacy flag + opening balances
+        'isLegacyAsset',
+        'historicalMaintenanceCost',
+        'historicalSparePartsCost',
+        'historicalOtherCost',
+        'historicalCostAsOf',
+        'dataAvailableSince',
+        'historicalCostNote',
+        // Depreciation setup (optional — auto-created on import if provided)
+        'depreciationMethod',
+        'depreciationRate',
+        'expectedLifeYears',
+        'depreciationStart',
+        'openingAccumulatedDepreciation',
+    ];
+
+    const assetsExample = [
+        {
+            referenceCode: 'REF-001',
+            assetName: 'MRI Scanner',
+            assetType: 'Medical Equipment',
+            assetCategory: 'Radiology',
+            serialNumber: 'SN-12345',
+            modeOfProcurement: 'PURCHASE',
+            department: 'Radiology',
+            purchaseDate: '2021-06-01',
+            purchaseCost: 2500000,
+            vendorName: 'GE Healthcare',
+            manufacturer: 'GE',
+            modelNumber: 'SIGNA',
+            currentLocation: 'Block A - Room 101',
+            status: 'ACTIVE',
+            isLegacyAsset: 'true',
+            historicalMaintenanceCost: 180000,
+            historicalSparePartsCost: 45000,
+            historicalOtherCost: 15000,
+            historicalCostAsOf: '2024-03-31',
+            dataAvailableSince: '2024-04-01',
+            historicalCostNote: 'Based on service register and vendor invoices 2021–2024',
+            depreciationMethod: 'SL',
+            depreciationRate: 10,
+            expectedLifeYears: 10,
+            depreciationStart: '2021-06-01',
+            openingAccumulatedDepreciation: 750000,
+        },
+        {
+            referenceCode: 'REF-002',
+            assetName: 'Ventilator',
+            assetType: 'Life Support',
+            assetCategory: 'ICU Equipment',
+            serialNumber: '',
+            modeOfProcurement: 'PURCHASE',
+            department: 'ICU',
+            purchaseDate: '2020-01-15',
+            purchaseCost: 350000,
+            vendorName: 'Medtronic',
+            manufacturer: 'Medtronic',
+            modelNumber: 'PB980',
+            currentLocation: 'ICU - Bed 3',
+            status: 'ACTIVE',
+            isLegacyAsset: 'true',
+            historicalMaintenanceCost: 52000,
+            historicalSparePartsCost: 18000,
+            historicalOtherCost: 0,
+            historicalCostAsOf: '2024-03-31',
+            dataAvailableSince: '2024-04-01',
+            historicalCostNote: 'From maintenance logbook',
+            depreciationMethod: 'DB',
+            depreciationRate: 15,
+            expectedLifeYears: 8,
+            depreciationStart: '2020-01-15',
+            openingAccumulatedDepreciation: 157500,
+        },
+    ];
+
+    // Instructions sheet
+    const instructions = [
+        { Field: 'referenceCode', Required: 'YES', Notes: 'Unique code per asset. Used to match on re-import.' },
+        { Field: 'assetName', Required: 'YES', Notes: 'Full asset name' },
+        { Field: 'assetType', Required: 'YES', Notes: 'e.g. Medical Equipment, Furniture, IT Equipment' },
+        { Field: 'assetCategory', Required: 'YES', Notes: 'Category name — created automatically if not exists' },
+        { Field: 'serialNumber', Required: 'NO (legacy)', Notes: 'Leave blank if unknown for legacy assets' },
+        { Field: 'modeOfProcurement', Required: 'NO', Notes: 'PURCHASE / DONATION / LEASE / RENTAL. Default: PURCHASE' },
+        { Field: 'department', Required: 'NO', Notes: 'Department name — created automatically if not exists' },
+        { Field: 'purchaseDate', Required: 'NO', Notes: 'YYYY-MM-DD format' },
+        { Field: 'purchaseCost', Required: 'NO (legacy)', Notes: 'Original purchase cost in INR. Skip if unknown for legacy.' },
+        { Field: 'vendorName', Required: 'NO (legacy)', Notes: 'Vendor name — created automatically if not exists' },
+        { Field: 'status', Required: 'NO', Notes: 'ACTIVE / IN_STORE / IN_MAINTENANCE / RETIRED. Default: ACTIVE' },
+        { Field: 'isLegacyAsset', Required: 'NO', Notes: 'Set to true for assets onboarded from pre-system history' },
+        { Field: 'historicalMaintenanceCost', Required: 'NO', Notes: 'Total repair/service spend BEFORE system onboarding (INR)' },
+        { Field: 'historicalSparePartsCost', Required: 'NO', Notes: 'Total spare parts/consumables spend before onboarding (INR)' },
+        { Field: 'historicalOtherCost', Required: 'NO', Notes: 'Other historical costs — calibration, transport, etc. (INR)' },
+        { Field: 'historicalCostAsOf', Required: 'NO', Notes: 'Date up to which historical costs are captured (YYYY-MM-DD)' },
+        { Field: 'dataAvailableSince', Required: 'NO', Notes: 'Date from which live system tracking begins (YYYY-MM-DD)' },
+        { Field: 'historicalCostNote', Required: 'NO', Notes: 'Source of historical figures — e.g. "From service register 2021-2024"' },
+        { Field: 'depreciationMethod', Required: 'NO', Notes: 'SL (Straight Line) or DB (Declining Balance). Leave blank to skip depreciation setup.' },
+        { Field: 'depreciationRate', Required: 'NO', Notes: 'Annual depreciation rate in %. E.g. 10 for 10%.' },
+        { Field: 'expectedLifeYears', Required: 'NO', Notes: 'Total expected useful life of the asset in years.' },
+        { Field: 'depreciationStart', Required: 'NO', Notes: 'Date depreciation began (usually purchaseDate). YYYY-MM-DD format.' },
+        { Field: 'openingAccumulatedDepreciation', Required: 'NO', Notes: 'Amount already depreciated before system onboarding (INR). Sets correct opening book value = purchaseCost − this value.' },
+    ];
+
+    const wb = XLSX.utils.book_new();
+
+    // Sheet 1: Assets (with example rows)
+    const assetsWs = XLSX.utils.json_to_sheet(assetsExample, { header: assetsHeaders });
+    // Style header row width (approximate)
+    assetsWs['!cols'] = assetsHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, assetsWs, 'Assets');
+
+    // Sheet 2: Instructions
+    const instrWs = XLSX.utils.json_to_sheet(instructions);
+    instrWs['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 60 }];
+    XLSX.utils.book_append_sheet(wb, instrWs, 'Instructions');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=legacy-asset-import-template.xlsx');
+    res.send(buffer);
+};

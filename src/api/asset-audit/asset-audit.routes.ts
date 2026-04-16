@@ -8,10 +8,12 @@ import {
   verifyItem,
   completeAudit,
   getAuditSummary,
+  getAuditLocationOptions,
 } from "./asset-audit.controller";
 
 const router = express.Router();
 
+router.get("/locations", authenticateToken, getAuditLocationOptions);
 router.get("/", authenticateToken, getAllAudits);
 router.get("/:id", authenticateToken, getAuditById);
 router.post("/", authenticateToken, createAudit);

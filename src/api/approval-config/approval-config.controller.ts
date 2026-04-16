@@ -120,21 +120,21 @@ export const deleteApprovalConfig = async (req: AuthenticatedRequest, res: Respo
 export const seedApprovalConfigs = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const defaults = [
-      // PURCHASE_ORDER
-      { module: "PURCHASE_ORDER", level: 1, roleName: "HOD", minAmount: 0, maxAmount: 100000 },
-      { module: "PURCHASE_ORDER", level: 2, roleName: "FINANCE", minAmount: 100001, maxAmount: 500000 },
-      { module: "PURCHASE_ORDER", level: 3, roleName: "CEO_COO", minAmount: 500001, maxAmount: 2000000 },
-      { module: "PURCHASE_ORDER", level: 4, roleName: "ADMIN", minAmount: 2000001, maxAmount: null },
+      // PURCHASE_ORDER — roleName maps to approvalChain keys in purchase-order.controller.ts
+      { module: "PURCHASE_ORDER", level: 1, roleName: "HOD",        minAmount: 0,         maxAmount: 100000 },
+      { module: "PURCHASE_ORDER", level: 2, roleName: "MANAGEMENT", minAmount: 100001,    maxAmount: 500000 },
+      { module: "PURCHASE_ORDER", level: 3, roleName: "COO",        minAmount: 500001,    maxAmount: 2000000 },
+      { module: "PURCHASE_ORDER", level: 4, roleName: "CFO",        minAmount: 2000001,   maxAmount: null },
       // WORK_ORDER
-      { module: "WORK_ORDER", level: 1, roleName: "HOD", minAmount: 0, maxAmount: 100000 },
-      { module: "WORK_ORDER", level: 2, roleName: "FINANCE", minAmount: 100001, maxAmount: 500000 },
-      { module: "WORK_ORDER", level: 3, roleName: "CEO_COO", minAmount: 500001, maxAmount: 2000000 },
-      { module: "WORK_ORDER", level: 4, roleName: "ADMIN", minAmount: 2000001, maxAmount: null },
+      { module: "WORK_ORDER", level: 1, roleName: "HOD",        minAmount: 0,         maxAmount: 100000 },
+      { module: "WORK_ORDER", level: 2, roleName: "MANAGEMENT", minAmount: 100001,    maxAmount: 500000 },
+      { module: "WORK_ORDER", level: 3, roleName: "COO",        minAmount: 500001,    maxAmount: 2000000 },
+      { module: "WORK_ORDER", level: 4, roleName: "CFO",        minAmount: 2000001,   maxAmount: null },
       // DISPOSAL
-      { module: "DISPOSAL", level: 1, roleName: "HOD", minAmount: 0, maxAmount: 100000 },
-      { module: "DISPOSAL", level: 2, roleName: "FINANCE", minAmount: 100001, maxAmount: 500000 },
-      { module: "DISPOSAL", level: 3, roleName: "CEO_COO", minAmount: 500001, maxAmount: 2000000 },
-      { module: "DISPOSAL", level: 4, roleName: "ADMIN", minAmount: 2000001, maxAmount: null },
+      { module: "DISPOSAL", level: 1, roleName: "HOD",        minAmount: 0,         maxAmount: 100000 },
+      { module: "DISPOSAL", level: 2, roleName: "MANAGEMENT", minAmount: 100001,    maxAmount: 500000 },
+      { module: "DISPOSAL", level: 3, roleName: "COO",        minAmount: 500001,    maxAmount: 2000000 },
+      { module: "DISPOSAL", level: 4, roleName: "CFO",        minAmount: 2000001,   maxAmount: null },
     ];
 
     const results = [];

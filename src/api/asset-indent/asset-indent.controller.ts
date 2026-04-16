@@ -44,7 +44,7 @@ export const getAllIndents = async (req: AuthenticatedRequest, res: Response) =>
       where.departmentId = user.departmentId;
     }
 
-    const indents = await (prisma as any).assetIndent.findMany({
+    const indents = await prisma.assetIndent.findMany({
       where,
       include: {
         raisedBy: { select: { id: true, name: true, employeeID: true } },
@@ -65,7 +65,7 @@ export const getAllIndents = async (req: AuthenticatedRequest, res: Response) =>
 // GET /api/asset-indent/:id
 export const getIndentById = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const indent = await (prisma as any).assetIndent.findUnique({
+    const indent = await prisma.assetIndent.findUnique({
       where: { id: Number(req.params.id) },
       include: {
         raisedBy: { select: { id: true, name: true, employeeID: true, designation: true } },
@@ -115,7 +115,7 @@ export const createIndent = async (req: AuthenticatedRequest, res: Response) => 
 
     const indentNumber = await generateIndentNumber();
 
-    const indent = await (prisma as any).assetIndent.create({
+    const indent = await prisma.assetIndent.create({
       data: {
         indentNumber,
         raisedById: user.employeeDbId,
@@ -185,7 +185,7 @@ export const hodApproveIndent = async (req: AuthenticatedRequest, res: Response)
       return;
     }
 
-    const indent = await (prisma as any).assetIndent.findUnique({ where: { id: indentId } });
+    const indent = await prisma.assetIndent.findUnique({ where: { id: indentId } });
     if (!indent) {
       res.status(404).json({ message: "Indent not found" });
       return;
@@ -195,7 +195,7 @@ export const hodApproveIndent = async (req: AuthenticatedRequest, res: Response)
       return;
     }
 
-    const updated = await (prisma as any).assetIndent.update({
+    const updated = await prisma.assetIndent.update({
       where: { id: indentId },
       data: {
         hodApprovalStatus: decision,
@@ -268,7 +268,7 @@ export const managementApproveIndent = async (req: AuthenticatedRequest, res: Re
       return;
     }
 
-    const indent = await (prisma as any).assetIndent.findUnique({ where: { id: indentId } });
+    const indent = await prisma.assetIndent.findUnique({ where: { id: indentId } });
     if (!indent) {
       res.status(404).json({ message: "Indent not found" });
       return;
@@ -278,7 +278,7 @@ export const managementApproveIndent = async (req: AuthenticatedRequest, res: Re
       return;
     }
 
-    const updated = await (prisma as any).assetIndent.update({
+    const updated = await prisma.assetIndent.update({
       where: { id: indentId },
       data: {
         managementApprovalStatus: decision,
@@ -327,7 +327,7 @@ export const fulfillIndent = async (req: AuthenticatedRequest, res: Response) =>
     const indentId = Number(req.params.id);
     const { fulfilledAssetId } = req.body;
 
-    const indent = await (prisma as any).assetIndent.findUnique({ where: { id: indentId } });
+    const indent = await prisma.assetIndent.findUnique({ where: { id: indentId } });
     if (!indent) {
       res.status(404).json({ message: "Indent not found" });
       return;
@@ -337,7 +337,7 @@ export const fulfillIndent = async (req: AuthenticatedRequest, res: Response) =>
       return;
     }
 
-    const updated = await (prisma as any).assetIndent.update({
+    const updated = await prisma.assetIndent.update({
       where: { id: indentId },
       data: {
         status: "FULFILLED",
@@ -373,7 +373,7 @@ export const cancelIndent = async (req: AuthenticatedRequest, res: Response) => 
     const user = mustUser(req);
     const indentId = Number(req.params.id);
 
-    const indent = await (prisma as any).assetIndent.findUnique({ where: { id: indentId } });
+    const indent = await prisma.assetIndent.findUnique({ where: { id: indentId } });
     if (!indent) {
       res.status(404).json({ message: "Indent not found" });
       return;
@@ -387,10 +387,24 @@ export const cancelIndent = async (req: AuthenticatedRequest, res: Response) => 
       return;
     }
 
-    const updated = await (prisma as any).assetIndent.update({
+    const updated = await prisma.assetIndent.update({
       where: { id: indentId },
       data: { status: "CANCELLED" },
     });
+
+    // Notify HOD about cancellation
+    if (indent.departmentId) {
+      getDepartmentHODs(indent.departmentId).then(hodIds =>
+        notify({
+          type: "OTHER",
+          title: `Indent ${indent.indentNumber} Cancelled`,
+          message: `Asset indent for "${indent.assetName}" has been cancelled by the raiser`,
+          recipientIds: hodIds,
+          priority: "MEDIUM",
+          createdById: user.employeeDbId,
+        })
+      ).catch(() => {});
+    }
 
     res.json(updated);
   } catch (e: any) {

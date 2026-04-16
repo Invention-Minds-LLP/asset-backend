@@ -1,6 +1,7 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { notify, getAdminIds } from "../../utilis/notificationHelper";
 
 // GET /asset-audits
 export const getAllAudits = async (
@@ -69,27 +70,67 @@ export const getAuditById = async (
   }
 };
 
+// GET /asset-audits/locations — distinct floor/block/room values from active approved locations
+export const getAuditLocationOptions = async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const rows = await prisma.assetLocation.findMany({
+      where: { isActive: true, status: "APPROVED" },
+      select: { floor: true, block: true, room: true },
+      distinct: ["floor", "block", "room"],
+      orderBy: [{ floor: "asc" }, { block: "asc" }, { room: "asc" }],
+    });
+
+    const floors = [...new Set(rows.map(r => r.floor).filter(Boolean))].sort();
+    const blocks = [...new Set(rows.map(r => r.block).filter(Boolean))].sort();
+    const rooms  = [...new Set(rows.map(r => r.room).filter(Boolean))].sort();
+
+    res.json({ data: { floors, blocks, rooms, all: rows } });
+  } catch (error: any) {
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
 // POST /asset-audits
 export const createAudit = async (
   req: AuthenticatedRequest,
   res: Response
 ) => {
   try {
-    const { auditName, auditDate, departmentId, branchId } = req.body;
+    const { auditName, auditDate, departmentId, branchId, floor, block, room } = req.body;
 
     if (!auditName || !auditDate) {
       res.status(400).json({ message: "auditName and auditDate are required" });
       return;
     }
 
-    const assetWhere: any = {};
-    if (departmentId) assetWhere.departmentId = Number(departmentId);
-    if (branchId) assetWhere.branchId = Number(branchId);
+    let assetIds: number[];
 
-    const assets = await prisma.asset.findMany({
-      where: assetWhere,
-      select: { id: true },
-    });
+    if (floor || block || room) {
+      // Location-based: find assets whose current active approved location matches
+      const locationWhere: any = { isActive: true, status: "APPROVED" };
+      if (floor) locationWhere.floor = floor;
+      if (block) locationWhere.block = block;
+      if (room)  locationWhere.room  = room;
+
+      const locations = await prisma.assetLocation.findMany({
+        where: locationWhere,
+        select: { assetId: true },
+        distinct: ["assetId"],
+      });
+      assetIds = locations.map(l => l.assetId);
+
+      console.log(`Found ${assetIds.length} assets for location filter:`, { floor, block, room });
+    } else {
+      const assetWhere: any = { status: { not: "DISPOSED" } };
+      if (departmentId) assetWhere.departmentId = Number(departmentId);
+      if (branchId) assetWhere.branchId = Number(branchId);
+      const assets = await prisma.asset.findMany({ where: assetWhere, select: { id: true } });
+      assetIds = assets.map(a => a.id);
+    }
+
+    const scopeNote = floor || block || room
+      ? `Location: ${[floor, block, room].filter(Boolean).join(" / ")}`
+      : undefined;
 
     const audit = await prisma.assetAudit.create({
       data: {
@@ -99,17 +140,16 @@ export const createAudit = async (
         departmentId: departmentId ? Number(departmentId) : null,
         branchId: branchId ? Number(branchId) : null,
         conductedById: req.user?.id ?? null,
-        totalAssets: assets.length,
+        totalAssets: assetIds.length,
+        ...(scopeNote ? { description: scopeNote } : {}),
         items: {
-          create: assets.map((asset) => ({
-            assetId: asset.id,
+          create: assetIds.map((id) => ({
+            assetId: id,
             status: "PENDING",
           })),
         },
       },
-      include: {
-        items: true,
-      },
+      include: { items: true },
     });
 
     res.status(201).json({ data: audit, message: "Audit created successfully" });
@@ -244,6 +284,18 @@ export const completeAudit = async (
         completedAt: new Date(),
       },
     });
+
+    // Notify admins with audit results
+    getAdminIds().then(adminIds =>
+      notify({
+        type: "OTHER",
+        title: "Asset Audit Completed",
+        message: `Audit "${audit.auditName}" completed: ${verifiedCount} verified, ${missingCount} missing, ${mismatchCount} mismatched out of ${items.length} assets`,
+        recipientIds: adminIds,
+        priority: missingCount > 0 || mismatchCount > 0 ? "HIGH" : "MEDIUM",
+        createdById: req.user?.id ?? undefined,
+      })
+    ).catch(() => {});
 
     res.json({ data: updated, message: "Audit completed" });
   } catch (error: any) {

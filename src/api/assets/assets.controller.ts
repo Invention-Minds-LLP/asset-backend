@@ -6,7 +6,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
-import { generateAssetId } from "../../utilis/assetIdGenerator";
+import { generateAssetId, generateLegacyAssetId } from "../../utilis/assetIdGenerator";
 
 
 const FTP_CONFIG = {
@@ -36,9 +36,9 @@ export const getAllAssets = async (req: Request, res: Response) => {
 
     let where: any = {};
 
-    if (role === 'ADMIN' || role === 'CEO_COO') {
+    if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS') {
       where = {};
-    } else if (role === 'HOD' || role === 'FINANCE' || role === 'OPERATIONS') {
+    } else if (role === 'HOD') {
       where = {
         departmentId: Number(departmentId)
       };
@@ -75,7 +75,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
 export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
   try {
     const assets = await prisma.asset.findMany({
-      where: { status: { notIn: ["DISPOSED", "SCRAPPED"] } },
+      where: { status: { notIn: ["DISPOSED", "SCRAPPED", "IN_STORE", "RETIRED", "CONDEMNED", "REJECTED"] } },
       select: {
         id: true,
         assetId: true,
@@ -181,17 +181,19 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
-    // ── Temp Asset ID — real ID issued when HOD acknowledges the assignment ──
-    const newAssetId = `TEMP-${Date.now()}`;
+    // ── Asset ID — legacy assets get a legacy ID immediately; others get TEMP ──
+    const newAssetId = data.isLegacyAsset === true || data.isLegacyAsset === 'true'
+      ? await generateLegacyAssetId(data.purchaseDate ?? null)
+      : `TEMP-${Date.now()}`;
 
     // Auto-assign supervisor for department
-    let supervisorId: number | null = null;
-    if (data.departmentId) {
-      const supervisor = await prisma.employee.findFirst({
-        where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
-      });
-      supervisorId = supervisor?.id ?? null;
-    }
+    // let supervisorId: number | null = null;
+    // if (data.departmentId) {
+    //   const supervisor = await prisma.employee.findFirst({
+    //     where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
+    //   });
+    //   supervisorId = supervisor?.id ?? null;
+    // }
 
     // For DONATION / LEASE / RENTAL, inspection checklist must be completed first
     const requiresInspection = ["DONATION", "LEASE", "RENTAL"].includes(data.modeOfProcurement || "PURCHASE");
@@ -211,6 +213,12 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         assetId: newAssetId,
         assetName: data.assetName,
         assetType: data.assetType,
+        assetNature: data.assetNature ?? "TANGIBLE",
+        intangibleSubType: data.intangibleSubType ?? null,
+        usefulLifeYears: data.usefulLifeYears ? Number(data.usefulLifeYears) : null,
+        amortizationMethod: data.amortizationMethod ?? null,
+        amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
+        residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
         assetCategoryId: data.assetCategoryId,
         rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
         referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
@@ -226,6 +234,9 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         purchaseDate: data.purchaseDate ? new Date(data.purchaseDate) : null,
         deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
         purchaseCost: data.purchaseCost,
+        purchaseVoucherNo: data.purchaseVoucherNo ?? null,
+        purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
+        purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
         vendorId: data.vendorId,
 
         // DONATION
@@ -265,9 +276,22 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         inspectionStatus: data.inspectionStatus,
 
         departmentId: data.departmentId ? Number(data.departmentId) : null,
-        supervisorId: supervisorId,
+        // supervisorId: supervisorId,
         expectedLifetime: data.expectedLifetime ? Number(data.expectedLifetime) : null,
         expectedLifetimeUnit: data.expectedLifetimeUnit ?? null,
+
+        // ── Legacy onboarding fields ──────────────────────────────────────────
+        isLegacyAsset: data.isLegacyAsset ? true : false,
+        dataAvailableSince: data.dataAvailableSince ? new Date(data.dataAvailableSince) : null,
+        historicalMaintenanceCost: data.historicalMaintenanceCost ? String(data.historicalMaintenanceCost) : null,
+        historicalSparePartsCost: data.historicalSparePartsCost ? String(data.historicalSparePartsCost) : null,
+        historicalOtherCost: data.historicalOtherCost ? String(data.historicalOtherCost) : null,
+        historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
+        historicalCostNote: data.historicalCostNote ?? null,
+
+        // ── Asset Pool linkage ────────────────────────────────────────────────
+        assetPoolId: data.assetPoolId ? Number(data.assetPoolId) : null,
+        financialYearAdded: data.financialYearAdded ?? null,
 
         status: "IN_STORE",
       } as any
@@ -275,7 +299,80 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
 
     logAction({ entityType: "ASSET", entityId: asset.id, action: "CREATE", description: `Asset ${asset.assetId} created`, newValue: JSON.stringify(asset), performedById: (req as any).user?.employeeDbId });
 
-    res.status(201).json(asset);
+    // ── Pool linkage post-processing ─────────────────────────────────────────
+    if (data.assetPoolId) {
+      const poolId = Number(data.assetPoolId);
+
+      // 1. Update pool status (PARTIAL / COMPLETE)
+      const pool = await prisma.assetPool.findUnique({ where: { id: poolId } });
+      if (pool) {
+        const linkedCount = await prisma.asset.count({ where: { assetPoolId: poolId } });
+        const remaining = pool.originalQuantity - linkedCount;
+        await prisma.assetPool.update({
+          where: { id: poolId },
+          data: { status: remaining <= 0 ? "COMPLETE" : "PARTIAL" },
+        });
+      }
+
+      // 2. Auto-create depreciation with proportional opening balance if:
+      //    - asset has purchaseCost
+      //    - pool has a FA schedule uploaded
+      //    - no depreciation record exists yet
+      //    - req.body.autoProportionalDep === true (frontend opt-in) OR depreciationMethod provided
+      const shouldAutoDep = data.autoProportionalDep || data.depreciationMethod;
+      if (shouldAutoDep && data.purchaseCost) {
+        const existingDep = await prisma.assetDepreciation.findUnique({ where: { assetId: asset.id } });
+        if (!existingDep) {
+          const schedules = await prisma.assetPoolDepreciationSchedule.findMany({
+            where: { poolId },
+            orderBy: { financialYearEnd: "desc" },
+            take: 1,
+          });
+          const latestSched = schedules[0] ?? null;
+
+          if (latestSched) {
+            const assetCost      = Number(data.purchaseCost);
+            const poolGross      = Number(latestSched.closingGrossBlock);
+            const poolAccDep     = Number(latestSched.closingAccumulatedDep);
+            const shareRatio     = poolGross > 0 ? assetCost / poolGross : 0;
+            const openingAccDep  = Math.round(poolAccDep * shareRatio);
+            const openingBV      = Math.max(0, assetCost - openingAccDep);
+            const depMethod      = data.depreciationMethod || "SL";
+            const depRate        = data.depreciationRate ?? Number(latestSched.depreciationRate);
+            const depStart       = data.depreciationStart
+              ? new Date(data.depreciationStart)
+              : (data.purchaseDate ? new Date(data.purchaseDate) : new Date(latestSched.financialYearEnd));
+
+            await prisma.assetDepreciation.create({
+              data: {
+                assetId:                asset.id,
+                depreciationMethod:     depMethod,
+                depreciationRate:       String(depRate),
+                expectedLifeYears:      data.expectedLifeYears ? Number(data.expectedLifeYears) : 10,
+                depreciationStart:      depStart,
+                depreciationFrequency:  data.depreciationFrequency || "YEARLY",
+                salvageValue:           null,
+                accumulatedDepreciation: String(openingAccDep),
+                currentBookValue:       String(openingBV),
+                lastCalculatedAt:       null,
+                roundOff:               false,
+                decimalPlaces:          2,
+                isActive:               true,
+                createdById:            (req as any).user?.employeeDbId ?? null,
+              },
+            });
+          }
+        }
+      }
+    }
+
+    // Reload asset with depreciation if auto-created
+    const finalAsset = await prisma.asset.findUnique({
+      where: { id: asset.id },
+      include: { depreciation: true },
+    });
+
+    res.status(201).json(finalAsset);
     return;
 
   } catch (err) {
@@ -299,7 +396,7 @@ export const hodApproveAsset = async (req: AuthenticatedRequest, res: Response) 
 
     if (action === "APPROVED") {
       // Now generate the real Asset ID
-      const newAssetId = await generateAssetId();
+      const newAssetId = await generateAssetId((asset as any).modeOfProcurement || "PURCHASE");
 
       // Auto-assign supervisor for location
       let supervisorId = (asset as any).supervisorId;
@@ -483,6 +580,13 @@ export const updateAsset = async (req: Request, res: Response) => {
     const updateData: any = {
       assetName: data.assetName,
       assetType: data.assetType,
+      assetNature: data.assetNature ?? "TANGIBLE",
+      // Intangible-specific
+      intangibleSubType: data.intangibleSubType ?? null,
+      usefulLifeYears: data.usefulLifeYears ? Number(data.usefulLifeYears) : null,
+      amortizationMethod: data.amortizationMethod ?? null,
+      amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
+      residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
       referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
       serialNumber: data.serialNumber,
       assetPhoto: data.assetPhoto,
@@ -511,6 +615,15 @@ export const updateAsset = async (req: Request, res: Response) => {
       // slaDetails: data.slaDetails,
 
       status: data.status,
+
+      // ── Legacy onboarding fields ──────────────────────────────────────────
+      isLegacyAsset: data.isLegacyAsset ? true : false,
+      dataAvailableSince: data.dataAvailableSince ? new Date(data.dataAvailableSince) : null,
+      historicalMaintenanceCost: data.historicalMaintenanceCost != null ? String(data.historicalMaintenanceCost) : null,
+      historicalSparePartsCost: data.historicalSparePartsCost != null ? String(data.historicalSparePartsCost) : null,
+      historicalOtherCost: data.historicalOtherCost != null ? String(data.historicalOtherCost) : null,
+      historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
+      historicalCostNote: data.historicalCostNote ?? null,
     };
 
     // ---------------------------
@@ -564,7 +677,10 @@ export const updateAsset = async (req: Request, res: Response) => {
         purchaseOrderNo: data.purchaseOrderNo,
         purchaseOrderDate: data.purchaseOrderDate ? new Date(data.purchaseOrderDate) : null,
         deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
-        purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null
+        purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null,
+        purchaseVoucherNo: data.purchaseVoucherNo ?? null,
+        purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
+        purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
       });
     }
 

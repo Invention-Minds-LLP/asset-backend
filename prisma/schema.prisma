@@ -112,6 +112,15 @@ model Asset {
   assetId           String        @unique
   assetName         String
   assetType         String
+  assetNature       AssetNature  @default(TANGIBLE)
+
+  // Intangible-specific
+  intangibleSubType     IntangibleSubType?
+  usefulLifeYears       Int?
+  amortizationMethod    AmortizationMethod?
+  amortizationStartDate DateTime?
+  residualValuePercent  Float?
+
   assetCategoryId   Int
   assetCategory     AssetCategory @relation(fields: [assetCategoryId], references: [id])
   serialNumber      String        @unique
@@ -135,11 +144,14 @@ model Asset {
   installedAt DateTime?
 
   // PURCHASE
-  invoiceNumber     String?
-  purchaseOrderNo   String?
-  purchaseOrderDate DateTime?
-  deliveryDate      DateTime?
-  purchaseCost      Decimal?  @db.Decimal(12, 2)
+  invoiceNumber        String?
+  purchaseOrderNo      String?
+  purchaseOrderDate    DateTime?
+  deliveryDate         DateTime?
+  purchaseCost         Decimal?  @db.Decimal(12, 2)
+  purchaseVoucherNo    String?
+  purchaseVoucherDate  DateTime?
+  purchaseVoucherId    Int?
 
   // DONATION
   donorName        String?
@@ -299,11 +311,13 @@ model Asset {
   calibrationTemplates         CalibrationChecklistTemplate[]
   supportMatrixes              AssetSupportMatrix[]
   disposals                    AssetDisposal[]
+  eWasteRecords                EWasteRecord[]
   auditItems                   AssetAuditItem[]               @relation("AuditItems")
   indentFulfillments           AssetIndent[]                  @relation("IndentFulfilledAsset")
   exitAssets                   EmployeeExitAsset[]            @relation("ExitAssets")
   serviceVisits                ServiceVisit[]                 @relation("AssetServiceVisits")
   revenueEntries               AssetRevenueEntry[]
+  serviceInvoices              ServiceInvoice[]
   decisionLogs                 DecisionEngineLog[]            @relation("DecisionLogs")
 
   // Procurement linkage (optional — nullable FKs, Asset works without PO/GRA)
@@ -314,11 +328,31 @@ model Asset {
   workOrderCapexId  Int?
   workOrderCapexRef WorkOrder?     @relation("CapExAssets", fields: [workOrderCapexId], references: [id])
 
+  // Accounts module — purchase vouchers where this asset is referenced as the subject
+  purchaseVouchers PurchaseVoucher[]    @relation("AssetPurchaseVouchers")
+
   // Work orders on this asset
   workOrders      WorkOrder[]           @relation("AssetWorkOrders")
   costAllocations AssetCostAllocation[] @relation("CostAllocations")
   rateCard        AssetRateCard?        @relation("AssetRateCard")
   dailyUsageLogs  AssetDailyUsageLog[]  @relation("DailyUsageLogs")
+
+  // ── Legacy Asset Onboarding ──────────────────────────────────────────────
+  // Used when onboarding assets from companies with 2+ years of existing history.
+  // Captures all pre-system costs as opening balances so dashboards show true TCO.
+  isLegacyAsset              Boolean?  @default(false)
+  dataAvailableSince         DateTime? // date from which live tracking begins in this system
+  historicalMaintenanceCost  Decimal?  @db.Decimal(12, 2) // total repair/service spend before system
+  historicalSparePartsCost   Decimal?  @db.Decimal(12, 2) // total spare parts/consumables before system
+  historicalOtherCost        Decimal?  @db.Decimal(12, 2) // misc historical costs (transport, calibration etc.)
+  historicalCostAsOf         DateTime? // "costs as of this date" — the closing date of pre-system history
+  historicalCostNote         String?   @db.Text           // free text explanation / source of figures
+
+  // ── Asset Pool (phased digitization) ────────────────────────────────────
+  // When an asset is extracted from a bulk pool and individually entered, link it back.
+  assetPoolId                Int?
+  financialYearAdded         String?   // FY in which this individual record was digitized, e.g. "FY2023-24"
+  assetPool                  AssetPool? @relation(fields: [assetPoolId], references: [id])
 
   @@index([status])
   @@index([assetCategoryId])
@@ -478,6 +512,7 @@ model Ticket {
   materialRequests          MaterialRequest[]
   workOrders                WorkOrder[]               @relation("TicketWorkOrders")
 
+  serviceInvoices      ServiceInvoice[]
   @@index([assetId, createdAt])
   @@index([departmentId, status])
   @@map("ticket")
@@ -519,6 +554,11 @@ model MaintenanceHistory {
   actualDoneAt  DateTime?
   wasLate       Boolean
   performedBy   String
+  // Who performed the service
+  performedByType       String?  // INTERNAL | VENDOR | EXTERNAL_SERVICE
+  vendorId              Int?
+  vendor                Vendor?  @relation(fields: [vendorId], references: [id])
+  externalServiceCenter String?  // free-text name when no vendor master record
   notes         String?
   serviceReport String?
   // Cost capture for finance excel
@@ -595,6 +635,9 @@ model AssetCategory {
   assetSlaMatrices              AssetSlaMatrix[]
   assetIndents                  AssetIndent[]
   decisionEngineConfigs         DecisionEngineConfig[]         @relation("DecisionEngineCategory")
+  glMapping                     AssetGLMapping?
+  capexBudgets                  CapexBudget[]                  @relation("CapexBudgetCat")
+  assetPools                    AssetPool[]
 
   @@map("assetcategory")
 }
@@ -623,6 +666,10 @@ model Department {
   assetTransferTo    AssetTransferHistory[]  @relation("AssetTransferToDept")
   assetIndents       AssetIndent[]
   purchaseOrders     PurchaseOrder[]         @relation("PODepartment")
+  financeVouchers    FinanceVoucher[]        @relation("VoucherDept")
+  voucherLines       FinanceVoucherLine[]    @relation("FVLineCostCentre")
+  capexBudgets       CapexBudget[]           @relation("CapexBudgetDept")
+  assetPools         AssetPool[]             @relation("AssetPoolDepartment")
 
   @@map("department")
 }
@@ -705,6 +752,31 @@ model Employee {
   subAssetReplacements        SubAssetReplacement[]
   decisionEvaluations         DecisionEngineLog[]   @relation("DecisionEvaluator")
   usageLogsRecorded           AssetDailyUsageLog[]  @relation("UsageLoggedBy")
+  pvApprovals                 PurchaseVoucher[]     @relation("PVApprovedBy")
+  pvCreated                   PurchaseVoucher[]     @relation("PVCreatedBy")
+  pmtApprovals                PaymentVoucher[]      @relation("PMTApprovedBy")
+  pmtCreated                  PaymentVoucher[]      @relation("PMTCreatedBy")
+  jeCreated                   JournalEntry[]        @relation("JECreatedBy")
+
+  batchDepreciationRuns      BatchDepreciationRun[] @relation("BatchRunBy")
+  batchDepreciationApprovals BatchDepreciationRun[] @relation("BatchApprovedBy")
+
+  // Finance Engine relations
+  financeConfigUpdates       FinanceConfig[]        @relation("FinanceConfigUpdatedBy")
+  financeVouchersCreated     FinanceVoucher[]       @relation("FVCreatedBy")
+  financeVouchersApproved    FinanceVoucher[]       @relation("FVApprovedBy")
+  exportBatchesCreated       ExportBatch[]          @relation("ExportBatchCreatedBy")
+  capexBudgetsCreated        CapexBudget[]          @relation("CapexBudgetCreatedBy")
+  manualLedgerEntries        ManualLedgerEntry[]    @relation("MLECreatedBy")
+  assetPoolsCreated          AssetPool[]                        @relation("AssetPoolCreatedBy")
+  assetPoolAdjustments       AssetPoolAdjustment[]              @relation("AssetPoolAdjCreatedBy")
+  assetPoolDepSchedules      AssetPoolDepreciationSchedule[]    @relation("AssetPoolDepSchedCreatedBy")
+  eWasteHodSigns             EWasteRecord[]                     @relation("EWasteHodSign")
+  eWasteOpsSigns             EWasteRecord[]                     @relation("EWasteOpsSign")
+  eWasteSecSigns             EWasteRecord[]                     @relation("EWasteSecSign")
+  eWasteCreated              EWasteRecord[]                     @relation("EWasteCreatedBy")
+  serviceInvoicesCreated     ServiceInvoice[]                   @relation("ServiceInvoiceCreatedBy")
+  serviceInvoicesApproved    ServiceInvoice[]                   @relation("ServiceInvoiceApprovedBy")
 
   @@map("employee")
 }
@@ -735,8 +807,9 @@ model Vendor {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @default(now()) @updatedAt
 
-  serviceContracts ServiceContract[]
-  spareParts       SparePart[]
+  serviceContracts    ServiceContract[]
+  spareParts          SparePart[]
+  maintenanceHistories MaintenanceHistory[]
 
   calibrationSchedules    CalibrationSchedule[]   @relation("VendorCalibrationSchedule")
   calibrationHistories    CalibrationHistory[]    @relation("VendorCalibrationHistory")
@@ -744,6 +817,9 @@ model Vendor {
   warranties              Warranty[]
   purchaseOrders          PurchaseOrder[]
   goodsReceipts           GoodsReceipt[]
+  purchaseVouchers        PurchaseVoucher[] @relation("VendorPurchaseVouchers")
+  paymentVouchers         PaymentVoucher[]  @relation("VendorPaymentVouchers")
+  serviceInvoices         ServiceInvoice[]  @relation("ServiceInvoiceVendor")
 
   @@map("vendor")
 }
@@ -785,6 +861,10 @@ model AssetDepreciation {
   depreciationFrequency   String? // MONTHLY | YEARLY
   isActive                Boolean? @default(true)
 
+  // Round-off settings (per-asset, applies only to depreciation amounts)
+  roundOff      Boolean @default(false)
+  decimalPlaces Int     @default(2) // 0 = nearest rupee, 2 = paise
+
   createdById Int?
   updatedById Int?
 
@@ -808,11 +888,44 @@ model DepreciationLog {
   doneBy   Employee? @relation(fields: [doneById], references: [id])
 
   reason String?
+  batchRunId Int?
+  batchRun   BatchDepreciationRun? @relation(fields: [batchRunId], references: [id])
 
   createdAt DateTime @default(now())
 
   @@index([assetId, periodEnd])
   @@map("depreciationlog")
+}
+
+// ── Batch Depreciation Run ─────────────────────────────────────────────────
+// Each run starts as DRAFT, CFO approves → APPROVED (values committed), or REJECTED
+model BatchDepreciationRun {
+  id          Int      @id @default(autoincrement())
+  runNumber   String   @unique // BDR-2025-001
+  status      String   @default("DRAFT") // DRAFT | APPROVED | REJECTED
+  fiscalYear  Int      // e.g. 2025 = FY 2025-26
+  periodLabel String?  // e.g. "FY 2025-26 Q1"
+
+  totalAssets      Int     @default(0)
+  totalDepreciation Decimal @db.Decimal(14, 2) @default(0)
+
+  notes          String?  @db.Text
+  rejectionReason String? @db.Text
+
+  runById    Int
+  runBy      Employee @relation("BatchRunBy", fields: [runById], references: [id])
+
+  approvedById Int?
+  approvedBy   Employee? @relation("BatchApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  logs            DepreciationLog[]
+  financeVouchers FinanceVoucher[] @relation("VoucherBatchRun")
+
+  @@map("batchdepreciationrun")
 }
 
 model AssetInsurance {
@@ -1051,6 +1164,7 @@ model MaintenanceSchedule {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
+  serviceInvoices      ServiceInvoice[]
   @@index([assetId, nextDueAt])
   @@map("maintenanceschedule")
 }
@@ -1103,6 +1217,7 @@ model ServiceContract {
 
   maintenanceHistories MaintenanceHistory[]
   serviceVisits        ServiceVisit[]
+  serviceInvoices      ServiceInvoice[]
 
   @@index([assetId, endDate])
   @@map("servicecontract")
@@ -1728,6 +1843,7 @@ model CalibrationSchedule {
   updatedAt DateTime @default(now()) @updatedAt
 
   histories CalibrationHistory[]
+  serviceInvoices ServiceInvoice[]
 
   @@index([assetId, nextDueAt])
   @@map("calibrationschedule")
@@ -2313,8 +2429,76 @@ model AssetDisposal {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@index([assetId])
+  eWasteRecord  EWasteRecord?
+
   @@index([status])
   @@map("assetdisposal")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// E-Waste Management — post-scrap 3-stage sign-off chain
+// Triggered automatically when AssetDisposal (type=SCRAP) is COMPLETED.
+// ═══════════════════════════════════════════════════════════════════════════════
+model EWasteRecord {
+  id              Int          @id @default(autoincrement())
+  eWasteRefNo     String       @unique // EW-2026-00001
+  assetDisposalId Int          @unique
+  assetDisposal   AssetDisposal @relation(fields: [assetDisposalId], references: [id])
+  assetId         Int
+  asset           Asset         @relation(fields: [assetId], references: [id])
+
+  // Status flow
+  status String @default("PENDING_HOD")
+  // PENDING_HOD → PENDING_OPERATIONS → PENDING_SECURITY → CLOSED | REJECTED
+
+  // Asset condition at time of e-waste handover
+  assetCondition   String? // FUNCTIONAL | NON_FUNCTIONAL | DAMAGED
+  assetDescription String? @db.Text
+
+  // Data sanitisation (for IT assets)
+  dataWiped          Boolean @default(false)
+  dataWipeMethod     String? // DBAN | SECURE_ERASE | PHYSICAL_DESTRUCTION | NA
+  dataWipeCertUrl    String? // upload URL
+
+  // Recycler details
+  recyclerName       String?
+  recyclerAuthNo     String? // CPCB authorization number
+  recyclerContact    String?
+  handoverDate       DateTime?
+  eWasteCertUrl      String? // certificate from recycler
+
+  // ── Stage 1: HOD sign ──────────────────────────────────────────
+  hodSignedById   Int?
+  hodSignedBy     Employee? @relation("EWasteHodSign", fields: [hodSignedById], references: [id])
+  hodSignedAt     DateTime?
+  hodSignature    String?   @db.LongText  // base64 PNG of drawn signature
+  hodRemarks      String?   @db.Text
+
+  // ── Stage 2: Operations sign ────────────────────────────────────
+  operationsSignedById Int?
+  operationsSignedBy   Employee? @relation("EWasteOpsSign", fields: [operationsSignedById], references: [id])
+  operationsSignedAt   DateTime?
+  operationsSignature  String?   @db.LongText
+  operationsRemarks    String?   @db.Text
+
+  // ── Stage 3: Security sign ──────────────────────────────────────
+  securitySignedById Int?
+  securitySignedBy   Employee? @relation("EWasteSecSign", fields: [securitySignedById], references: [id])
+  securitySignedAt   DateTime?
+  securitySignature  String?   @db.LongText
+  securityRemarks    String?   @db.Text
+  gatePassNo         String?
+
+  closedAt    DateTime?
+  createdById Int?
+  createdBy   Employee? @relation("EWasteCreatedBy", fields: [createdById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([assetId])
+  @@map("ewasterecord")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2355,6 +2539,7 @@ model AssetAudit {
   branchId     Int?
 
   conductedById Int?
+  description   String? @db.Text
   remarks       String? @db.Text
 
   totalAssets   Int @default(0)
@@ -2867,8 +3052,9 @@ model GoodsReceipt {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
 
-  lines  GoodsReceiptLine[]
-  assets Asset[]            @relation("GRAAssets")
+  lines            GoodsReceiptLine[]
+  assets           Asset[]           @relation("GRAAssets")
+  purchaseVouchers PurchaseVoucher[] @relation("GRAPurchaseVouchers")
 
   @@index([purchaseOrderId])
   @@index([status])
@@ -3285,4 +3471,595 @@ model ApprovalConfig {
 
   @@unique([module, level])
   @@map("approvalconfig")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ASSET NATURE — Tangible vs Intangible classification
+// ═══════════════════════════════════════════════════════════════════════════════
+enum AssetNature {
+  TANGIBLE
+  INTANGIBLE
+}
+
+enum IntangibleSubType {
+  SOFTWARE
+  LICENSE
+  PATENT
+  COPYRIGHT
+  TRADEMARK
+  FRANCHISE_RIGHTS
+  GOODWILL
+  ACCREDITATION_RIGHTS
+  SUBSCRIPTION
+  OTHER
+}
+
+enum AmortizationMethod {
+  STRAIGHT_LINE
+  ACCELERATED
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ACCOUNTS MODULE ENUMS
+// ═══════════════════════════════════════════════════════════════════════════════
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum VoucherStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+  CANCELLED
+  POSTED
+}
+
+enum PaymentMode {
+  CASH
+  CHEQUE
+  NEFT
+  RTGS
+  IMPS
+  UPI
+  BANK_TRANSFER
+  DD
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHART OF ACCOUNTS
+// ═══════════════════════════════════════════════════════════════════════════════
+model ChartOfAccount {
+  id          Int         @id @default(autoincrement())
+  code        String      @unique   // 1001, 2001
+  name        String
+  type        AccountType
+  subType     String?               // "Fixed Asset", "Current Liability"
+  description String?     @db.Text
+  parentId    Int?
+  parent      ChartOfAccount?   @relation("COAHierarchy", fields: [parentId], references: [id])
+  children    ChartOfAccount[]  @relation("COAHierarchy")
+  isActive    Boolean     @default(true)
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @default(now()) @updatedAt
+
+  debitLines  JournalEntryLine[] @relation("DebitAccount")
+  creditLines JournalEntryLine[] @relation("CreditAccount")
+
+  // Finance Engine GL mapping back-relations
+  glFixedAsset    AssetGLMapping[] @relation("GLFixedAsset")
+  glAccDep        AssetGLMapping[] @relation("GLAccDep")
+  glDepExp        AssetGLMapping[] @relation("GLDepExp")
+  glDisposal      AssetGLMapping[] @relation("GLDisposal")
+  glMaintenance   AssetGLMapping[] @relation("GLMaintenance")
+  glInsurance     AssetGLMapping[] @relation("GLInsurance")
+  fvLines         FinanceVoucherLine[] @relation("FVLineAccount")
+
+  // Export target fields for external systems
+  tallyLedger     String?  // Tally Prime ledger name
+  sapGlCode       String?  // SAP GL account code
+  zohoAccount     String?  // Zoho Books account name
+
+  @@map("chartofaccount")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PURCHASE VOUCHER — Accounting entry for asset purchase
+// ═══════════════════════════════════════════════════════════════════════════════
+model PurchaseVoucher {
+  id              Int           @id @default(autoincrement())
+  voucherNo       String        @unique   // PV-FY2025-001
+  voucherDate     DateTime
+  amount          Decimal       @db.Decimal(14, 2)
+  narration       String?       @db.Text
+  status          VoucherStatus @default(DRAFT)
+
+  // Standalone — manual asset reference (FK lives here)
+  assetId         Int?
+  asset           Asset?        @relation("AssetPurchaseVouchers", fields: [assetId], references: [id])
+
+  // Procurement link — nullable, auto-filled when goods-receipt is accepted
+  goodsReceiptId  Int?
+  goodsReceipt    GoodsReceipt? @relation("GRAPurchaseVouchers", fields: [goodsReceiptId], references: [id])
+
+  // Vendor reference
+  vendorId        Int?
+  vendor          Vendor?       @relation("VendorPurchaseVouchers", fields: [vendorId], references: [id])
+
+  // Invoice details (can exist without procurement module)
+  invoiceNo       String?
+  invoiceDate     DateTime?
+  invoiceAmount   Decimal?      @db.Decimal(14, 2)
+  attachmentUrl   String?
+
+  // Approval
+  approvedById    Int?
+  approvedBy      Employee?     @relation("PVApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  approvalRemarks String?       @db.Text
+
+  // Linked payments
+  paymentVouchers PaymentVoucher[]
+  journalEntries  JournalEntry[]
+
+  createdById     Int?
+  createdBy       Employee?     @relation("PVCreatedBy", fields: [createdById], references: [id])
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([voucherDate])
+  @@map("purchasevoucher")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PAYMENT VOUCHER — Records payment against purchase voucher
+// ═══════════════════════════════════════════════════════════════════════════════
+model PaymentVoucher {
+  id                Int           @id @default(autoincrement())
+  voucherNo         String        @unique   // PMT-FY2025-001
+  voucherDate       DateTime
+  amount            Decimal       @db.Decimal(14, 2)
+  paymentMode       PaymentMode   @default(BANK_TRANSFER)
+  bankReference     String?
+  bankName          String?
+  narration         String?       @db.Text
+  status            VoucherStatus @default(DRAFT)
+
+  purchaseVoucherId Int?
+  purchaseVoucher   PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
+
+  vendorId          Int?
+  vendor            Vendor?       @relation("VendorPaymentVouchers", fields: [vendorId], references: [id])
+
+  // Approval
+  approvedById      Int?
+  approvedBy        Employee?     @relation("PMTApprovedBy", fields: [approvedById], references: [id])
+  approvedAt        DateTime?
+  approvalRemarks   String?       @db.Text
+
+  journalEntries    JournalEntry[]
+
+  createdById       Int?
+  createdBy         Employee?     @relation("PMTCreatedBy", fields: [createdById], references: [id])
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([voucherDate])
+  @@map("paymentvoucher")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JOURNAL ENTRY — Double-entry bookkeeping
+// ═══════════════════════════════════════════════════════════════════════════════
+model JournalEntry {
+  id                  Int      @id @default(autoincrement())
+  entryNo             String   @unique   // JE-FY2025-001
+  entryDate           DateTime
+  narration           String?  @db.Text
+  isAutoGenerated     Boolean  @default(false)
+  totalAmount         Decimal  @db.Decimal(14, 2)
+
+  purchaseVoucherId   Int?
+  purchaseVoucher     PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
+  paymentVoucherId    Int?
+  paymentVoucher      PaymentVoucher?  @relation(fields: [paymentVoucherId], references: [id])
+
+  lines               JournalEntryLine[]
+
+  createdById         Int?
+  createdBy           Employee? @relation("JECreatedBy", fields: [createdById], references: [id])
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
+
+  @@index([entryDate])
+  @@map("journalentry")
+}
+
+model JournalEntryLine {
+  id              Int      @id @default(autoincrement())
+  journalEntryId  Int
+  journalEntry    JournalEntry @relation(fields: [journalEntryId], references: [id])
+
+  debitAccountId  Int?
+  debitAccount    ChartOfAccount? @relation("DebitAccount", fields: [debitAccountId], references: [id])
+  creditAccountId Int?
+  creditAccount   ChartOfAccount? @relation("CreditAccount", fields: [creditAccountId], references: [id])
+
+  amount          Decimal  @db.Decimal(14, 2)
+  narration       String?
+
+  @@index([journalEntryId])
+  @@map("journalentryline")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FINANCE ENGINE — Config, GL Mappings, Auto-Vouchers, Export
+// ═══════════════════════════════════════════════════════════════════════════════
+
+enum AccountingMode {
+  STANDALONE  // Full double-entry within this app
+  EXPORT      // Generate vouchers, export to Tally/SAP/Zoho
+  HYBRID      // Both: internal ledger + periodic export
+}
+
+enum VoucherSourceType {
+  ASSET_PURCHASE
+  ASSET_DISPOSAL
+  DEPRECIATION_BATCH
+  MAINTENANCE
+  INSURANCE
+  MANUAL
+}
+
+enum FinanceVoucherStatus {
+  DRAFT
+  PENDING_APPROVAL
+  POSTED
+  REJECTED
+  VOID
+}
+
+enum ExportTarget {
+  TALLY_PRIME_XML
+  TALLY_ERP9_CSV
+  SAP_CSV
+  ZOHO_BOOKS
+  QUICKBOOKS
+  EXCEL_GENERIC
+}
+
+enum ExportBatchStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+}
+
+/// Single-row config per tenant for the Finance module
+model FinanceConfig {
+  id               Int            @id @default(autoincrement())
+  accountingMode   AccountingMode @default(STANDALONE)
+  exportTarget     ExportTarget?
+  autoVoucher      Boolean        @default(true)  // auto-create draft vouchers on asset events
+  requireApproval  Boolean        @default(true)  // FINANCE must approve before POSTED
+  fyStartMonth     Int            @default(4)      // 4 = April (Indian FY)
+  defaultCurrency  String         @default("INR")
+  updatedById      Int?
+  updatedBy        Employee?      @relation("FinanceConfigUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt        DateTime       @default(now()) @updatedAt
+
+  @@map("financeconfig")
+}
+
+/// Maps an AssetCategory to its GL accounts so auto-vouchers know which accounts to debit/credit
+model AssetGLMapping {
+  id                    Int            @id @default(autoincrement())
+  assetCategoryId       Int            @unique
+  assetCategory         AssetCategory  @relation(fields: [assetCategoryId], references: [id])
+
+  // Fixed Asset account (DR on purchase, CR on disposal)
+  fixedAssetAccountId   Int?
+  fixedAssetAccount     ChartOfAccount? @relation("GLFixedAsset", fields: [fixedAssetAccountId], references: [id])
+
+  // Accumulated Depreciation account (CR on depreciation run)
+  accDepAccountId       Int?
+  accDepAccount         ChartOfAccount? @relation("GLAccDep", fields: [accDepAccountId], references: [id])
+
+  // Depreciation Expense account (DR on depreciation run)
+  depExpenseAccountId   Int?
+  depExpenseAccount     ChartOfAccount? @relation("GLDepExp", fields: [depExpenseAccountId], references: [id])
+
+  // Disposal account / P&L (DR/CR depending on gain or loss)
+  disposalAccountId     Int?
+  disposalAccount       ChartOfAccount? @relation("GLDisposal", fields: [disposalAccountId], references: [id])
+
+  // Maintenance Expense account (DR on maintenance cost)
+  maintenanceAccountId  Int?
+  maintenanceAccount    ChartOfAccount? @relation("GLMaintenance", fields: [maintenanceAccountId], references: [id])
+
+  // Insurance Expense account (DR on premium)
+  insuranceAccountId    Int?
+  insuranceAccount      ChartOfAccount? @relation("GLInsurance", fields: [insuranceAccountId], references: [id])
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@map("assetglmapping")
+}
+
+/// A Finance Voucher — unified model for auto-generated and manual accounting entries
+model FinanceVoucher {
+  id           Int                  @id @default(autoincrement())
+  voucherNo    String               @unique  // FV-FY2025-001
+  voucherDate  DateTime
+  narration    String?              @db.Text
+  sourceType   VoucherSourceType    @default(MANUAL)
+  sourceId     Int?                 // FK to Asset, AssetDisposal, BatchDepreciationRun, etc.
+  totalDebit   Decimal              @db.Decimal(14, 2)
+  totalCredit  Decimal              @db.Decimal(14, 2)
+  status       FinanceVoucherStatus @default(DRAFT)
+
+  departmentId Int?
+  department   Department?          @relation("VoucherDept", fields: [departmentId], references: [id])
+
+  batchRunId   Int?
+  batchRun     BatchDepreciationRun? @relation("VoucherBatchRun", fields: [batchRunId], references: [id])
+
+  rejectionReason String?           @db.Text
+
+  lines        FinanceVoucherLine[]
+  exportItems  ExportBatchItem[]
+
+  createdById  Int?
+  createdBy    Employee?            @relation("FVCreatedBy", fields: [createdById], references: [id])
+  approvedById Int?
+  approvedBy   Employee?            @relation("FVApprovedBy", fields: [approvedById], references: [id])
+  approvedAt   DateTime?
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @default(now()) @updatedAt
+
+  @@index([voucherDate])
+  @@index([sourceType, sourceId])
+  @@index([status])
+  @@map("financevoucher")
+}
+
+/// Individual DR/CR lines of a Finance Voucher
+model FinanceVoucherLine {
+  id              Int             @id @default(autoincrement())
+  voucherId       Int
+  voucher         FinanceVoucher  @relation(fields: [voucherId], references: [id])
+
+  accountId       Int
+  account         ChartOfAccount  @relation("FVLineAccount", fields: [accountId], references: [id])
+
+  debit           Decimal         @db.Decimal(14, 2) @default(0)
+  credit          Decimal         @db.Decimal(14, 2) @default(0)
+  narration       String?
+
+  costCentreId    Int?
+  costCentre      Department?     @relation("FVLineCostCentre", fields: [costCentreId], references: [id])
+
+  @@index([voucherId])
+  @@map("financevoucherline")
+}
+
+/// Groups POSTED vouchers for batch export to Tally/SAP/etc.
+model ExportBatch {
+  id             Int               @id @default(autoincrement())
+  batchNo        String            @unique  // EXP-2025-001
+  exportTarget   ExportTarget
+  status         ExportBatchStatus @default(PENDING)
+  fromDate       DateTime
+  toDate         DateTime
+  totalVouchers  Int               @default(0)
+  totalAmount    Decimal           @db.Decimal(14, 2) @default(0)
+  fileUrl        String?           // generated file path
+  errorLog       String?           @db.Text
+
+  items          ExportBatchItem[]
+
+  createdById    Int?
+  createdBy      Employee?         @relation("ExportBatchCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @default(now()) @updatedAt
+
+  @@map("exportbatch")
+}
+
+/// Links a FinanceVoucher to an ExportBatch (many-to-many bridge)
+model ExportBatchItem {
+  id           Int            @id @default(autoincrement())
+  batchId      Int
+  batch        ExportBatch    @relation(fields: [batchId], references: [id])
+  voucherId    Int
+  voucher      FinanceVoucher @relation(fields: [voucherId], references: [id])
+
+  @@unique([batchId, voucherId])
+  @@map("exportbatchitem")
+}
+
+/// Capex Budget — FINANCE/CEO can set annual capital expenditure budgets per department
+model CapexBudget {
+  id            Int        @id @default(autoincrement())
+  fiscalYear    Int        // 2025
+  departmentId  Int?
+  department    Department? @relation("CapexBudgetDept", fields: [departmentId], references: [id])
+  categoryId    Int?
+  category      AssetCategory? @relation("CapexBudgetCat", fields: [categoryId], references: [id])
+  budgetAmount  Decimal    @db.Decimal(14, 2)
+  actualAmount  Decimal    @db.Decimal(14, 2) @default(0)  // auto-updated from asset purchases
+  notes         String?    @db.Text
+  createdById   Int?
+  createdBy     Employee?  @relation("CapexBudgetCreatedBy", fields: [createdById], references: [id])
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @default(now()) @updatedAt
+
+  @@unique([fiscalYear, departmentId, categoryId])
+  @@map("capexbudget")
+}
+
+/// Manual Ledger Entry for adjustments / narration-only entries (no automatic GL effect)
+/// Used in STANDALONE mode for narration / memo entries
+model ManualLedgerEntry {
+  id          Int       @id @default(autoincrement())
+  entryNo     String    @unique  // MLE-2025-001
+  entryDate   DateTime
+  narration   String    @db.Text
+  amount      Decimal   @db.Decimal(14, 2)
+  entryType   String    // NOTE | ADJUSTMENT | MEMO
+  referenceNo String?
+  attachmentUrl String? @db.Text
+
+  createdById Int?
+  createdBy   Employee? @relation("MLECreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@map("manualledgerentry")
+}
+
+// ─── Asset Pool (Phased Digitization) ────────────────────────────────────────
+// Represents a bulk placeholder for assets that haven't been individually
+// digitized yet — e.g. FY2022-23 had 45 ICU assets captured as a single pool.
+// As individual assets are entered they link back via assetPoolId on Asset.
+
+model AssetPool {
+  id                  Int      @id @default(autoincrement())
+  poolCode            String   @unique           // e.g. POOL-ICU-FY2022-23-001
+  financialYear       String                     // e.g. "FY2022-23"
+  categoryId          Int?
+  category            AssetCategory? @relation(fields: [categoryId], references: [id])
+  departmentId        Int?
+  department          Department?    @relation("AssetPoolDepartment", fields: [departmentId], references: [id])
+  description         String?   @db.Text
+  originalQuantity    Int                        // total assets in this pool
+  totalPoolCost       Decimal?  @db.Decimal(14, 2) // total cost captured from balance sheet
+  status              String    @default("PENDING") // PENDING / PARTIAL / COMPLETE
+  notes               String?   @db.Text
+  createdById         Int?
+  createdBy           Employee? @relation("AssetPoolCreatedBy", fields: [createdById], references: [id])
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
+
+  assets              Asset[]
+  adjustments         AssetPoolAdjustment[]
+  depreciationSchedules AssetPoolDepreciationSchedule[]
+
+  @@map("assetpool")
+}
+
+// One row per financial year per pool — uploaded from the audited FA register.
+// Stores the auditor-certified gross block, accumulated dep, and net block
+// so the FA schedule report can merge pool balances with individual asset rows.
+model AssetPoolDepreciationSchedule {
+  id                      Int       @id @default(autoincrement())
+  poolId                  Int
+  pool                    AssetPool @relation(fields: [poolId], references: [id])
+  financialYear           String    // "FY2022-23"
+  financialYearEnd        DateTime  // 31-Mar-2023
+
+  openingGrossBlock       Decimal   @db.Decimal(14, 2)
+  additions               Decimal   @default(0) @db.Decimal(14, 2)
+  deletions               Decimal   @default(0) @db.Decimal(14, 2)
+  closingGrossBlock       Decimal   @db.Decimal(14, 2)
+
+  openingAccumulatedDep   Decimal   @default(0) @db.Decimal(14, 2)
+  depreciationRate        Decimal   @db.Decimal(5, 2)   // e.g. 15.00
+  depreciationForPeriod   Decimal   @db.Decimal(14, 2)
+  closingAccumulatedDep   Decimal   @db.Decimal(14, 2)
+
+  openingNetBlock         Decimal   @db.Decimal(14, 2)
+  closingNetBlock         Decimal   @db.Decimal(14, 2)
+
+  createdById             Int?
+  createdBy               Employee? @relation("AssetPoolDepSchedCreatedBy", fields: [createdById], references: [id])
+  createdAt               DateTime  @default(now())
+
+  @@unique([poolId, financialYear])
+  @@map("assetpooldepreciationschedule")
+}
+
+model AssetPoolAdjustment {
+  id             Int      @id @default(autoincrement())
+  poolId         Int
+  pool           AssetPool @relation(fields: [poolId], references: [id])
+  adjustmentType String                // COST_RECONCILIATION / WRITE_OFF / DISTRIBUTE / OTHER
+  amount         Decimal   @db.Decimal(14, 2)
+  financialYear  String?               // FY in which this adjustment was recorded
+  reason         String?   @db.Text
+  createdById    Int?
+  createdBy      Employee? @relation("AssetPoolAdjCreatedBy", fields: [createdById], references: [id])
+  createdAt      DateTime  @default(now())
+
+  @@map("assetpooladjustment")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Service Invoice — bills received from vendors for services (repair/PM/AMC etc.)
+// ═══════════════════════════════════════════════════════════════════════════════
+model ServiceInvoice {
+  id              Int       @id @default(autoincrement())
+  invoiceNo       String    // vendor invoice number
+  invoiceDate     DateTime
+  dueDate         DateTime?
+
+  // Link to the service event (only one will be set)
+  ticketId        Int?
+  ticket          Ticket?   @relation(fields: [ticketId], references: [id])
+  maintenanceScheduleId Int?
+  maintenanceSchedule MaintenanceSchedule? @relation(fields: [maintenanceScheduleId], references: [id])
+  calibrationScheduleId Int?
+  calibrationSchedule CalibrationSchedule? @relation(fields: [calibrationScheduleId], references: [id])
+  serviceContractId Int?
+  serviceContract ServiceContract? @relation(fields: [serviceContractId], references: [id])
+
+  // Asset & vendor (can be auto-populated from linked event)
+  assetId         Int?
+  asset           Asset?    @relation(fields: [assetId], references: [id])
+  vendorId        Int?
+  vendor          Vendor?   @relation("ServiceInvoiceVendor", fields: [vendorId], references: [id])
+
+  // Amounts
+  invoiceAmount   Decimal   @db.Decimal(15, 2)
+  gstPct          Decimal   @default(18) @db.Decimal(5, 2)
+  gstAmount       Decimal   @default(0)  @db.Decimal(15, 2)
+  netAmount       Decimal   @db.Decimal(15, 2)  // invoiceAmount + gstAmount
+  tdsAmount       Decimal   @default(0)  @db.Decimal(15, 2)
+  payableAmount   Decimal   @db.Decimal(15, 2)  // netAmount - tdsAmount
+
+  serviceDescription String? @db.Text
+  status          String    @default("PENDING_APPROVAL")
+  // PENDING_APPROVAL → APPROVED → PAID | REJECTED
+
+  // Payment details (filled when PAID)
+  paidAt          DateTime?
+  paymentMode     String?   // CASH | CHEQUE | NEFT | UPI
+  paymentRef      String?
+  paymentVoucherId Int?
+
+  // Document
+  fileUrl         String?
+
+  remarks         String?   @db.Text
+
+  createdById     Int?
+  createdBy       Employee? @relation("ServiceInvoiceCreatedBy", fields: [createdById], references: [id])
+  approvedById    Int?
+  approvedBy      Employee? @relation("ServiceInvoiceApprovedBy", fields: [approvedById], references: [id])
+
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([assetId])
+  @@index([vendorId])
+  @@map("serviceinvoice")
 }

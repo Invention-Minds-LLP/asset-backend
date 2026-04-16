@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+﻿import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import formidable from "formidable";
 import fs from "fs";
@@ -31,7 +31,7 @@ export const getMaintenanceHistory = async (req: Request, res: Response) => {
 
   // Department scoping: non-admin sees only their department's assets
   let scopedAssetIds: number[] | undefined;
-  if (user?.role !== "ADMIN" && user?.departmentId) {
+  if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
     const deptAssets = await prisma.asset.findMany({
       where: { departmentId: Number(user.departmentId) },
       select: { id: true },
@@ -46,7 +46,7 @@ export const getMaintenanceHistory = async (req: Request, res: Response) => {
 
   const history = await prisma.maintenanceHistory.findMany({
     where,
-    include: { asset: true, ticket: true },
+    include: { asset: true, ticket: true, vendor: { select: { id: true, name: true } } },
     orderBy: { id: "desc" },
   });
   res.json(history);
@@ -75,7 +75,7 @@ export const getMaintenanceHistoryByAsset = async (req: Request, res: Response) 
     const history = await prisma.maintenanceHistory.findMany({
       where: { assetId: asset.id },
       orderBy: { actualDoneAt: "desc" },
-      include: { serviceContract: true },
+      include: { serviceContract: true, vendor: { select: { id: true, name: true } } },
     });
 
     res.status(200).json(history);
@@ -121,17 +121,28 @@ export const uploadMaintenanceReport = async (req: Request, res: Response) => {
       return;
     }
 
-    const assetId = fields.assetId?.[0];
-    const scheduledDue = fields.scheduledDue?.[0];
-    const actualDoneAt = fields.actualDoneAt?.[0];
-    const wasLate = fields.wasLate?.[0] === "true";
-    const performedBy = fields.performedBy?.[0];
-    const notes = fields.notes?.[0] || null;
-    const ticketId = fields.ticketId?.[0] || null; // optional link to ticket
-    const serviceContractId = fields.serviceContractId?.[0] || null;
+    const assetId                = fields.assetId?.[0];
+    const scheduledDue           = fields.scheduledDue?.[0];
+    const actualDoneAt           = fields.actualDoneAt?.[0];
+    const performedBy            = fields.performedBy?.[0];
+    const performedByType        = fields.performedByType?.[0] || null; // INTERNAL | VENDOR | EXTERNAL_SERVICE
+    const vendorIdRaw            = fields.vendorId?.[0] || null;
+    const externalServiceCenter  = fields.externalServiceCenter?.[0] || null;
+    const serviceType            = fields.serviceType?.[0] || null;    // WARRANTY | AMC | CMC | PAID | INTERNAL
+    const notes                  = fields.notes?.[0] || null;
+    const ticketId               = fields.ticketId?.[0] || null;
+    const serviceContractId      = fields.serviceContractId?.[0] || null;
+    const serviceCostRaw         = fields.serviceCost?.[0] || null;
+    const partsCostRaw           = fields.partsCost?.[0] || null;
 
     if (!assetId || !scheduledDue || !actualDoneAt || !performedBy) {
       res.status(400).json({ error: "Required fields are missing." });
+      return;
+    }
+
+    const VALID_PERFORMED_BY_TYPES = ["INTERNAL", "VENDOR", "EXTERNAL_SERVICE"];
+    if (performedByType && !VALID_PERFORMED_BY_TYPES.includes(performedByType)) {
+      res.status(400).json({ error: "Invalid performedByType" });
       return;
     }
 
@@ -174,18 +185,35 @@ export const uploadMaintenanceReport = async (req: Request, res: Response) => {
            return;
         }
       }
+      const actualDate   = new Date(actualDoneAt);
+      const scheduledDate = new Date(scheduledDue);
+      const wasLate      = actualDate > scheduledDate;
+
+      const vendorIdInt  = vendorIdRaw ? Number(vendorIdRaw) : null;
+      const serviceCost  = serviceCostRaw  ? Number(serviceCostRaw)  : null;
+      const partsCost    = partsCostRaw    ? Number(partsCostRaw)    : null;
+      const totalCost    = (serviceCost ?? 0) + (partsCost ?? 0) || null;
+
       const saved = await prisma.maintenanceHistory.create({
         data: {
-          assetId: asset.id,
-          serviceContractId: contractIdInt,
-          scheduledDue: new Date(scheduledDue),
-          actualDoneAt: new Date(actualDoneAt),
+          assetId:              asset.id,
+          serviceContractId:    contractIdInt,
+          scheduledDue:         scheduledDate,
+          actualDoneAt:         actualDate,
           wasLate,
           performedBy,
+          performedByType,
+          vendorId:             vendorIdInt,
+          externalServiceCenter,
+          serviceType,
           notes,
-          serviceReport: fileUrl,
-          ticketId: ticketId ? parseInt(ticketId) : null,
+          serviceCost,
+          partsCost,
+          totalCost,
+          serviceReport:        fileUrl,
+          ticketId:             ticketId ? parseInt(ticketId) : null,
         },
+        include: { vendor: { select: { id: true, name: true } } },
       });
 
       res.status(200).json(saved);
