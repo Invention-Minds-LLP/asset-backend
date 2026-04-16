@@ -333,7 +333,7 @@ export const acceptGRA = async (req: AuthenticatedRequest, res: Response) => {
 
           for (let i = 0; i < acceptedQty; i++) {
             // Generate assetId
-            const assetId = await generateAssetId(tx);
+            const assetId = await generateAssetId(undefined, tx);
 
             // Generate unique serial number if not provided
             const serialNumber = line.serialNumber && acceptedQty === 1
