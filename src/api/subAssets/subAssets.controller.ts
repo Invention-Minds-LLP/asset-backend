@@ -692,7 +692,7 @@ export const createSubAsset = async (req: Request, res: Response) => {
 
     // If user chose standalone, create without parentAssetId
     if (createAsStandalone) {
-      const standaloneId = await generateAssetId();
+      const standaloneId = await generateAssetId(undefined, undefined, { categoryId: Number(assetCategoryId) });
       const standaloneChild = await prisma.asset.create({
         data: {
           assetId: standaloneId,

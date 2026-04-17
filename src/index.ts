@@ -69,6 +69,8 @@ import journalEntriesRoutes from "./api/accounts/journal-entries/journal-entries
 import accountsSummaryRoutes from "./api/accounts/accounts-summary/accounts-summary.routes";
 import financeRoutes from "./api/finance/finance.routes";
 import serviceInvoiceRoutes from "./api/service-invoices/service-invoices.routes";
+import legacyMigrationRoutes from "./api/legacy-migration/legacy-migration.routes";
+import reconciliationRoutes from "./api/reconciliation/reconciliation.routes";
 
 import cors from "cors";
 import path from "path";
@@ -165,6 +167,12 @@ app.use("/api/finance", financeRoutes);
 
 // ── Service Invoices ─────────────────────────────────────────────────────────
 app.use("/api/service-invoices", serviceInvoiceRoutes);
+
+// ── Legacy Asset Migration ───────────────────────────────────────────────────
+app.use("/api/legacy-migration", legacyMigrationRoutes);
+
+// ── Reconciliation (Books vs Audit vs System) ────────────────────────────────
+app.use("/api/reconciliation", reconciliationRoutes);
 
 // Default route
 app.get("/", (req, res) => {

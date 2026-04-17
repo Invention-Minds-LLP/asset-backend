@@ -32,11 +32,16 @@ export const getAllAssets = async (req: Request, res: Response) => {
     const departmentId = user?.departmentId;
     const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
 
-    console.log(user)
-
     let where: any = {};
 
-    if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS') {
+    // Check if user belongs to Store department → sees all assets
+    let isStoreDept = false;
+    if (departmentId) {
+      const dept = await prisma.department.findUnique({ where: { id: Number(departmentId) }, select: { name: true } });
+      if (dept?.name?.toUpperCase().includes('STORE')) isStoreDept = true;
+    }
+
+    if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
       where = {};
     } else if (role === 'HOD') {
       where = {
@@ -183,7 +188,7 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
 
     // ── Asset ID — legacy assets get a legacy ID immediately; others get TEMP ──
     const newAssetId = data.isLegacyAsset === true || data.isLegacyAsset === 'true'
-      ? await generateLegacyAssetId(data.purchaseDate ?? null)
+      ? await generateLegacyAssetId(data.purchaseDate ?? null, undefined, data.assetCategoryId ? Number(data.assetCategoryId) : null)
       : `TEMP-${Date.now()}`;
 
     // Auto-assign supervisor for department
@@ -396,7 +401,7 @@ export const hodApproveAsset = async (req: AuthenticatedRequest, res: Response) 
 
     if (action === "APPROVED") {
       // Now generate the real Asset ID
-      const newAssetId = await generateAssetId((asset as any).modeOfProcurement || "PURCHASE");
+      const newAssetId = await generateAssetId((asset as any).modeOfProcurement || "PURCHASE", undefined, { categoryId: (asset as any).assetCategoryId });
 
       // Auto-assign supervisor for location
       let supervisorId = (asset as any).supervisorId;

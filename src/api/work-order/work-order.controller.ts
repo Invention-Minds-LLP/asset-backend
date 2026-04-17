@@ -533,7 +533,7 @@ export const issueWCC = async (req: AuthenticatedRequest, res: Response) => {
 
       // CAPEX capitalization
       if (wo.woType === "CAPEX" && wo.capitalizeAsAsset === true && wo.assetCategoryId) {
-        const assetId = await generateAssetId(undefined, tx);
+        const assetId = await generateAssetId(undefined, tx, { categoryId: wo.assetCategoryId });
         const newAsset = await tx.asset.create({
           data: {
             assetId,

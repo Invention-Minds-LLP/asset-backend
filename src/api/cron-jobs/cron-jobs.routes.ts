@@ -9,6 +9,11 @@ import {
   checkAssetActivation,
   runAllChecks,
 } from "./cron-jobs.controller";
+import {
+  runYearEndDepreciation,
+  runQuarterlyPreview,
+  runPreAuditSnapshot,
+} from "./depreciation-cron.controller";
 
 const router = express.Router();
 
@@ -19,5 +24,10 @@ router.post("/maintenance-sla-breach", authenticateToken, checkMaintenanceSLABre
 router.post("/contract-expiry", authenticateToken, checkContractExpiry);
 router.post("/asset-activation", authenticateToken, checkAssetActivation);
 router.post("/run-all", authenticateToken, runAllChecks);
+
+// ── Depreciation cron jobs ───────────────────────────────────────────────
+router.post("/year-end-depreciation", authenticateToken, runYearEndDepreciation);
+router.post("/quarterly-preview",     authenticateToken, runQuarterlyPreview);
+router.post("/pre-audit-snapshot",    authenticateToken, runPreAuditSnapshot);
 
 export default router;

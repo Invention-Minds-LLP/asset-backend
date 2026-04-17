@@ -2,16 +2,17 @@ import prisma from "../prismaClient";
 
 /**
  * Generates a standardized Asset ID in the format:
- * AST-{ORG_CODE}-{PROC}-FY{YYYY}-{YY}-{NNNNN}
+ * AST-{ORG_CODE}-{PROC}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
  *
- * Example: AST-SA-PUR-FY2026-27-00001  (Purchase)
- *          AST-SA-DON-FY2026-27-00001  (Donation)
- *          AST-SA-LES-FY2026-27-00001  (Lease)
- *          AST-SA-RNT-FY2026-27-00001  (Rental)
- *          AST-SA-GRT-FY2026-27-00001  (Grant)
+ * Example: AST-JMRH-PUR-MED-FY2026-27-00001  (Purchase, Medical)
+ *          AST-JMRH-DON-ITE-FY2026-27-00001  (Donation, IT Equipment)
+ *          AST-JMRH-PUR-FUR-FY2022-23-00001  (Legacy asset, Furniture)
+ *
+ * If category code is not available, falls back to the old format without CAT:
+ *          AST-JMRH-PUR-FY2026-27-00001
  *
  * For sub-assets: {PARENT_ASSET_ID}-{NNN}
- * Example: AST-SA-PUR-FY2026-27-00001-001
+ * Example: AST-JMRH-PUR-MED-FY2026-27-00001-001
  */
 
 /** Map modeOfProcurement values to 3-letter codes used in Asset IDs */
@@ -34,23 +35,66 @@ function getOrgCode(): string {
   return process.env.HOSPITAL_CODE || "SA";
 }
 
-/** @deprecated kept for backward compatibility — prefer generateAssetId(mode, tx) */
+/** @deprecated kept for backward compatibility */
 function getHospitalCode(): string {
   return getOrgCode();
 }
 
+/**
+ * Resolve a short code (3-4 chars) for a category.
+ * Priority: AssetCategory.code (if set) → first 3 chars of name → empty string.
+ */
+async function resolveCategoryCode(categoryId: number | null | undefined, db?: any): Promise<string> {
+  if (!categoryId) return "";
+  const client = db || prisma;
+  const cat = await client.assetCategory.findUnique({
+    where: { id: categoryId },
+    select: { code: true, name: true },
+  });
+  if (!cat) return "";
+  if (cat.code) return cat.code.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+  return cat.name.replace(/[^A-Z0-9]/gi, "").toUpperCase().slice(0, 3);
+}
+
+function buildPrefix(procCode: string, catCode: string, fyStr: string): string {
+  const org = getOrgCode();
+  if (catCode) {
+    return `AST-${org}-${procCode}-${catCode}-${fyStr}-`;
+  }
+  return `AST-${org}-${procCode}-${fyStr}-`;
+}
+
+/** Old-style prefix without category (backward compat) */
 function getPrefix(modeOfProcurement?: string): string {
   const procCode = PROC_CODE[(modeOfProcurement || "PURCHASE").toUpperCase()] ?? "PUR";
-  return `AST-${getOrgCode()}-${procCode}-${getFYString()}-`;
+  return buildPrefix(procCode, "", getFYString());
 }
 
 /**
  * Generate the next asset ID for a top-level asset.
- * Format: AST-{ORG_CODE}-{PROC}-FY{YYYY}-{YY}-{NNNNN}
+ *
+ * New format: AST-{ORG}-{PROC}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
+ *
+ * @param modeOfProcurement - PURCHASE | DONATION | LEASE | RENTAL | GRANT
+ * @param tx                - Prisma transaction client (optional)
+ * @param opts.categoryId   - AssetCategory.id — used to derive 3-letter category code
+ * @param opts.purchaseDate - For legacy/individualized assets: use this date's FY instead of current FY
  */
-export async function generateAssetId(modeOfProcurement?: string, tx?: any): Promise<string> {
-  const prefix = getPrefix(modeOfProcurement);
+export async function generateAssetId(
+  modeOfProcurement?: string,
+  tx?: any,
+  opts?: { categoryId?: number | null; purchaseDate?: Date | null },
+): Promise<string> {
   const db = tx || prisma;
+  const procCode = PROC_CODE[(modeOfProcurement || "PURCHASE").toUpperCase()] ?? "PUR";
+
+  const catCode = await resolveCategoryCode(opts?.categoryId, db);
+
+  const fyStr = opts?.purchaseDate
+    ? getFYStringFromDate(new Date(opts.purchaseDate))
+    : getFYString();
+
+  const prefix = buildPrefix(procCode, catCode, fyStr);
 
   const existing = await db.asset.findMany({
     where: { assetId: { startsWith: prefix }, parentAssetId: null },
@@ -106,35 +150,27 @@ export function getFYStringFromDate(date: Date): string {
 }
 
 /**
- * Generate a legacy asset ID using the purchase-year FY + L marker.
- * Format: AST-{HOSPITAL_CODE}-FY{YYYY}-{YY}-L-{NNNNN}
- * Example: AST-JMRH-FY2021-22-L-00001
+ * Generate a legacy/individualized asset ID using the SAME format as normal assets
+ * but with the purchase date's FY instead of the current FY.
  *
- * Uses a separate counter per FY so it never clashes with live IDs.
+ * Format: AST-{ORG}-{PROC}-{CAT}-FY{YYYY}-{YY}-{NNNNN}  (same as live assets)
+ *
+ * @param purchaseDate  - determines the FY segment
+ * @param tx            - Prisma transaction client (optional)
+ * @param categoryId    - AssetCategory.id for the category code segment
+ * @param modeOfProcurement - defaults to "PURCHASE"
  */
-export async function generateLegacyAssetId(purchaseDate: Date | string | null, tx?: any): Promise<string> {
-  const db = tx || prisma;
-  const hospitalCode = getHospitalCode();
-
-  // If no purchaseDate, fall back to current FY with L marker
+export async function generateLegacyAssetId(
+  purchaseDate: Date | string | null,
+  tx?: any,
+  categoryId?: number | null,
+  modeOfProcurement?: string,
+): Promise<string> {
   const refDate = purchaseDate ? new Date(purchaseDate) : new Date();
-  const fyStr = getFYStringFromDate(refDate);
-
-  const prefix = `AST-${hospitalCode}-${fyStr}-L-`;
-
-  const existing = await db.asset.findMany({
-    where: { assetId: { startsWith: prefix }, parentAssetId: null },
-    select: { assetId: true },
+  return generateAssetId(modeOfProcurement || "PURCHASE", tx, {
+    categoryId: categoryId ?? null,
+    purchaseDate: refDate,
   });
-
-  let maxSeq = 0;
-  for (const row of existing) {
-    const seqStr = row.assetId.slice(prefix.length);
-    const seq = parseInt(seqStr, 10);
-    if (!isNaN(seq) && seq > maxSeq) maxSeq = seq;
-  }
-
-  return `${prefix}${(maxSeq + 1).toString().padStart(5, "0")}`;
 }
 
 export { getFYString, getHospitalCode, getOrgCode, getPrefix };

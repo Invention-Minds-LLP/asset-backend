@@ -2,6 +2,14 @@ import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { createAutoVoucher } from "../finance/finance-voucher.controller";
+import {
+  calculateAssetFYDepreciation,
+  persistDepreciationResult,
+  getFYContext,
+  effectiveResidualValue as residualValueShared,
+  type AssetForDep,
+  type DepreciationConfig,
+} from "../../utilis/depreciationEngine";
 
 export const addDepreciation = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -243,13 +251,12 @@ function monthsDiff(a: Date, b: Date) {
 
 export const runDepreciationForAsset = async (req: AuthenticatedRequest, res: Response) => {
   try {
-
     if (!req.user) {
       res.status(401).json({ message: "Unauthorized" });
       return;
     }
 
-    const employeeId = req.user.employeeDbId;
+    const employeeId = req.user.employeeDbId ?? null;
     const assetId = Number(req.params.assetId);
 
     const asset = await prisma.asset.findUnique({
@@ -268,93 +275,79 @@ export const runDepreciationForAsset = async (req: AuthenticatedRequest, res: Re
     }
 
     const cost = Number(asset.purchaseCost ?? asset.estimatedValue ?? 0);
-    const salvage = effectiveResidualValue(cost, Number(dep.salvageValue ?? 0));
-    const lifeYears = dep.expectedLifeYears;
-    const rate = Number(dep.depreciationRate ?? 0);
-    const method = dep.depreciationMethod;
-
+    const salvage = residualValueShared(cost, Number(dep.salvageValue ?? 0));
     const start = new Date(dep.depreciationStart);
     const today = new Date();
 
-    // decide next periodStart
-    const last = dep.lastCalculatedAt ? new Date(dep.lastCalculatedAt) : start;
+    // ── Determine the next FY due ─────────────────────────────────────────
+    // Use Indian FY (Apr-Mar). Walk forward from depreciationStart until we
+    // find a FY whose end is ≤ today and is after lastCalculatedAt.
+    const lastCalc = dep.lastCalculatedAt ? new Date(dep.lastCalculatedAt) : null;
+    let fy = getFYContext(lastCalc ? new Date(lastCalc.getTime() + 86400000) : start);
 
-    let periodStart = last;
-    let periodEnd: Date;
-
-    if ((dep.depreciationFrequency || "YEARLY") === "MONTHLY") {
-      periodEnd = new Date(periodStart);
-      periodEnd.setMonth(periodEnd.getMonth() + 1);
-    } else {
-      periodEnd = new Date(periodStart);
-      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    while (fy.fyEnd <= (lastCalc ?? new Date(0))) {
+      fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
     }
 
-    // don’t run into future
-    if (periodEnd > today) {
-      res.status(400).json({ message: "Next depreciation period not reached yet" });
+    if (fy.fyEnd > today) {
+      res.status(400).json({ message: `Next depreciation period (${fy.fyLabel}) has not ended yet` });
       return;
     }
 
-    // current values
-    const prevBook = Number(dep.currentBookValue ?? cost);
-    const prevAccum = Number(dep.accumulatedDepreciation ?? 0);
+    // ── Build engine inputs ───────────────────────────────────────────────
+    const assetForDep: AssetForDep = {
+      id: asset.id,
+      assetId: asset.assetId,
+      purchaseCost: cost,
+      estimatedValue: Number(asset.estimatedValue ?? 0),
+      purchaseDate: asset.purchaseDate ?? null,
+      installedAt: (asset as any).installedAt ?? null,
+      isLegacyAsset: (asset as any).isLegacyAsset ?? false,
+      migrationMode: (asset as any).migrationMode ?? null,
+      migrationDate: (asset as any).migrationDate ?? null,
+      originalPurchaseDate: (asset as any).originalPurchaseDate ?? null,
+      originalCost: (asset as any).originalCost ?? null,
+      accDepAtMigration: (asset as any).accDepAtMigration ?? null,
+      openingWdvAtMigration: (asset as any).openingWdvAtMigration ?? null,
+    };
 
-    let depreciationAmount = 0;
+    const cfg: DepreciationConfig = {
+      method: dep.depreciationMethod,
+      rate: Number(dep.depreciationRate ?? 0),
+      lifeYears: dep.expectedLifeYears,
+      salvage,
+      depreciationStart: start,
+      frequency: dep.depreciationFrequency || "YEARLY",
+      roundOff: (dep as any).roundOff ?? false,
+      decimalPlaces: (dep as any).decimalPlaces ?? 2,
+    };
 
-    if (method === "SL") {
-      const annual = (cost - salvage) / lifeYears;
-      depreciationAmount = (dep.depreciationFrequency === "MONTHLY") ? annual / 12 : annual;
-    } else if (method === "DB") {
-      const isMonthlyFreq = (dep.depreciationFrequency || "YEARLY") === "MONTHLY";
-      const periodRate = isMonthlyFreq ? (rate / 100) / 12 : (rate / 100);
-      // Indian IT Act 180-day rule: first year only (no lastCalculatedAt), yearly only
-      const isFirstPeriod = !dep.lastCalculatedAt;
-      const effectiveRate = (!isMonthlyFreq && isFirstPeriod && isSecondHalfOfIndianFY(start))
-        ? periodRate / 2
-        : periodRate;
-      depreciationAmount = prevBook * effectiveRate;
-    } else {
-      res.status(400).json({ message: "Unsupported depreciation method" });
+    const result = await calculateAssetFYDepreciation(assetForDep, cfg, fy);
+
+    if (result.preMigrationSkipped) {
+      res.status(400).json({ message: `Skipped — ${fy.fyLabel} is before migration date` });
       return;
     }
 
-    // don’t depreciate below salvage
-    const maxAllowed = Math.max(0, prevBook - salvage);
-    depreciationAmount = Math.min(depreciationAmount, maxAllowed);
+    if (result.depreciationAmount <= 0) {
+      res.status(400).json({ message: "No depreciation due (asset at salvage value or below)" });
+      return;
+    }
 
-    const newBook = Number((prevBook - depreciationAmount).toFixed(2));
-    const newAccum = Number((prevAccum + depreciationAmount).toFixed(2));
-
-    const result = await prisma.$transaction(async (tx) => {
-      const log = await tx.depreciationLog.create({
-        data: {
-          assetId,
-          periodStart,
-          periodEnd,
-          depreciationAmount: String(depreciationAmount.toFixed(2)),
-          bookValueAfter: String(newBook.toFixed(2)),
-          doneById: employeeId,
-          reason: "SYSTEM_RUN",
-        }
-      });
-
-      const updated = await tx.assetDepreciation.update({
-        where: { id: dep.id },
-        data: {
-          accumulatedDepreciation: String(newAccum.toFixed(2)),
-          currentBookValue: String(newBook.toFixed(2)),
-          lastCalculatedAt: periodEnd,
-          updatedById: employeeId,
-        }
-      });
-
-      return { log, updated };
+    const persisted = await persistDepreciationResult({
+      assetId,
+      depRecordId: dep.id,
+      result,
+      doneById: employeeId,
+      reason: "SYSTEM_RUN",
     });
 
-    res.json({ message: "Depreciation applied", ...result });
+    res.json({
+      message: "Depreciation applied",
+      breakdown: result,
+      ...persisted,
+    });
     return;
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to run depreciation" });
@@ -528,67 +521,47 @@ async function computeEligibleDepreciations(filters: DepreciationFilters = {}) {
     const method = dep.depreciationMethod;
 
     const depStart = new Date(dep.depreciationStart);
-    const isMonthly = (dep.depreciationFrequency || "YEARLY") === "MONTHLY";
 
-    // Find the next period that is due: advance from depStart by period intervals
-    // until we find a periodEnd that is <= today and hasn't been calculated yet
-    let periodStart = depStart;
-    let periodEnd = new Date(depStart);
-    if (isMonthly) {
-      periodEnd.setMonth(periodEnd.getMonth() + 1);
-    } else {
-      periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    // ── Determine next due FY using shared helper ──────────────────────────
+    const lastCalc = dep.lastCalculatedAt ? new Date(dep.lastCalculatedAt) : null;
+    let fy = getFYContext(lastCalc ? new Date(lastCalc.getTime() + 86400000) : depStart);
+    while (fy.fyEnd <= (lastCalc ?? new Date(0))) {
+      fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
     }
 
-    // If we have a lastCalculatedAt, find the next period after it
-    if (dep.lastCalculatedAt) {
-      const lastCalc = new Date(dep.lastCalculatedAt);
-      // Advance until periodEnd is after lastCalculatedAt
-      while (periodEnd <= lastCalc) {
-        periodStart = new Date(periodEnd);
-        if (isMonthly) {
-          periodEnd = new Date(periodStart);
-          periodEnd.setMonth(periodEnd.getMonth() + 1);
-        } else {
-          periodEnd = new Date(periodStart);
-          periodEnd.setFullYear(periodStart.getFullYear() + 1);
-        }
-      }
-    }
+    // Not yet due — skip unless forceOverride
+    if (fy.fyEnd > today && !filters.forceOverride) continue;
 
-    // Not yet due — skip unless forceOverride is set (per-asset manual run)
-    if (periodEnd > today && !filters.forceOverride) continue;
+    // ── Run split-method engine ────────────────────────────────────────────
+    const assetForDep: AssetForDep = {
+      id: dep.asset.id,
+      assetId: dep.asset.assetId,
+      purchaseCost: cost,
+      estimatedValue: Number(dep.asset.estimatedValue ?? 0),
+      purchaseDate: (dep.asset as any).purchaseDate ?? null,
+      installedAt:  (dep.asset as any).installedAt ?? null,
+      isLegacyAsset: (dep.asset as any).isLegacyAsset ?? false,
+      migrationMode: (dep.asset as any).migrationMode ?? null,
+      migrationDate: (dep.asset as any).migrationDate ?? null,
+      originalPurchaseDate: (dep.asset as any).originalPurchaseDate ?? null,
+      originalCost: (dep.asset as any).originalCost ?? null,
+      accDepAtMigration: (dep.asset as any).accDepAtMigration ?? null,
+      openingWdvAtMigration: (dep.asset as any).openingWdvAtMigration ?? null,
+    };
+    const cfg: DepreciationConfig = {
+      method,
+      rate,
+      lifeYears,
+      salvage,
+      depreciationStart: depStart,
+      frequency: dep.depreciationFrequency || "YEARLY",
+      roundOff: dep.roundOff ?? false,
+      decimalPlaces: dep.decimalPlaces ?? 2,
+    };
 
-    const prevBook = Number(dep.currentBookValue ?? cost);
-    const prevAccum = Number(dep.accumulatedDepreciation ?? 0);
-    let depreciationAmount = 0;
-
-    if (method === "SL") {
-      const annual = (cost - salvage) / lifeYears;
-      depreciationAmount = dep.depreciationFrequency === "MONTHLY" ? annual / 12 : annual;
-    } else if (method === "DB") {
-      const periodRate = dep.depreciationFrequency === "MONTHLY" ? (rate / 100) / 12 : (rate / 100);
-      // Indian IT Act 180-day rule: first year only (no lastCalculatedAt), yearly only
-      const isFirstPeriod = !dep.lastCalculatedAt;
-      const effectiveRate = (!isMonthly && isFirstPeriod && isSecondHalfOfIndianFY(depStart))
-        ? periodRate / 2
-        : periodRate;
-      depreciationAmount = prevBook * effectiveRate;
-    } else {
-      continue;
-    }
-
-    const maxAllowed = Math.max(0, prevBook - salvage);
-    depreciationAmount = Math.min(depreciationAmount, maxAllowed);
-    if (depreciationAmount <= 0) continue;
-
-    // Apply per-asset round-off setting
-    const roundOff = dep.roundOff ?? false;
-    const decimalPlaces = dep.decimalPlaces ?? 2;
-    depreciationAmount = applyRoundOff(depreciationAmount, roundOff, decimalPlaces);
-
-    const newBook = applyRoundOff(prevBook - depreciationAmount, roundOff, decimalPlaces);
-    const newAccum = Number((prevAccum + depreciationAmount).toFixed(2));
+    const result = await calculateAssetFYDepreciation(assetForDep, cfg, fy);
+    if (result.preMigrationSkipped) continue;
+    if (result.depreciationAmount <= 0) continue;
 
     eligible.push({
       depId: dep.id,
@@ -599,17 +572,26 @@ async function computeEligibleDepreciations(filters: DepreciationFilters = {}) {
       category: dep.asset.assetCategory?.name || null,
       method,
       frequency: dep.depreciationFrequency || "YEARLY",
-      roundOff,
-      decimalPlaces,
-      overridden: filters.forceOverride && periodEnd > today,
-      previousBookValue: prevBook,
-      previousAccumulated: prevAccum,
-      depreciationAmount,
-      newBookValue: newBook,
-      newAccumulated: newAccum,
+      roundOff: dep.roundOff ?? false,
+      decimalPlaces: dep.decimalPlaces ?? 2,
+      overridden: filters.forceOverride && fy.fyEnd > today,
+      previousBookValue: result.openingWdv,
+      previousAccumulated: result.accDepBefore,
+      depreciationAmount: result.depreciationAmount,
+      newBookValue: result.closingWdv,
+      newAccumulated: result.accDepAfter,
       salvageValue: salvage,
-      periodStart: periodStart,
-      periodEnd,
+      periodStart: fy.fyStart,
+      periodEnd: fy.fyEnd,
+      // Split breakdown — for UI display
+      fyLabel: result.fyLabel,
+      depOnOpening: result.depOnOpening,
+      depOnAdditions: result.depOnAdditions,
+      additionsAmount: result.additionsAmount,
+      effectiveRate: result.effectiveRate,
+      halfYearApplied: result.halfYearApplied,
+      isFirstFY: result.isFirstFY,
+      openingWdvSource: result.openingWdvSource,
     });
   }
 
@@ -909,7 +891,7 @@ export const runBatchDepreciation = async (req: AuthenticatedRequest, res: Respo
         },
       });
 
-      // Create draft log entries linked to this batch run
+      // Create draft log entries linked to this batch run — with split breakdown
       for (const e of eligible) {
         await tx.depreciationLog.create({
           data: {
@@ -918,6 +900,15 @@ export const runBatchDepreciation = async (req: AuthenticatedRequest, res: Respo
             periodEnd: e.periodEnd,
             depreciationAmount: String(e.depreciationAmount.toFixed(2)),
             bookValueAfter: String(e.newBookValue.toFixed(2)),
+            fyLabel: e.fyLabel ?? null,
+            openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
+            depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
+            depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
+            additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
+            effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
+            halfYearApplied: e.halfYearApplied ?? false,
+            isFirstFY: e.isFirstFY ?? false,
+            openingWdvSource: e.openingWdvSource ?? null,
             doneById: employeeId,
             reason: "BATCH_DRAFT",
             batchRunId: run.id,
@@ -1016,6 +1007,15 @@ export const runAssetDepreciation = async (req: AuthenticatedRequest, res: Respo
           periodEnd: e.periodEnd,
           depreciationAmount: String(e.depreciationAmount.toFixed(2)),
           bookValueAfter: String(e.newBookValue.toFixed(2)),
+          fyLabel: e.fyLabel ?? null,
+          openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
+          depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
+          depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
+          additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
+          effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
+          halfYearApplied: e.halfYearApplied ?? false,
+          isFirstFY: e.isFirstFY ?? false,
+          openingWdvSource: e.openingWdvSource ?? null,
           doneById: employeeId,
           reason: "BATCH_DRAFT",
           batchRunId: run.id,

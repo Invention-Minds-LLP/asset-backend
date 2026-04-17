@@ -50,8 +50,8 @@ function getFinancialYearParts(date = new Date()) {
 
 async function createAssetWithGeneratedId(assetData: any) {
     const assetId = assetData.isLegacyAsset
-        ? await generateLegacyAssetId(assetData.purchaseDate)
-        : await generateAssetId(assetData.modeOfProcurement || "PURCHASE");
+        ? await generateLegacyAssetId(assetData.purchaseDate, undefined, assetData.assetCategoryId)
+        : await generateAssetId(assetData.modeOfProcurement || "PURCHASE", undefined, { categoryId: assetData.assetCategoryId });
     return await prisma.asset.create({ data: { assetId, ...assetData } });
 }
 

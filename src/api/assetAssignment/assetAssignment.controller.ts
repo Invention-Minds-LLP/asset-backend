@@ -428,7 +428,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
 
     const currentAsset = await prisma.asset.findUnique({
       where: { id: assignment.assetId },
-      select: { assetId: true, departmentId: true },
+      select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true },
     });
 
     if (currentAsset?.assetId.startsWith("TEMP-") && currentAsset.departmentId) {
@@ -438,7 +438,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       });
 
       if (acknowledger?.role === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
-        issuedAssetId = await generateAssetId((currentAsset as any).modeOfProcurement || "PURCHASE");
+        issuedAssetId = await generateAssetId((currentAsset as any).modeOfProcurement || "PURCHASE", undefined, { categoryId: (currentAsset as any).assetCategoryId });
 
         await prisma.asset.update({
           where: { id: assignment.assetId },

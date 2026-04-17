@@ -904,8 +904,10 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
     // Build a map: categoryName → pool remainder rows (to merge after individual rows)
     // For each pool schedule, subtract what's already individualized so we don't double-count.
     const poolRemainderMap = new Map<string, {
-      openingGross: number; additions: number; deletions: number; closingGross: number;
-      openingDep: number; periodDep: number; closingDep: number;
+      openingGross: number; additions: number; additions1H: number; additions2H: number;
+      deletions: number; deletions1H: number; deletions2H: number; closingGross: number;
+      openingDep: number; depOnOpening: number; depOnAdditions: number;
+      periodDep: number; closingDep: number;
       openingNetBlock: number; closingNetBlock: number; rate: number;
       poolCode: string;
     }[]>();
@@ -929,7 +931,13 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
       const remainingPeriodDep   = +(Number(sched.depreciationForPeriod) * remainingRatio).toFixed(2);
       const remainingOpenGross   = +(Number(sched.openingGrossBlock) * remainingRatio).toFixed(2);
       const remainingAdditions   = +(Number(sched.additions) * remainingRatio).toFixed(2);
+      const remainingAdditions1H = +(Number((sched as any).additionsFirstHalf ?? 0) * remainingRatio).toFixed(2);
+      const remainingAdditions2H = +(Number((sched as any).additionsSecondHalf ?? 0) * remainingRatio).toFixed(2);
       const remainingDeletions   = +(Number(sched.deletions) * remainingRatio).toFixed(2);
+      const remainingDeletions1H = +(Number((sched as any).deletionsFirstHalf ?? 0) * remainingRatio).toFixed(2);
+      const remainingDeletions2H = +(Number((sched as any).deletionsSecondHalf ?? 0) * remainingRatio).toFixed(2);
+      const remainingDepOnOpen   = +(Number((sched as any).depOnOpeningBlock ?? 0) * remainingRatio).toFixed(2);
+      const remainingDepOnAddn   = +(Number((sched as any).depOnAdditions ?? 0) * remainingRatio).toFixed(2);
       const remainingOpenNet     = +(remainingOpenGross - remainingOpenDep).toFixed(2);
       const remainingCloseNet    = +(remainingGross - Math.max(0, remainingCloseDep)).toFixed(2);
 
@@ -939,9 +947,15 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         poolRemainderMap.get(catName)!.push({
           openingGross: remainingOpenGross,
           additions: remainingAdditions,
+          additions1H: remainingAdditions1H,
+          additions2H: remainingAdditions2H,
           deletions: remainingDeletions,
+          deletions1H: remainingDeletions1H,
+          deletions2H: remainingDeletions2H,
           closingGross: +remainingGross.toFixed(2),
           openingDep: remainingOpenDep,
+          depOnOpening: remainingDepOnOpen,
+          depOnAdditions: remainingDepOnAddn,
           periodDep: remainingPeriodDep,
           closingDep: Math.max(0, remainingCloseDep),
           openingNetBlock: remainingOpenNet,
@@ -963,15 +977,20 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
     // Also collect all category names from pool remainders that have no individual assets
     const allCatNames = new Set<string>([...categoryMap.keys(), ...poolRemainderMap.keys()]);
 
+    // Helper: is date in second half of Indian FY (Oct 1 – Mar 31)?
+    const isSecondHalf = (d: Date) => { const m = d.getMonth(); return m >= 9 || m <= 2; };
+
     const rows: any[] = [];
-    let gOpenGross = 0, gAdditions = 0, gDeletions = 0, gCloseGross = 0;
-    let gOpenDep = 0, gPeriodDep = 0, gCloseDep = 0;
+    let gOpenGross = 0, gAdditions = 0, gAdditions1H = 0, gAdditions2H = 0;
+    let gDeletions = 0, gDeletions1H = 0, gDeletions2H = 0, gCloseGross = 0;
+    let gOpenDep = 0, gDepOnOpening = 0, gDepOnAdditions = 0, gPeriodDep = 0, gCloseDep = 0;
     let gNetCurrent = 0, gNetPrevious = 0;
 
     for (const catName of allCatNames) {
-      let openingGross = 0, additions = 0, deletions = 0;
+      let openingGross = 0, additions = 0, additions1H = 0, additions2H = 0;
+      let deletions = 0, deletions1H = 0, deletions2H = 0;
       let closingAccDep = 0;
-      let catAssetPeriodDep = 0; // per-asset computed period dep (with half-year convention)
+      let depOnOpening = 0, depOnAdditions = 0;
       let totalRate = 0, rateCount = 0;
 
       const catAssets = categoryMap.get(catName) ?? [];
@@ -991,14 +1010,18 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
           openingGross += cost;
         }
 
-        // Additions: acquired during FY
-        if (isAcquiredInFY) {
+        // Additions: acquired during FY — split by half
+        if (isAcquiredInFY && purchaseDate) {
           additions += cost;
+          if (isSecondHalf(purchaseDate)) { additions2H += cost; }
+          else { additions1H += cost; }
         }
 
-        // Deletions: disposed during FY (use original cost)
-        if (isDisposedInFY) {
+        // Deletions: disposed during FY — split by half
+        if (isDisposedInFY && disposalDate) {
           deletions += cost;
+          if (isSecondHalf(disposalDate)) { deletions2H += cost; }
+          else { deletions1H += cost; }
         }
 
         const dep = asset.depreciation;
@@ -1018,50 +1041,62 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
           if (assetRate > 0 && depStart) {
             if (method === "DB") {
               const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
-              catAssetPeriodDep += Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
-            } else { // SL
-              catAssetPeriodDep += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+              const d = Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
+              depOnOpening += d;
+            } else {
+              depOnOpening += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
             }
           }
         } else if (isAcquiredInFY && assetRate > 0 && purchaseDate) {
           // Addition: Indian IT Act half-year rule applies for DB method only
           if (method === "DB") {
             const halfYear = _faIsSecondHalfFY(purchaseDate);
-            catAssetPeriodDep += cost * (halfYear ? assetRate / 200 : assetRate / 100);
-          } else { // SL
-            catAssetPeriodDep += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+            depOnAdditions += cost * (halfYear ? assetRate / 200 : assetRate / 100);
+          } else {
+            depOnAdditions += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
           }
         }
       }
 
       // ── Merge pool remainder rows for this category ──────────────────────────
-      // These represent the auditor-certified balance of assets not yet individualized.
-      // Added on top of individual asset figures — no double count because
-      // pool remainder = pool total MINUS already-extracted individual asset costs.
       const poolRemainders = poolRemainderMap.get(catName) ?? [];
-      let poolPeriodDep = 0;
       for (const pr of poolRemainders) {
         openingGross  += pr.openingGross;
         additions     += pr.additions;
+        additions1H   += pr.additions1H;
+        additions2H   += pr.additions2H;
         deletions     += pr.deletions;
+        deletions1H   += pr.deletions1H;
+        deletions2H   += pr.deletions2H;
         closingAccDep += pr.closingDep;
-        poolPeriodDep += pr.periodDep;
+        depOnOpening  += pr.depOnOpening;
+        depOnAdditions += pr.depOnAdditions;
         totalRate     += pr.rate;
         rateCount     += 1;
+      }
+
+      // If additions exist but half-year split is incomplete (old pool data or assets without purchaseDate),
+      // assign the unclassified portion so totals always match
+      const addnClassified = additions1H + additions2H;
+      if (additions > 0 && addnClassified < additions) {
+        const unclassified = +(additions - addnClassified).toFixed(2);
+        additions1H += unclassified; // default unclassified to 1H (full rate — conservative)
+      }
+      const delClassified = deletions1H + deletions2H;
+      if (deletions > 0 && delClassified < deletions) {
+        deletions1H += +(deletions - delClassified).toFixed(2);
       }
 
       const closingGross = openingGross + additions - deletions;
       const avgRate = rateCount > 0 ? +(totalRate / rateCount).toFixed(2) : 0;
 
-      // Period dep: per-asset computed (individual assets) + auditor-certified (pool remainder)
-      const periodDep = +(catAssetPeriodDep + poolPeriodDep).toFixed(2);
+      const periodDep = +(depOnOpening + depOnAdditions).toFixed(2);
       let openingDep = +(closingAccDep - periodDep).toFixed(2);
       if (openingDep < 0) openingDep = 0;
 
       const netCurrent  = +(closingGross - closingAccDep).toFixed(2);
       const netPrevious = +(openingGross - openingDep).toFixed(2);
 
-      // Flag if this category has undigitized pool balance (useful for frontend warning)
       const hasPoolBalance = poolRemainders.length > 0;
       const poolCodes      = poolRemainders.map(p => p.poolCode);
 
@@ -1069,10 +1104,16 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         category: catName,
         openingGross: +openingGross.toFixed(2),
         additions: +additions.toFixed(2),
+        additions1H: +additions1H.toFixed(2),
+        additions2H: +additions2H.toFixed(2),
         deletions: +deletions.toFixed(2),
+        deletions1H: +deletions1H.toFixed(2),
+        deletions2H: +deletions2H.toFixed(2),
         closingGross: +closingGross.toFixed(2),
         rate: avgRate,
         openingDep: +openingDep.toFixed(2),
+        depOnOpening: +depOnOpening.toFixed(2),
+        depOnAdditions: +depOnAdditions.toFixed(2),
         periodDep: +periodDep.toFixed(2),
         closingDep: +closingAccDep.toFixed(2),
         netCurrent: +netCurrent.toFixed(2),
@@ -1081,17 +1122,23 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         poolCodes,
       });
 
-      gOpenGross += openingGross; gAdditions += additions; gDeletions += deletions;
-      gCloseGross += closingGross; gOpenDep += openingDep; gPeriodDep += periodDep;
-      gCloseDep += closingAccDep; gNetCurrent += netCurrent; gNetPrevious += netPrevious;
+      gOpenGross += openingGross; gAdditions += additions; gAdditions1H += additions1H; gAdditions2H += additions2H;
+      gDeletions += deletions; gDeletions1H += deletions1H; gDeletions2H += deletions2H;
+      gCloseGross += closingGross; gOpenDep += openingDep;
+      gDepOnOpening += depOnOpening; gDepOnAdditions += depOnAdditions;
+      gPeriodDep += periodDep; gCloseDep += closingAccDep;
+      gNetCurrent += netCurrent; gNetPrevious += netPrevious;
     }
 
     const grandTotal = {
-      openingGross: +gOpenGross.toFixed(2), additions: +gAdditions.toFixed(2),
-      deletions: +gDeletions.toFixed(2), closingGross: +gCloseGross.toFixed(2),
-      openingDep: +gOpenDep.toFixed(2), periodDep: +gPeriodDep.toFixed(2),
-      closingDep: +gCloseDep.toFixed(2), netCurrent: +gNetCurrent.toFixed(2),
-      netPrevious: +gNetPrevious.toFixed(2),
+      openingGross: +gOpenGross.toFixed(2),
+      additions: +gAdditions.toFixed(2), additions1H: +gAdditions1H.toFixed(2), additions2H: +gAdditions2H.toFixed(2),
+      deletions: +gDeletions.toFixed(2), deletions1H: +gDeletions1H.toFixed(2), deletions2H: +gDeletions2H.toFixed(2),
+      closingGross: +gCloseGross.toFixed(2),
+      openingDep: +gOpenDep.toFixed(2),
+      depOnOpening: +gDepOnOpening.toFixed(2), depOnAdditions: +gDepOnAdditions.toFixed(2),
+      periodDep: +gPeriodDep.toFixed(2), closingDep: +gCloseDep.toFixed(2),
+      netCurrent: +gNetCurrent.toFixed(2), netPrevious: +gNetPrevious.toFixed(2),
     };
 
     if (exportFormat === "excel") {

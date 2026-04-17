@@ -348,6 +348,21 @@ model Asset {
   historicalCostAsOf         DateTime? // "costs as of this date" — the closing date of pre-system history
   historicalCostNote         String?   @db.Text           // free text explanation / source of figures
 
+  // ── Legacy Migration (audit cut-off freeze) ─────────────────────────────
+  // For 5+ year old institutes onboarding with audited FA register.
+  // Engine NEVER computes depreciation for periods before migrationDate.
+  migrationMode               String?   // GRANULAR | PROPORTIONAL | CARRY_AS_NEW
+  migrationDate               DateTime? // cut-off date; opening balances frozen as of this date
+  originalPurchaseDate        DateTime? // pre-migration acquisition date (for half-year decision in migration FY)
+  originalCost                Decimal?  @db.Decimal(14, 2) // pre-migration gross block
+  accDepAtMigration           Decimal?  @db.Decimal(14, 2) // accumulated dep frozen at migration
+  openingWdvAtMigration       Decimal?  @db.Decimal(14, 2) // opening WDV at migration (= cost − accDep)
+  auditedBookValueAtMigration Decimal?  @db.Decimal(14, 2) // for variance reconciliation
+  auditReferenceId            String?   // auditor sign-off ref (firm + report no)
+  migrationApprovedById       Int?      // CFO who signed off
+  migrationApprovedAt         DateTime?
+  migrationNotes              String?   @db.Text
+
   // ── Asset Pool (phased digitization) ────────────────────────────────────
   // When an asset is extracted from a bulk pool and individually entered, link it back.
   assetPoolId                Int?
@@ -777,6 +792,8 @@ model Employee {
   eWasteCreated              EWasteRecord[]                     @relation("EWasteCreatedBy")
   serviceInvoicesCreated     ServiceInvoice[]                   @relation("ServiceInvoiceCreatedBy")
   serviceInvoicesApproved    ServiceInvoice[]                   @relation("ServiceInvoiceApprovedBy")
+  reconciliationsCreated     ReconciliationSnapshot[]           @relation("ReconCreatedBy")
+  reconciliationsResolved    ReconciliationSnapshot[]           @relation("ReconResolvedBy")
 
   @@map("employee")
 }
@@ -883,6 +900,17 @@ model DepreciationLog {
   periodEnd          DateTime
   depreciationAmount Decimal  @db.Decimal(12, 2)
   bookValueAfter     Decimal  @db.Decimal(12, 2)
+
+  // ── Split-method breakdown (Indian IT Act compliant) ────────────────────
+  fyLabel            String?  // e.g. "FY2024-25"
+  openingWdv         Decimal? @db.Decimal(14, 2) // WDV at start of this period (= prior closing)
+  depOnOpening       Decimal? @db.Decimal(14, 2) // dep computed on opening WDV @ full rate
+  depOnAdditions     Decimal? @db.Decimal(14, 2) // dep on additions in this FY (full or half rate)
+  additionsAmount    Decimal? @db.Decimal(14, 2) // gross additions in this FY (per asset = its cost in Y1)
+  effectiveRate      Decimal? @db.Decimal(8, 4)  // final % rate applied (after half-year adjust)
+  halfYearApplied    Boolean? @default(false)    // true if 50% rule used
+  isFirstFY          Boolean? @default(false)    // true if this is the asset's first FY of dep
+  openingWdvSource   String?  // PRIOR_LOG | PURCHASE_COST | MIGRATION
 
   doneById Int?
   doneBy   Employee? @relation(fields: [doneById], references: [id])
@@ -3968,12 +3996,18 @@ model AssetPoolDepreciationSchedule {
 
   openingGrossBlock       Decimal   @db.Decimal(14, 2)
   additions               Decimal   @default(0) @db.Decimal(14, 2)
+  additionsFirstHalf      Decimal   @default(0) @db.Decimal(14, 2) // Apr-Sep (full dep rate)
+  additionsSecondHalf     Decimal   @default(0) @db.Decimal(14, 2) // Oct-Mar (half dep rate)
   deletions               Decimal   @default(0) @db.Decimal(14, 2)
+  deletionsFirstHalf      Decimal   @default(0) @db.Decimal(14, 2) // Apr-Sep
+  deletionsSecondHalf     Decimal   @default(0) @db.Decimal(14, 2) // Oct-Mar
   closingGrossBlock       Decimal   @db.Decimal(14, 2)
 
   openingAccumulatedDep   Decimal   @default(0) @db.Decimal(14, 2)
   depreciationRate        Decimal   @db.Decimal(5, 2)   // e.g. 15.00
-  depreciationForPeriod   Decimal   @db.Decimal(14, 2)
+  depOnOpeningBlock       Decimal?  @db.Decimal(14, 2)  // dep on opening WDV at full rate
+  depOnAdditions          Decimal?  @db.Decimal(14, 2)  // dep on additions (full + half combined)
+  depreciationForPeriod   Decimal   @db.Decimal(14, 2)  // total = depOnOpening + depOnAdditions
   closingAccumulatedDep   Decimal   @db.Decimal(14, 2)
 
   openingNetBlock         Decimal   @db.Decimal(14, 2)
@@ -4062,4 +4096,47 @@ model ServiceInvoice {
   @@index([assetId])
   @@index([vendorId])
   @@map("serviceinvoice")
+}
+
+// ── Reconciliation Snapshot ─────────────────────────────────────────────────
+// Compares System-computed depreciation/value vs Books (accounts) vs Audit (FA register)
+// Generated at FY-end or on demand for variance reporting and auditor sign-off.
+model ReconciliationSnapshot {
+  id           Int      @id @default(autoincrement())
+  asOfDate     DateTime
+  scope        String   // ASSET | CATEGORY | POOL
+  scopeId      Int      // assetId / categoryId / poolId
+  scopeLabel   String?  // human-readable (e.g. "MEDICAL EQUIPMENTS / FY2024-25")
+
+  systemGrossBlock     Decimal? @db.Decimal(15, 2)
+  systemAccDep         Decimal? @db.Decimal(15, 2)
+  systemNetBlock       Decimal? @db.Decimal(15, 2)
+
+  booksGrossBlock      Decimal? @db.Decimal(15, 2)
+  booksAccDep          Decimal? @db.Decimal(15, 2)
+  booksNetBlock        Decimal? @db.Decimal(15, 2)
+
+  auditGrossBlock      Decimal? @db.Decimal(15, 2)
+  auditAccDep          Decimal? @db.Decimal(15, 2)
+  auditNetBlock        Decimal? @db.Decimal(15, 2)
+
+  varianceVsBooks      Decimal  @default(0) @db.Decimal(15, 2)
+  varianceVsAudit      Decimal  @default(0) @db.Decimal(15, 2)
+  variancePctVsBooks   Decimal? @db.Decimal(8, 2)
+  variancePctVsAudit   Decimal? @db.Decimal(8, 2)
+  varianceFlagged      Boolean  @default(false)
+
+  status               String   @default("OPEN") // OPEN | RESOLVED | ACCEPTED
+  resolutionNotes      String?  @db.Text
+  resolvedById         Int?
+  resolvedBy           Employee? @relation("ReconResolvedBy", fields: [resolvedById], references: [id])
+  resolvedAt           DateTime?
+
+  createdById          Int?
+  createdBy            Employee? @relation("ReconCreatedBy", fields: [createdById], references: [id])
+  createdAt            DateTime @default(now())
+
+  @@index([asOfDate, scope])
+  @@index([varianceFlagged])
+  @@map("reconciliationsnapshot")
 }

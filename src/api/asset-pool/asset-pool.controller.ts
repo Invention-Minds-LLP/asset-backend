@@ -86,9 +86,27 @@ export const listPools = async (_req: Request, res: Response): Promise<void> => 
                 totalPoolCost,
                 allocatedCost,
                 unallocatedCost: totalPoolCost - allocatedCost,
-                latestNetBlock: latestSched ? Number(latestSched.closingNetBlock) : null,
-                latestGrossBlock: latestSched ? Number(latestSched.closingGrossBlock) : null,
+                // Latest FA schedule rollforward (per-FY breakdown)
                 latestFY: latestSched?.financialYear ?? null,
+                latestOpeningGrossBlock: latestSched ? Number(latestSched.openingGrossBlock) : null,
+                latestAdditions:         latestSched ? Number(latestSched.additions) : null,
+                latestAdditions1H:       latestSched ? Number((latestSched as any).additionsFirstHalf ?? 0) : null,
+                latestAdditions2H:       latestSched ? Number((latestSched as any).additionsSecondHalf ?? 0) : null,
+                latestDeletions:         latestSched ? Number(latestSched.deletions) : null,
+                latestDeletions1H:       latestSched ? Number((latestSched as any).deletionsFirstHalf ?? 0) : null,
+                latestDeletions2H:       latestSched ? Number((latestSched as any).deletionsSecondHalf ?? 0) : null,
+                latestClosingGrossBlock: latestSched ? Number(latestSched.closingGrossBlock) : null,
+                latestOpeningAccDep:     latestSched ? Number(latestSched.openingAccumulatedDep) : null,
+                latestDepOnOpening:      latestSched ? Number((latestSched as any).depOnOpeningBlock ?? 0) : null,
+                latestDepOnAdditions:    latestSched ? Number((latestSched as any).depOnAdditions ?? 0) : null,
+                latestDepForPeriod:      latestSched ? Number(latestSched.depreciationForPeriod) : null,
+                latestClosingAccDep:     latestSched ? Number(latestSched.closingAccumulatedDep) : null,
+                latestDepRate:           latestSched ? Number(latestSched.depreciationRate) : null,
+                latestOpeningNetBlock:   latestSched ? Number(latestSched.openingNetBlock) : null,
+                latestClosingNetBlock:   latestSched ? Number(latestSched.closingNetBlock) : null,
+                // Backward-compat aliases (still used by some places)
+                latestNetBlock:   latestSched ? Number(latestSched.closingNetBlock) : null,
+                latestGrossBlock: latestSched ? Number(latestSched.closingGrossBlock) : null,
                 status: pool.status,
                 notes: pool.notes,
                 createdAt: pool.createdAt,
@@ -243,6 +261,30 @@ export const getPool = async (req: Request, res: Response): Promise<void> => {
             ? Math.max(0, Number(latestSched.closingGrossBlock) - allocatedCost) / Number(latestSched.closingGrossBlock)
             : 0;
 
+        // ─── Per-FY allocation breakdown ──────────────────────────────────
+        // For each FY in the schedule, compute:
+        //   - additions (from the schedule)
+        //   - sum of individualized assets that were added in that FY (by financialYearAdded)
+        //   - pending (additions − individualized in that FY)
+        const schedules = (pool as any).depreciationSchedules ?? [];
+        const perFYAllocation = schedules.map((s: any) => {
+            const fy = s.financialYear;
+            const assetsInFY = linkedAssets.filter((a: any) => a.financialYearAdded === fy);
+            const individualizedCost = assetsInFY.reduce((sum: number, a: any) => sum + Number(a.purchaseCost ?? 0), 0);
+            const additions = Number(s.additions);
+            return {
+                financialYear: fy,
+                additions,
+                individualizedCount: assetsInFY.length,
+                individualizedCost,
+                pendingCost: Number((additions - individualizedCost).toFixed(2)),
+                pendingPct: additions > 0
+                    ? Math.round(((additions - individualizedCost) / additions) * 1000) / 10
+                    : 0,
+                isOverAllocated: individualizedCost > additions,
+            };
+        });
+
         res.json({
             id: pool.id,
             poolCode: pool.poolCode,
@@ -271,6 +313,7 @@ export const getPool = async (req: Request, res: Response): Promise<void> => {
             updatedAt: pool.updatedAt,
             adjustments: pool.adjustments,
             depreciationSchedules: (pool as any).depreciationSchedules,
+            perFYAllocation,
             assets: linkedAssets,
         });
     } catch (err) {
@@ -618,11 +661,32 @@ export const downloadFaRegisterTemplate = async (_req: Request, res: Response): 
         const instructions = [
             ["FA Register Import Template — Instructions"],
             [""],
-            ["One row per category per financial year. Each row creates one Asset Pool + its Depreciation Schedule."],
-            ["financialYear format: FY2022-23  (use the year the FA schedule ends, e.g. FY2023-24 for 31 March 2024)"],
-            ["All monetary values in Indian Rupees (no commas). Leave 0 if not applicable."],
-            ["originalQuantity: total count of assets in this category from the FA register (can be 0 if unknown)."],
-            ["financialYearEnd: last date of the FY in YYYY-MM-DD format, e.g. 2023-03-31"],
+            ["This template contains DEMO DATA with small values to understand the depreciation calculation."],
+            [""],
+            ["DEPRECIATION RULE (Indian Income Tax Act — Half-Year Rule):"],
+            ["  - Assets purchased Apr 1 to Sep 30 (1st half of FY) → FULL depreciation rate in Year 1"],
+            ["  - Assets purchased Oct 1 to Mar 31 (2nd half of FY) → HALF depreciation rate in Year 1"],
+            ["  - From Year 2 onwards → FULL rate on Opening WDV (carried from prior year closing)"],
+            ["  - If new additions in Year 2+, depreciation is SPLIT:"],
+            ["      (a) Opening WDV × Full Rate"],
+            ["      (b) New Addition × Full or Half Rate (based on purchase date)"],
+            ["      Total Dep = (a) + (b)"],
+            [""],
+            ["EXAMPLE (see MEDICAL EQUIPMENTS in FY2023-24):"],
+            ["  Opening WDV = 18,500 (from FY2022-23 closing NB)"],
+            ["  New Addition = 10,000 (bought in 1st half → full 15%)"],
+            ["  Dep on Opening = 18,500 × 15% = 2,775"],
+            ["  Dep on Addition = 10,000 × 15% = 1,500"],
+            ["  Total Dep = 2,775 + 1,500 = 4,275"],
+            ["  Closing NB = (18,500 + 10,000) - 4,275 = 24,225"],
+            [""],
+            ["HOW TO USE:"],
+            ["  1. Replace the demo data with your audited FA register figures"],
+            ["  2. One row per category per financial year"],
+            ["  3. financialYear format: FY2022-23"],
+            ["  4. financialYearEnd: last date of FY in YYYY-MM-DD format (e.g. 2023-03-31)"],
+            ["  5. All monetary values in Indian Rupees (no commas)"],
+            ["  6. The 'notes' column explains each calculation — useful for demo, optional for real data"],
         ];
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(instructions), "Instructions");
 
@@ -634,129 +698,145 @@ export const downloadFaRegisterTemplate = async (_req: Request, res: Response): 
             "originalQuantity",        // total assets in this pool (0 if unknown)
             "financialYearEnd",        // e.g. 2023-03-31
             "openingGrossBlock",       // AS ON 01.04.XXXX
-            "additions",               // Additions during FY
-            "deletions",               // Deletions during FY
+            "additions",               // Total additions during FY
+            "additionsFirstHalf",      // Apr-Sep additions (full dep rate)
+            "additionsSecondHalf",     // Oct-Mar additions (half dep rate)
+            "deletions",               // Total deletions during FY
+            "deletionsFirstHalf",      // Apr-Sep deletions
+            "deletionsSecondHalf",     // Oct-Mar deletions
             "closingGrossBlock",       // UPTO 31.03.XXXX
             "openingAccumulatedDep",   // UP TO previous year
             "depreciationRate",        // RATE % (e.g. 15)
-            "depreciationForPeriod",   // FOR THE PERIOD
+            "depOnOpeningBlock",       // Dep on opening WDV at full rate
+            "depOnAdditions",          // Dep on additions (full + half)
+            "depreciationForPeriod",   // Total = depOnOpening + depOnAdditions
             "closingAccumulatedDep",   // UPTO 31.03.XXXX (dep column)
             "closingNetBlock",         // NET BLOCK current year
             "previousYearNetBlock",    // NET BLOCK previous year (reference only)
             "notes",                   // optional remarks
         ];
 
-        // ── JMRH FA Register data — FY2022-23, FY2023-24, FY2024-25 ──────────────
-        // Verify figures against the original audited FA register before importing.
+        // ── Demo FA Register — 3 years × 4 categories ─────────────────────────
+        // Small values so the calculation is easy to verify manually.
+        //
+        // DEPRECIATION RULE (Indian IT Act — Half-Year Rule):
+        //   Apr-Sep purchase → FULL rate in Year 1
+        //   Oct-Mar purchase → HALF rate in Year 1
+        //   Year 2 onwards  → FULL rate on Opening WDV + half/full on new additions
+        //
         // Each row: [financialYear, category, department, qty, fyEnd,
-        //            openGB, additions, deletions, closeGB,
-        //            openAccDep, rate%, depForPeriod, closeAccDep,
+        //            openGB, additions, addns1stHalf, addns2ndHalf,
+        //            deletions, del1stHalf, del2ndHalf, closeGB,
+        //            openAccDep, rate%, depOnOpening, depOnAdditions, depForPeriod, closeAccDep,
         //            closeNB, prevYearNB, notes]
 
-        // ── FY2022-23 ────────────────────────────────────────────────────────────
         const rows: any[][] = [
+            // ══════════════════════════════════════════════════════════════════
+            //  FY2022-23 (YEAR 1) — Fresh institute, all assets are new
+            // ══════════════════════════════════════════════════════════════════
+
+            // BUILDING: 1,00,000 in 1st half (Apr-Sep) → FULL 10%
             ["FY2022-23","BUILDING","",1,"2023-03-31",
-                287185029, 0, 0, 287185029,
-                0, 5, 7179626, 7179626,
-                280005403, 287185029, ""],
-            ["FY2022-23","FURNITURE & FIXTURES","",0,"2023-03-31",
-                2020979, 0, 0, 2020979,
-                0, 10, 101049, 101049,
-                1919930, 2020979, ""],
-            ["FY2022-23","VEHICLES","",0,"2023-03-31",
-                4063159, 0, 0, 4063159,
-                0, 15, 304737, 304737,
-                3758422, 4063159, ""],
-            ["FY2022-23","MACHINERY & EQUIPMENTS","",0,"2023-03-31",
-                75091930, 0, 0, 75091930,
-                0, 15, 5631895, 5631895,
-                69460035, 75091930, ""],
+                0, 100000, 100000, 0, 0, 0, 0, 100000,
+                0, 10, 0, 10000, 10000, 10000,
+                90000, 0, "Y1: 1st half addition → full 10%. Dep = 1,00,000 x 10% = 10,000"],
 
-            // ── FY2023-24 ──────────────────────────────────────────────────────
+            // MEDICAL EQUIPMENT: 20,000 in 2nd half (Oct-Mar) → HALF 15% = 7.5%
+            ["FY2022-23","MEDICAL EQUIPMENTS","",3,"2023-03-31",
+                0, 20000, 0, 20000, 0, 0, 0, 20000,
+                0, 15, 0, 1500, 1500, 1500,
+                18500, 0, "Y1: 2nd half addition → half 15% = 7.5%. Dep = 20,000 x 7.5% = 1,500"],
+
+            // FURNITURE: 50,000 in 1st half → FULL 10%
+            ["FY2022-23","FURNITURE & FIXTURES","",5,"2023-03-31",
+                0, 50000, 50000, 0, 0, 0, 0, 50000,
+                0, 10, 0, 5000, 5000, 5000,
+                45000, 0, "Y1: 1st half addition → full 10%. Dep = 50,000 x 10% = 5,000"],
+
+            // VEHICLES: 80,000 in 1st half → FULL 15%
+            ["FY2022-23","VEHICLES","",2,"2023-03-31",
+                0, 80000, 80000, 0, 0, 0, 0, 80000,
+                0, 15, 0, 12000, 12000, 12000,
+                68000, 0, "Y1: 1st half addition → full 15%. Dep = 80,000 x 15% = 12,000"],
+
+            // ══════════════════════════════════════════════════════════════════
+            //  FY2023-24 (YEAR 2) — Opening = Y1 closing
+            // ══════════════════════════════════════════════════════════════════
+
+            // BUILDING: No additions
             ["FY2023-24","BUILDING","",1,"2024-03-31",
-                287185029, 39908351, 0, 327093380,
-                7179626, 5, 15903768, 23083394,
-                304009986, 280005403, "Verify NB"],
-            ["FY2023-24","FURNITURE & FIXTURES","",0,"2024-03-31",
-                2020979, 8815498, 0, 10836477,
-                101049, 10, 1083648, 1184697,
-                9651780, 1919930, "Verify figures"],
-            ["FY2023-24","VEHICLES","",0,"2024-03-31",
-                4063159, 0, 196737, 3866422,
-                304737, 15, 579963, 884700,
-                2981722, 3758422, "Verify figures"],
-            ["FY2023-24","MACHINERY & EQUIPMENTS","",0,"2024-03-31",
-                75091930, 0, 3241751, 71850179,
-                5631895, 15, 5000543, 10632438,
-                61217741, 69460035, "Verify figures"],
-            ["FY2023-24","MEDICAL EQUIPMENTS","",0,"2024-03-31",
-                0, 42021343, 0, 42021343,
-                0, 15, 6030801, 6030801,
-                35990542, 0, "First year — verify rate"],
-            ["FY2023-24","ELECTRICAL EQUIPMENTS","",0,"2024-03-31",
-                0, 6254384, 0, 6254384,
-                0, 10, 712505, 712505,
-                5541879, 0, "First year — verify figures"],
-            ["FY2023-24","OFFICE EQUIPMENTS","",0,"2024-03-31",
-                0, 6549654, 0, 6549654,
-                0, 15, 369003, 369003,
-                6180651, 0, "First year — verify figures"],
-            ["FY2023-24","COMPUTER","",0,"2024-03-31",
-                0, 1414709, 0, 1414709,
-                0, 15, 212206, 212206,
-                1202503, 0, "First year — verify figures"],
-            ["FY2023-24","SURGICAL EQUIPMENTS","",0,"2024-03-31",
-                0, 2558700, 0, 2558700,
-                0, 20, 511740, 511740,
-                2046960, 0, "First year — verify figures"],
+                100000, 0, 0, 0, 0, 0, 0, 100000,
+                10000, 10, 9000, 0, 9000, 19000,
+                81000, 90000, "Y2: No additions. Dep on opening WDV 90,000 x 10% = 9,000"],
 
-            // ── FY2024-25 ──────────────────────────────────────────────────────
+            // MEDICAL EQUIP: +10,000 in 1st half (Apr-Sep) → full 15%
+            // Dep on opening: 18,500 x 15% = 2,775
+            // Dep on addition: 10,000 x 15% = 1,500
+            ["FY2023-24","MEDICAL EQUIPMENTS","",3,"2024-03-31",
+                20000, 10000, 10000, 0, 0, 0, 0, 30000,
+                1500, 15, 2775, 1500, 4275, 5775,
+                24225, 18500, "Y2 SPLIT: Opening 18500x15%=2775 + 1st half addn 10000x15%=1500 = 4275"],
+
+            // FURNITURE: +10,000 in 2nd half (Oct-Mar) → half 10% = 5%
+            // Dep on opening: 45,000 x 10% = 4,500
+            // Dep on addition: 10,000 x 5% = 500
+            ["FY2023-24","FURNITURE & FIXTURES","",5,"2024-03-31",
+                50000, 10000, 0, 10000, 0, 0, 0, 60000,
+                5000, 10, 4500, 500, 5000, 10000,
+                50000, 45000, "Y2 SPLIT: Opening 45000x10%=4500 + 2nd half addn 10000x5%=500 = 5000"],
+
+            // VEHICLES: No additions
+            ["FY2023-24","VEHICLES","",2,"2024-03-31",
+                80000, 0, 0, 0, 0, 0, 0, 80000,
+                12000, 15, 10200, 0, 10200, 22200,
+                57800, 68000, "Y2: No additions. Dep on opening WDV 68,000 x 15% = 10,200"],
+
+            // ══════════════════════════════════════════════════════════════════
+            //  FY2024-25 (YEAR 3) — Opening = Y2 closing
+            // ══════════════════════════════════════════════════════════════════
+
+            // BUILDING: +20,000 in 2nd half → half 10% = 5%
+            // Dep on opening: 81,000 x 10% = 8,100
+            // Dep on addition: 20,000 x 5% = 1,000
             ["FY2024-25","BUILDING","",1,"2025-03-31",
-                327093380, 6643134, 0, 333736514,
-                23083394, 5, 16253274, 39336668,
-                294399846, 304009986, "Verify NB"],
-            ["FY2024-25","FURNITURE & FIXTURES","",0,"2025-03-31",
-                10836477, 0, 0, 10836477,
-                1184697, 10, 1083648, 2268345,
-                8568132, 9651780, "Verify figures"],
-            ["FY2024-25","VEHICLES","",0,"2025-03-31",
-                3866422, 0, 0, 3866422,
-                884700, 15, 579963, 1464663,
-                2401759, 2981722, "Verify figures"],
-            ["FY2024-25","MACHINERY & EQUIPMENTS","",0,"2025-03-31",
-                71850179, 0, 0, 71850179,
-                10632438, 15, 9182614, 19815052,
-                52035127, 61217741, "Verify figures"],
-            ["FY2024-25","MEDICAL EQUIPMENTS","",0,"2025-03-31",
-                42021343, 0, 0, 42021343,
-                6030801, 15, 6094030, 12124831,
-                29896512, 35990542, "Verify figures"],
-            ["FY2024-25","ELECTRICAL EQUIPMENTS","",0,"2025-03-31",
-                6254384, 0, 0, 6254384,
-                712505, 10, 554188, 1266693,
-                4987691, 5541879, "Verify figures"],
-            ["FY2024-25","OFFICE EQUIPMENTS","",0,"2025-03-31",
-                6549654, 0, 0, 6549654,
-                369003, 15, 927448, 1296451,
-                5253203, 6180651, "Verify figures"],
-            ["FY2024-25","COMPUTER","",0,"2025-03-31",
-                1414709, 0, 0, 1414709,
-                212206, 15, 180376, 392582,
-                1022127, 1202503, "Verify figures"],
-            ["FY2024-25","SURGICAL EQUIPMENTS","",0,"2025-03-31",
-                2558700, 0, 0, 2558700,
-                511740, 20, 409392, 921132,
-                1637568, 2046960, "Verify figures"],
+                100000, 20000, 0, 20000, 0, 0, 0, 120000,
+                19000, 10, 8100, 1000, 9100, 28100,
+                91900, 81000, "Y3 SPLIT: Opening 81000x10%=8100 + 2nd half addn 20000x5%=1000 = 9100"],
+
+            // MEDICAL EQUIP: No additions
+            ["FY2024-25","MEDICAL EQUIPMENTS","",3,"2025-03-31",
+                30000, 0, 0, 0, 0, 0, 0, 30000,
+                5775, 15, 3634, 0, 3634, 9409,
+                20591, 24225, "Y3: No additions. Dep on opening WDV 24,225 x 15% = 3,634"],
+
+            // FURNITURE: No additions
+            ["FY2024-25","FURNITURE & FIXTURES","",5,"2025-03-31",
+                60000, 0, 0, 0, 0, 0, 0, 60000,
+                10000, 10, 5000, 0, 5000, 15000,
+                45000, 50000, "Y3: No additions. Dep on opening WDV 50,000 x 10% = 5,000"],
+
+            // VEHICLES: +30,000 in 1st half → full 15%
+            // Dep on opening: 57,800 x 15% = 8,670
+            // Dep on addition: 30,000 x 15% = 4,500
+            ["FY2024-25","VEHICLES","",2,"2025-03-31",
+                80000, 30000, 30000, 0, 0, 0, 0, 110000,
+                22200, 15, 8670, 4500, 13170, 35370,
+                74630, 57800, "Y3 SPLIT: Opening 57800x15%=8670 + 1st half addn 30000x15%=4500 = 13170"],
         ];
 
         const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
 
-        // Column widths
+        // Column widths (22 columns now)
         ws["!cols"] = [
-            { wch: 14 }, { wch: 30 }, { wch: 20 }, { wch: 16 },
-            { wch: 16 }, { wch: 18 }, { wch: 12 }, { wch: 12 },
-            { wch: 18 }, { wch: 22 }, { wch: 16 }, { wch: 22 },
-            { wch: 22 }, { wch: 22 }, { wch: 24 }, { wch: 20 },
+            { wch: 14 }, { wch: 28 }, { wch: 16 }, { wch: 14 },  // FY, category, dept, qty
+            { wch: 16 }, { wch: 18 },                              // fyEnd, openingGB
+            { wch: 14 }, { wch: 18 }, { wch: 18 },                 // additions, 1stHalf, 2ndHalf
+            { wch: 14 }, { wch: 18 }, { wch: 18 },                 // deletions, 1stHalf, 2ndHalf
+            { wch: 18 },                                            // closingGB
+            { wch: 22 }, { wch: 10 },                              // openAccDep, rate
+            { wch: 18 }, { wch: 18 }, { wch: 18 },                 // depOnOpening, depOnAdditions, depForPeriod
+            { wch: 22 },                                            // closeAccDep
+            { wch: 18 }, { wch: 20 }, { wch: 60 },                 // closeNB, prevNB, notes
         ];
 
         XLSX.utils.book_append_sheet(wb, ws, "FA Register");
@@ -836,11 +916,17 @@ export const importFaRegister = async (req: AuthenticatedRequest, res: Response)
 
             const openingGrossBlock     = n(row.openingGrossBlock);
             const additions             = n(row.additions);
+            const additionsFirstHalf    = n(row.additionsFirstHalf);
+            const additionsSecondHalf   = n(row.additionsSecondHalf);
             const deletions             = n(row.deletions);
+            const deletionsFirstHalf    = n(row.deletionsFirstHalf);
+            const deletionsSecondHalf   = n(row.deletionsSecondHalf);
             const closingGrossBlock     = n(row.closingGrossBlock) || openingGrossBlock + additions - deletions;
             const openingAccumulatedDep = n(row.openingAccumulatedDep);
             const depreciationRate      = n(row.depreciationRate);
-            const depreciationForPeriod = n(row.depreciationForPeriod);
+            const depOnOpeningBlock     = n(row.depOnOpeningBlock);
+            const depOnAdditions        = n(row.depOnAdditions);
+            const depreciationForPeriod = n(row.depreciationForPeriod) || depOnOpeningBlock + depOnAdditions;
             const closingAccumulatedDep = n(row.closingAccumulatedDep) || openingAccumulatedDep + depreciationForPeriod;
             const openingNetBlock       = openingGrossBlock - openingAccumulatedDep;
             const closingNetBlock       = n(row.closingNetBlock) || closingGrossBlock - closingAccumulatedDep;
@@ -864,10 +950,11 @@ export const importFaRegister = async (req: AuthenticatedRequest, res: Response)
                     if (dept) departmentId = dept.id;
                 }
 
-                // Find existing pool for this category + FY, or create new one
+                // Find existing pool for this category (+ dept).
+                // ONE pool per category — multiple FY schedules attach to the same pool.
+                // The pool's financialYear = the earliest FY encountered.
                 let pool = await prisma.assetPool.findFirst({
                     where: {
-                        financialYear: financialYear,
                         categoryId: category.id,
                         ...(departmentId ? { departmentId } : {}),
                     },
@@ -889,12 +976,12 @@ export const importFaRegister = async (req: AuthenticatedRequest, res: Response)
                         } as any,
                     });
                 } else {
-                    // Update quantity/cost if more data now available
+                    // Update quantity/cost + totalPoolCost to latest closing gross
                     await prisma.assetPool.update({
                         where: { id: pool.id },
                         data: {
                             ...(originalQuantity > 0 && { originalQuantity }),
-                            ...(closingGrossBlock > 0 && !pool.totalPoolCost && { totalPoolCost: closingGrossBlock }),
+                            ...(closingGrossBlock > 0 && { totalPoolCost: closingGrossBlock }),
                         } as any,
                     });
                 }
@@ -910,10 +997,16 @@ export const importFaRegister = async (req: AuthenticatedRequest, res: Response)
                     financialYearEnd,
                     openingGrossBlock,
                     additions,
+                    additionsFirstHalf,
+                    additionsSecondHalf,
                     deletions,
+                    deletionsFirstHalf,
+                    deletionsSecondHalf,
                     closingGrossBlock,
                     openingAccumulatedDep,
                     depreciationRate,
+                    depOnOpeningBlock: depOnOpeningBlock || null,
+                    depOnAdditions: depOnAdditions || null,
                     depreciationForPeriod,
                     closingAccumulatedDep,
                     openingNetBlock,
@@ -1014,29 +1107,34 @@ export const downloadIndividualAssetsTemplate = async (_req: Request, res: Respo
         const instructions = [
             ["Individual Asset Import Template — Instructions"],
             [""],
-            ["One row per individual asset from the FA register."],
-            ["poolRef: 'FY2024-25/MEDICAL EQUIPMENTS' — matches financialYear/categoryName of an existing pool."],
-            ["serialNumber: leave blank to auto-generate (POOL-{poolCode}-{rowIndex})."],
-            ["purchaseCost: cost of this specific asset in Indian Rupees (no commas)."],
-            ["purchaseDate: YYYY-MM-DD format. Used to generate legacy asset ID. Defaults to pool FY end if blank."],
-            ["department: optional — overrides the pool's department for this asset."],
-            ["openingAccDep: optional — accumulated depreciation as on digitization date."],
-            ["            Leave blank to auto-calculate proportionally from the pool's closing accumulated dep."],
-            ["manufacturer, modelNumber: optional descriptive fields."],
-            ["notes: optional remarks."],
+            ["This template contains DEMO DATA matching the FA Register demo template."],
+            ["Each row = one individual asset from the FA register, linked to a pool."],
             [""],
-            ["All imported assets are flagged as Legacy Assets (isLegacyAsset = true)."],
-            ["Asset IDs follow the format: AST-{HOSPITAL_CODE}-FY{YYYY}-{YY}-L-{NNNNN}"],
+            ["COLUMN GUIDE:"],
+            ["  poolRef: 'FY2022-23/BUILDING' — must match financialYear/categoryName of an existing pool."],
+            ["  assetName: name of the individual asset."],
+            ["  serialNumber: leave blank to auto-generate."],
+            ["  purchaseCost: cost in Indian Rupees (must sum up to the pool's additions for that FY)."],
+            ["  purchaseDate: YYYY-MM-DD format. IMPORTANT — determines the half-year rule:"],
+            ["      Apr 1 – Sep 30 = 1st half → full depreciation rate"],
+            ["      Oct 1 – Mar 31 = 2nd half → half depreciation rate in year of purchase"],
+            ["  openingAccDep: leave blank to auto-calculate proportionally from pool's closing acc dep."],
+            [""],
+            ["DEMO DATA SUMMARY (matches the FA Register template):"],
+            ["  FY2022-23: Building 1,00,000 + Medical 20,000 + Furniture 50,000 + Vehicles 80,000"],
+            ["  FY2023-24: Medical +10,000 + Furniture +10,000 (additions only)"],
+            ["  FY2024-25: Building +20,000 + Vehicles +30,000 (additions only)"],
+            ["  Total: 15 individual assets across 4 categories"],
         ];
         XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(instructions), "Instructions");
 
         // Data sheet
         const headers = [
-            "poolRef",          // FY2024-25/MEDICAL EQUIPMENTS
+            "poolRef",          // FY2022-23/BUILDING
             "assetName",        // Asset name from FA register
             "serialNumber",     // Optional — auto-generated if blank
             "purchaseCost",     // Cost in INR
-            "purchaseDate",     // YYYY-MM-DD (defaults to pool FY end)
+            "purchaseDate",     // YYYY-MM-DD (determines half-year rule)
             "department",       // Optional
             "openingAccDep",    // Optional — auto-calc if blank
             "manufacturer",     // Optional
@@ -1044,17 +1142,51 @@ export const downloadIndividualAssetsTemplate = async (_req: Request, res: Respo
             "notes",            // Optional
         ];
 
-        // Sample rows — representative items from JMRH FA register
+        // Demo rows — 15 assets matching the FA Register demo template
+        // The sum of purchaseCost per poolRef MUST match that FY's "additions" in the FA register
         const samples: any[][] = [
-            // MEDICAL EQUIPMENTS — FY2024-25
-            ["FY2024-25/MEDICAL EQUIPMENTS", "BX2000 Plus Wardcare Bedside Table", "", 1283451, "2024-04-01", "", "", "BX Medical", "BX2000", ""],
-            ["FY2024-25/MEDICAL EQUIPMENTS", "ICU Ventilator - Draeger Evita 800", "", 3250000, "2024-06-15", "ICU", "", "Draeger", "Evita 800", ""],
-            ["FY2024-25/MEDICAL EQUIPMENTS", "Digital X-Ray System", "", 4500000, "2024-09-01", "Radiology", "", "", "", ""],
-            // BUILDING — FY2024-25
-            ["FY2024-25/BUILDING", "OPD Block Extension", "", 6643134, "2025-03-31", "", "", "", "", "FY2024-25 addition"],
-            // SURGICAL EQUIPMENTS — FY2024-25
-            ["FY2024-25/SURGICAL EQUIPMENTS", "Laparoscopic Tower Set", "", 850000, "2024-07-20", "OT", "", "", "", ""],
-            ["FY2024-25/SURGICAL EQUIPMENTS", "C-Arm Fluoroscopy Machine", "", 1708700, "2024-08-10", "OT", "", "", "", ""],
+            // ══════════════════════════════════════════════════════════════
+            //  FY2022-23 — Year 1 (all fresh purchases)
+            // ══════════════════════════════════════════════════════════════
+
+            // BUILDING: Total addition = 1,00,000 (1 asset, 1st half → full 10%)
+            ["FY2022-23/BUILDING", "Hospital Main Building", "BLD-001", 100000, "2022-06-15", "", "", "", "", "1st half purchase → full 10% rate in Y1"],
+
+            // MEDICAL EQUIPMENTS: Total addition = 20,000 (3 assets, 2nd half → half 15% = 7.5%)
+            ["FY2022-23/MEDICAL EQUIPMENTS", "BP Monitor Digital", "MED-001", 5000, "2022-11-10", "OPD", "", "Omron", "HEM-7156", "2nd half → half rate 7.5%"],
+            ["FY2022-23/MEDICAL EQUIPMENTS", "Pulse Oximeter", "MED-002", 7000, "2022-12-05", "ICU", "", "Nellcor", "PM10N", "2nd half → half rate 7.5%"],
+            ["FY2022-23/MEDICAL EQUIPMENTS", "Nebulizer Machine", "MED-003", 8000, "2023-01-20", "OPD", "", "Philips", "InnoSpire", "2nd half → half rate 7.5%"],
+
+            // FURNITURE: Total addition = 50,000 (5 assets, 1st half → full 10%)
+            ["FY2022-23/FURNITURE & FIXTURES", "Office Chair (set of 5)", "FUR-001", 5000, "2022-05-01", "Admin", "", "Godrej", "Motion", "1st half → full 10%"],
+            ["FY2022-23/FURNITURE & FIXTURES", "Office Table - L Shape", "FUR-002", 8000, "2022-05-01", "Admin", "", "Godrej", "Interio", "1st half → full 10%"],
+            ["FY2022-23/FURNITURE & FIXTURES", "Patient Bed - Manual", "FUR-003", 15000, "2022-06-10", "Ward", "", "Narang", "HF-104", "1st half → full 10%"],
+            ["FY2022-23/FURNITURE & FIXTURES", "Waiting Room Bench (3-seater)", "FUR-004", 12000, "2022-07-15", "OPD", "", "Local", "", "1st half → full 10%"],
+            ["FY2022-23/FURNITURE & FIXTURES", "Steel Filing Cabinet", "FUR-005", 10000, "2022-08-20", "Admin", "", "Godrej", "Storwel", "1st half → full 10%"],
+
+            // VEHICLES: Total addition = 80,000 (2 assets, 1st half → full 15%)
+            ["FY2022-23/VEHICLES", "Ambulance - Maruti Eeco", "VEH-001", 50000, "2022-04-10", "", "", "Maruti", "Eeco Ambulance", "1st half → full 15%"],
+            ["FY2022-23/VEHICLES", "Staff Transport Van", "VEH-002", 30000, "2022-05-25", "", "", "Tata", "Winger", "1st half → full 15%"],
+
+            // ══════════════════════════════════════════════════════════════
+            //  FY2023-24 — Year 2 (additions only for some categories)
+            // ══════════════════════════════════════════════════════════════
+
+            // MEDICAL EQUIPMENTS: Addition = 10,000 (1 asset, 1st half → full 15%)
+            ["FY2023-24/MEDICAL EQUIPMENTS", "Weighing Scale Digital", "MED-004", 10000, "2023-07-12", "OPD", "", "Essae", "DS-252", "Y2 addition, 1st half → full 15%"],
+
+            // FURNITURE: Addition = 10,000 (1 asset, 2nd half → half 10% = 5%)
+            ["FY2023-24/FURNITURE & FIXTURES", "Reception Counter", "FUR-006", 10000, "2023-11-01", "Front Desk", "", "Local", "", "Y2 addition, 2nd half → half rate 5%"],
+
+            // ══════════════════════════════════════════════════════════════
+            //  FY2024-25 — Year 3 (additions only for some categories)
+            // ══════════════════════════════════════════════════════════════
+
+            // BUILDING: Addition = 20,000 (1 asset, 2nd half → half 10% = 5%)
+            ["FY2024-25/BUILDING", "Pharmacy Room Extension", "BLD-002", 20000, "2024-12-15", "", "", "", "", "Y3 addition, 2nd half → half rate 5%"],
+
+            // VEHICLES: Addition = 30,000 (1 asset, 1st half → full 15%)
+            ["FY2024-25/VEHICLES", "Utility Delivery Bike", "VEH-003", 30000, "2024-06-01", "", "", "Hero", "Splendor", "Y3 addition, 1st half → full 15%"],
         ];
 
         const ws = XLSX.utils.aoa_to_sheet([headers, ...samples]);
@@ -1152,14 +1284,15 @@ export const importIndividualAssets = async (req: AuthenticatedRequest, res: Res
                     continue;
                 }
 
+                // Find pool by category (not by FY — one pool per category)
                 const pool = await prisma.assetPool.findFirst({
-                    where: { financialYear: poolFY, categoryId: category.id },
+                    where: { categoryId: category.id },
                     include: {
                         depreciationSchedules: { orderBy: { financialYearEnd: "desc" }, take: 1 },
                     },
                 });
                 if (!pool) {
-                    errors.push({ row: rowNum, assetName: assetNameRaw, error: `Pool not found for "${poolRef}". Import the FA register first.` });
+                    errors.push({ row: rowNum, assetName: assetNameRaw, error: `Pool not found for category "${poolCategory}". Import the FA register first.` });
                     continue;
                 }
 
@@ -1179,19 +1312,34 @@ export const importIndividualAssets = async (req: AuthenticatedRequest, res: Res
                     if (dept) departmentId = dept.id;
                 }
 
-                // 3. Proportional accumulated depreciation
+                // 3. Proportional accumulated depreciation (with half-year rule for year-of-acquisition)
                 const latestSched = (pool as any).depreciationSchedules?.[0] ?? null;
                 const poolClosingAccDep    = latestSched ? Number(latestSched.closingAccumulatedDep) : 0;
                 const poolClosingGrossBlock = latestSched ? Number(latestSched.closingGrossBlock) : Number(pool.totalPoolCost ?? 0);
                 const depRate = latestSched ? Number(latestSched.depreciationRate) : 0;
 
+                // Half-year rule: if asset was purchased in current FY's 2nd half (Oct 1 – Mar 31),
+                // its acquisition-year depreciation is at 50% of rate. We reflect this by capping
+                // the proportional acc-dep allocation to half for assets purchased in that window.
+                const m = purchaseDate.getMonth();
+                const acquisitionInSecondHalfOfFY = m >= 9 || m <= 2;
+
+                // Determine if purchaseDate falls within the latest schedule's FY (year of acquisition)
+                let halfYearAdjustmentApplied = false;
                 let openingAccDep: number;
                 const openingAccDepRaw = row.openingAccDep;
                 if (openingAccDepRaw !== "" && openingAccDepRaw != null && !isNaN(Number(openingAccDepRaw))) {
                     openingAccDep = Number(openingAccDepRaw);
                 } else if (poolClosingGrossBlock > 0) {
                     const shareRatio = purchaseCost / poolClosingGrossBlock;
-                    openingAccDep = Math.round(poolClosingAccDep * shareRatio);
+                    let raw = poolClosingAccDep * shareRatio;
+                    // Apply half-year rule when the purchase falls in the latest FY 2nd half
+                    if (acquisitionInSecondHalfOfFY && latestSched &&
+                        purchaseDate >= new Date(latestSched.financialYearEnd.getFullYear(), 9, 1)) {
+                        raw = raw / 2;
+                        halfYearAdjustmentApplied = true;
+                    }
+                    openingAccDep = Math.round(raw);
                 } else {
                     openingAccDep = 0;
                 }
@@ -1202,7 +1350,7 @@ export const importIndividualAssets = async (req: AuthenticatedRequest, res: Res
                 const serialNumber = serialNumberRaw || `POOL-${pool.poolCode}-${Date.now()}-${i}`;
 
                 // 5. Generate legacy asset ID
-                const assetId = await generateLegacyAssetId(purchaseDate);
+                const assetId = await generateLegacyAssetId(purchaseDate, undefined, category.id);
 
                 // 6. Create the Asset record
                 const asset = await prisma.asset.create({
@@ -1217,6 +1365,11 @@ export const importIndividualAssets = async (req: AuthenticatedRequest, res: Res
                         modeOfProcurement: "PURCHASE",
                         status: "ACTIVE",
                         isLegacyAsset: true,
+                        migrationMode: "PROPORTIONAL",
+                        migrationDate: latestSched?.financialYearEnd ?? purchaseDate,
+                        originalCost: purchaseCost,
+                        accDepAtMigration: openingAccDep,
+                        openingWdvAtMigration: currentBookValue,
                         assetPoolId: pool.id,
                         financialYearAdded: poolFY,
                         manufacturer: String(row.manufacturer ?? "").trim() || null,
@@ -1273,6 +1426,8 @@ export const importIndividualAssets = async (req: AuthenticatedRequest, res: Res
                     openingAccDep,
                     currentBookValue,
                     poolStatus: newStatus,
+                    halfYearAdjustmentApplied,
+                    acquisitionInSecondHalfOfFY,
                 });
             } catch (rowErr: any) {
                 errors.push({ row: rowNum, assetName: assetNameRaw, error: rowErr?.message ?? "Unknown error" });
