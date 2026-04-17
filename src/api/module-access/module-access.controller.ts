@@ -478,12 +478,14 @@ export const getMyAccess = async (req: AuthenticatedRequest, res: Response) => {
       select: { moduleId: true, moduleItemId: true, canAccess: true }
     });
 
-    // ── Per-module override logic (industry standard) ──────────────────────
-    // 1. Start with role-level permissions as baseline
-    // 2. For each module/item, if employee has an explicit entry → override
-    // 3. No permissions at all → default allow all (open access)
+    // ── Employee overrides role completely ──────────────────────────────────
+    // If employee has ANY permissions configured → use ONLY those (role ignored)
+    // If no employee permissions → use role permissions
+    // If neither → default allow all (open access)
+    const hasEmployeePerms = employeePerms.length > 0;
+    const activePerms = hasEmployeePerms ? employeePerms : rolePerms;
 
-    if (rolePerms.length === 0 && employeePerms.length === 0) {
+    if (activePerms.length === 0) {
       const all = await prisma.appModule.findMany({
         where: { isActive: true },
         include: { subItems: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } },
@@ -493,31 +495,13 @@ export const getMyAccess = async (req: AuthenticatedRequest, res: Response) => {
       return;
     }
 
-    // Build employee override maps: moduleId → canAccess, moduleItemId → canAccess
-    const empModuleOverride = new Map<number, boolean>();
-    const empItemOverride   = new Map<number, boolean>();
-    employeePerms.forEach(p => {
-      if (p.moduleId && !p.moduleItemId) empModuleOverride.set(p.moduleId, p.canAccess);
-      if (p.moduleItemId) empItemOverride.set(p.moduleItemId, p.canAccess);
-    });
-
-    // Start from role baseline
     const allowedModuleIds = new Set<number>();
     const allowedItemIds   = new Set<number>();
 
-    rolePerms.forEach(p => {
+    activePerms.forEach(p => {
+      if ((p as any).canAccess === false) return;
       if (p.moduleId && !p.moduleItemId) allowedModuleIds.add(p.moduleId);
       if (p.moduleItemId) allowedItemIds.add(p.moduleItemId);
-    });
-
-    // Apply employee overrides on top
-    empModuleOverride.forEach((canAccess, moduleId) => {
-      if (canAccess) allowedModuleIds.add(moduleId);      // employee adds
-      else           allowedModuleIds.delete(moduleId);    // employee removes
-    });
-    empItemOverride.forEach((canAccess, itemId) => {
-      if (canAccess) allowedItemIds.add(itemId);
-      else           allowedItemIds.delete(itemId);
     });
 
     const finalModuleIds = [...allowedModuleIds];
