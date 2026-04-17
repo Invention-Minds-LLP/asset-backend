@@ -478,40 +478,50 @@ export const getMyAccess = async (req: AuthenticatedRequest, res: Response) => {
       select: { moduleId: true, moduleItemId: true, canAccess: true }
     });
 
-    // Build allowed moduleIds
-    const allowedModuleIds = new Set<number>();
-    const blockedModuleIds = new Set<number>();
-    const allowedItemIds   = new Set<number>();
-    const blockedItemIds   = new Set<number>();
+    // ── Per-module override logic (industry standard) ──────────────────────
+    // 1. Start with role-level permissions as baseline
+    // 2. For each module/item, if employee has an explicit entry → override
+    // 3. No permissions at all → default allow all (open access)
 
-    rolePerms.forEach(p => {
-      if (p.moduleId && !p.moduleItemId) allowedModuleIds.add(p.moduleId);
-      if (p.moduleItemId)               allowedItemIds.add(p.moduleItemId);
-    });
-
-    employeePerms.forEach(p => {
-      if (p.moduleId && !p.moduleItemId) {
-        p.canAccess ? allowedModuleIds.add(p.moduleId) : blockedModuleIds.add(p.moduleId);
-      }
-      if (p.moduleItemId) {
-        p.canAccess ? allowedItemIds.add(p.moduleItemId) : blockedItemIds.add(p.moduleItemId);
-      }
-    });
-
-    // If no permissions configured at all — default allow all (open access)
-    const totalPerms = rolePerms.length + employeePerms.length;
-    if (totalPerms === 0) {
+    if (rolePerms.length === 0 && employeePerms.length === 0) {
       const all = await prisma.appModule.findMany({
         where: { isActive: true },
         include: { subItems: { where: { isActive: true }, orderBy: { sortOrder: "asc" } } },
         orderBy: { sortOrder: "asc" }
       });
-       res.json({ isAdmin: false, modules: all, note: "no_permissions_configured" });
-       return;
+      res.json({ isAdmin: false, modules: all, note: "no_permissions_configured" });
+      return;
     }
 
-    const finalModuleIds = [...allowedModuleIds].filter(id => !blockedModuleIds.has(id));
-    const finalItemIds   = [...allowedItemIds].filter(id => !blockedItemIds.has(id));
+    // Build employee override maps: moduleId → canAccess, moduleItemId → canAccess
+    const empModuleOverride = new Map<number, boolean>();
+    const empItemOverride   = new Map<number, boolean>();
+    employeePerms.forEach(p => {
+      if (p.moduleId && !p.moduleItemId) empModuleOverride.set(p.moduleId, p.canAccess);
+      if (p.moduleItemId) empItemOverride.set(p.moduleItemId, p.canAccess);
+    });
+
+    // Start from role baseline
+    const allowedModuleIds = new Set<number>();
+    const allowedItemIds   = new Set<number>();
+
+    rolePerms.forEach(p => {
+      if (p.moduleId && !p.moduleItemId) allowedModuleIds.add(p.moduleId);
+      if (p.moduleItemId) allowedItemIds.add(p.moduleItemId);
+    });
+
+    // Apply employee overrides on top
+    empModuleOverride.forEach((canAccess, moduleId) => {
+      if (canAccess) allowedModuleIds.add(moduleId);      // employee adds
+      else           allowedModuleIds.delete(moduleId);    // employee removes
+    });
+    empItemOverride.forEach((canAccess, itemId) => {
+      if (canAccess) allowedItemIds.add(itemId);
+      else           allowedItemIds.delete(itemId);
+    });
+
+    const finalModuleIds = [...allowedModuleIds];
+    const finalItemIds   = [...allowedItemIds];
 
     // If item-level permissions are configured, filter sub-items to only those IDs.
     // If NO item-level permissions exist, show all active sub-items of allowed modules
