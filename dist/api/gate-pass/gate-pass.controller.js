@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getOverdueGatePasses = exports.getGatePassesByAsset = exports.deleteGatePass = exports.updateGatePassStatus = exports.updateGatePass = exports.getGatePassById = exports.getAllGatePasses = exports.createGatePass = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 // Generate unique gate pass number: GP-YYYYMMDD-NNNN
 function generateGatePassNo() {
     return __awaiter(this, void 0, void 0, function* () {
@@ -27,6 +28,7 @@ function generateGatePassNo() {
     });
 }
 const createGatePass = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const { type, assetId, description, quantity, issuedTo, purpose, expectedReturnDate, courierDetails, vehicleNo, vehicleType, approvedBy, issuedBy, reason, } = req.body;
         if (!type || !issuedTo || !purpose) {
@@ -52,8 +54,22 @@ const createGatePass = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 issuedBy,
                 reason,
             },
-            include: { asset: { select: { assetId: true, assetName: true } } },
+            include: { asset: { select: { assetId: true, assetName: true, departmentId: true } } },
         });
+        // Fire-and-forget: notify department HODs about new gate pass
+        const deptId = (_a = gatePass.asset) === null || _a === void 0 ? void 0 : _a.departmentId;
+        if (deptId) {
+            (0, notificationHelper_1.getDepartmentHODs)(deptId).then(hodIds => {
+                var _a;
+                return (0, notificationHelper_1.notify)({
+                    type: "OTHER",
+                    title: "Gate Pass Created",
+                    message: `Gate pass ${gatePassNo} (${type}) issued to ${issuedTo} — ${purpose}`,
+                    recipientIds: hodIds,
+                    createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
+                });
+            }).catch(() => { });
+        }
         res.status(201).json(gatePass);
     }
     catch (error) {
@@ -126,6 +142,7 @@ const updateGatePass = (req, res) => __awaiter(void 0, void 0, void 0, function*
 });
 exports.updateGatePass = updateGatePass;
 const updateGatePassStatus = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const id = parseInt(req.params.id);
         const { status, reason } = req.body;
@@ -142,7 +159,25 @@ const updateGatePassStatus = (req, res) => __awaiter(void 0, void 0, void 0, fun
         const updated = yield prismaClient_1.default.gatePass.update({
             where: { id },
             data: { status, reason: reason !== null && reason !== void 0 ? reason : existing.reason },
+            include: { asset: { select: { assetId: true, assetName: true, departmentId: true } } },
         });
+        // Notify HOD of asset's department for status changes
+        if (["RETURNED", "CLOSED", "CANCELLED"].includes(status)) {
+            const deptId = (_a = updated.asset) === null || _a === void 0 ? void 0 : _a.departmentId;
+            if (deptId) {
+                const statusLabels = { RETURNED: "returned", CLOSED: "closed", CANCELLED: "cancelled" };
+                (0, notificationHelper_1.getDepartmentHODs)(deptId).then(hodIds => {
+                    var _a;
+                    return (0, notificationHelper_1.notify)({
+                        type: "OTHER",
+                        title: `Gate Pass ${statusLabels[status] || status}`,
+                        message: `Gate pass ${existing.gatePassNo} (${existing.type}) has been ${statusLabels[status] || status}${reason ? `. Reason: ${reason}` : ""}`,
+                        recipientIds: hodIds,
+                        createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
+                    });
+                }).catch(() => { });
+            }
+        }
         res.json(updated);
     }
     catch (error) {

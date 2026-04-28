@@ -12,4 +12,8 @@ router.get("/:id", authMiddleware_1.authenticateToken, cost_analysis_controller_
 router.get("/:id/revenue", authMiddleware_1.authenticateToken, cost_analysis_controller_1.getRevenueEntries);
 router.post("/:id/revenue", authMiddleware_1.authenticateToken, cost_analysis_controller_1.addRevenueEntry);
 router.delete("/revenue/:entryId", authMiddleware_1.authenticateToken, cost_analysis_controller_1.deleteRevenueEntry);
+router.get("/:id/allocations", authMiddleware_1.authenticateToken, cost_analysis_controller_1.getAllocations);
+router.post("/:id/allocations", authMiddleware_1.authenticateToken, cost_analysis_controller_1.addAllocation);
+router.put("/allocations/:entryId", authMiddleware_1.authenticateToken, cost_analysis_controller_1.updateAllocation);
+router.delete("/allocations/:entryId", authMiddleware_1.authenticateToken, cost_analysis_controller_1.deleteAllocation);
 exports.default = router;

@@ -317,3 +317,88 @@ export async function persistDepreciationResult(params: {
     return { log, updated };
   });
 }
+
+/* ── Backfill historical logs ─────────────────────────────────────────── */
+
+/**
+ * Generate one DepreciationLog entry per completed FY between the asset's
+ * effective start date and today. Used at import / manual creation time to
+ * ensure historical FA Schedule reports show the correct per-FY values.
+ *
+ * Effective start date priority:
+ *   1. asset.financialYearAdded (pool-individualized assets)
+ *   2. asset.migrationDate (legacy migration assets)
+ *   3. cfg.depreciationStart (regular assets)
+ *
+ * Skips if logs already exist for the asset (prevents duplicate generation).
+ */
+export async function backfillHistoricalDepreciation(
+  assetId: number,
+  depRecordId: number,
+  asset: AssetForDep & { financialYearAdded?: string | null; assetPoolId?: number | null },
+  cfg: DepreciationConfig,
+  doneById: number | null = null,
+): Promise<{ created: number; skipped: number; latestFy: string | null }> {
+  // Skip if any logs already exist
+  const existingLogCount = await prisma.depreciationLog.count({ where: { assetId } });
+  if (existingLogCount > 0) {
+    return { created: 0, skipped: existingLogCount, latestFy: null };
+  }
+
+  // Determine the effective start FY
+  let startDate: Date | null = null;
+
+  // Priority 1: pool-individualized → start from financialYearAdded FY end (handover point)
+  if (asset.assetPoolId && asset.financialYearAdded) {
+    // Parse FY string like "FY2024-25" → start year = 2024
+    const m = asset.financialYearAdded.match(/FY(\d{4})/);
+    if (m) {
+      const fyStartYear = Number(m[1]);
+      // Use first day of next FY (handover happened at end of pool's FY)
+      startDate = new Date(fyStartYear + 1, 3, 1); // Apr 1 of next year
+    }
+  }
+
+  // Priority 2: legacy migration → start from migrationDate FY
+  if (!startDate && asset.isLegacyAsset && asset.migrationDate) {
+    const migDate = new Date(asset.migrationDate);
+    const migFY = getFYContext(migDate);
+    startDate = new Date(migFY.fyEnd.getTime() + 86400000); // day after migration FY end
+  }
+
+  // Priority 3: regular asset → start from depreciationStart
+  if (!startDate) {
+    startDate = new Date(cfg.depreciationStart);
+  }
+
+  if (!startDate || isNaN(startDate.getTime())) {
+    return { created: 0, skipped: 0, latestFy: null };
+  }
+
+  const today = new Date();
+  let fy = getFYContext(startDate);
+  let created = 0;
+  let latestFy: string | null = null;
+
+  // Loop through each completed FY up to (but not including) the current FY
+  while (fy.fyEnd < today) {
+    const result = await calculateAssetFYDepreciation(asset, cfg, fy);
+
+    if (!result.preMigrationSkipped && result.depreciationAmount >= 0) {
+      await persistDepreciationResult({
+        assetId,
+        depRecordId,
+        result,
+        doneById,
+        reason: "BACKFILL",
+      });
+      created++;
+      latestFy = result.fyLabel;
+    }
+
+    // Advance to next FY
+    fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
+  }
+
+  return { created, skipped: 0, latestFy };
+}

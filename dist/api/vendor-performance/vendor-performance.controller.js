@@ -47,24 +47,34 @@ const getVendorPerformance = (req, res) => __awaiter(void 0, void 0, void 0, fun
         });
         const performanceData = yield Promise.all(vendors.map((vendor) => __awaiter(void 0, void 0, void 0, function* () {
             // Tickets resolved by this vendor's assets
-            const ticketWhere = {
+            const allTicketWhere = {
+                asset: { vendorId: vendor.id },
+            };
+            if (dateFrom || dateTo)
+                allTicketWhere.createdAt = dateFilter;
+            const resolvedTicketWhere = {
                 asset: { vendorId: vendor.id },
                 status: { in: ["RESOLVED", "CLOSED"] },
             };
             if (dateFrom || dateTo)
-                ticketWhere.createdAt = dateFilter;
-            const resolvedTickets = yield prismaClient_1.default.ticket.findMany({
-                where: ticketWhere,
-                select: {
-                    id: true,
-                    createdAt: true,
-                    slaResolvedAt: true,
-                    slaBreached: true,
-                    serviceCost: true,
-                    partsCost: true,
-                    totalCost: true,
-                },
-            });
+                resolvedTicketWhere.createdAt = dateFilter;
+            const [totalTickets, resolvedTickets] = yield Promise.all([
+                prismaClient_1.default.ticket.count({
+                    where: allTicketWhere,
+                }),
+                prismaClient_1.default.ticket.findMany({
+                    where: resolvedTicketWhere,
+                    select: {
+                        id: true,
+                        createdAt: true,
+                        slaResolvedAt: true,
+                        slaBreached: true,
+                        serviceCost: true,
+                        partsCost: true,
+                        totalCost: true,
+                    },
+                }),
+            ]);
             // Calculate response time (avg days from created to resolved)
             let totalResponseDays = 0;
             let resolvedCount = 0;
@@ -92,6 +102,8 @@ const getVendorPerformance = (req, res) => __awaiter(void 0, void 0, void 0, fun
                 activeContracts,
                 totalContractValue,
                 totalTicketsResolved: resolvedCount,
+                totalTickets,
+                ticketSummary: `${resolvedCount}/${totalTickets}`,
                 avgResponseDays: resolvedCount > 0 ? Number((totalResponseDays / resolvedCount).toFixed(1)) : null,
                 slaBreachCount,
                 slaComplianceRate: resolvedTickets.length > 0

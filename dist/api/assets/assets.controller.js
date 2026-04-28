@@ -12,12 +12,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAssetScanDetails = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.hodApproveAsset = exports.createAsset = exports.getAssetById = exports.getAllAssets = void 0;
+exports.getAssetScanDetails = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.hodApproveAsset = exports.createAsset = exports.getAssetById = exports.getAllAssetsForDropdown = exports.getAllAssets = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
+const audit_trail_controller_1 = require("../audit-trail/audit-trail.controller");
+const assetIdGenerator_1 = require("../../utilis/assetIdGenerator");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439", // Your FTP username
@@ -32,14 +34,21 @@ const FTP_CONFIG = {
 //   res.json(assets);
 // };
 const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const user = req.user; // from auth middleware
         const role = user === null || user === void 0 ? void 0 : user.role;
         const departmentId = user === null || user === void 0 ? void 0 : user.departmentId;
         const employeeDbId = (user === null || user === void 0 ? void 0 : user.employeeDbId) || (user === null || user === void 0 ? void 0 : user.employeeId) || (user === null || user === void 0 ? void 0 : user.id);
-        console.log(user);
         let where = {};
-        if (role === 'ADMIN' || departmentId === 5) {
+        // Check if user belongs to Store department → sees all assets
+        let isStoreDept = false;
+        if (departmentId) {
+            const dept = yield prismaClient_1.default.department.findUnique({ where: { id: Number(departmentId) }, select: { name: true } });
+            if ((_a = dept === null || dept === void 0 ? void 0 : dept.name) === null || _a === void 0 ? void 0 : _a.toUpperCase().includes('STORE'))
+                isStoreDept = true;
+        }
+        if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
             where = {};
         }
         else if (role === 'HOD') {
@@ -53,9 +62,10 @@ const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             };
         }
         else {
-            where = {
-                id: -1
-            };
+            // EXECUTIVE — see assets in their department
+            where = departmentId
+                ? { departmentId: Number(departmentId) }
+                : { allottedToId: Number(employeeDbId) };
         }
         const assets = yield prismaClient_1.default.asset.findMany({
             where,
@@ -75,6 +85,32 @@ const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* (
     }
 });
 exports.getAllAssets = getAllAssets;
+// GET /assets/all-dropdown — lightweight list of ALL assets for dropdowns (ticket form, etc.)
+const getAllAssetsForDropdown = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const assets = yield prismaClient_1.default.asset.findMany({
+            where: { status: { notIn: ["DISPOSED", "SCRAPPED", "IN_STORE", "RETIRED", "CONDEMNED", "REJECTED"] } },
+            select: {
+                id: true,
+                assetId: true,
+                assetName: true,
+                serialNumber: true,
+                status: true,
+                departmentId: true,
+                department: { select: { name: true } },
+                assetCategory: { select: { name: true } },
+                currentLocation: true,
+            },
+            orderBy: { assetName: "asc" },
+        });
+        res.json(assets);
+    }
+    catch (error) {
+        console.error("getAllAssetsForDropdown error:", error);
+        res.status(500).json({ message: "Failed to fetch assets" });
+    }
+});
+exports.getAllAssetsForDropdown = getAllAssetsForDropdown;
 const getAssetById = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     const id = parseInt(req.params.id);
     const asset = yield prismaClient_1.default.asset.findUnique({
@@ -139,7 +175,7 @@ exports.getAssetById = getAssetById;
 //     res.status(201).json(asset);
 // };
 const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
     try {
         const data = req.body;
         // ── 7-year lifetime guard ────────────────────────────────────────────────
@@ -152,16 +188,18 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 return;
             }
         }
-        // ── Temp Asset ID — real ID issued when HOD acknowledges the assignment ──
-        const newAssetId = `TEMP-${Date.now()}`;
+        // ── Asset ID — legacy assets get a legacy ID immediately; others get TEMP ──
+        const newAssetId = data.isLegacyAsset === true || data.isLegacyAsset === 'true'
+            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)((_a = data.purchaseDate) !== null && _a !== void 0 ? _a : null, undefined, data.assetCategoryId ? Number(data.assetCategoryId) : null)
+            : `TEMP-${Date.now()}`;
         // Auto-assign supervisor for department
-        let supervisorId = null;
-        if (data.departmentId) {
-            const supervisor = yield prismaClient_1.default.employee.findFirst({
-                where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
-            });
-            supervisorId = (_a = supervisor === null || supervisor === void 0 ? void 0 : supervisor.id) !== null && _a !== void 0 ? _a : null;
-        }
+        // let supervisorId: number | null = null;
+        // if (data.departmentId) {
+        //   const supervisor = await prisma.employee.findFirst({
+        //     where: { departmentId: Number(data.departmentId), role: "SUPERVISOR" },
+        //   });
+        //   supervisorId = supervisor?.id ?? null;
+        // }
         // For DONATION / LEASE / RENTAL, inspection checklist must be completed first
         const requiresInspection = ["DONATION", "LEASE", "RENTAL"].includes(data.modeOfProcurement || "PURCHASE");
         if (requiresInspection) {
@@ -179,13 +217,19 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 assetId: newAssetId,
                 assetName: data.assetName,
                 assetType: data.assetType,
+                assetNature: (_b = data.assetNature) !== null && _b !== void 0 ? _b : "TANGIBLE",
+                intangibleSubType: (_c = data.intangibleSubType) !== null && _c !== void 0 ? _c : null,
+                usefulLifeYears: data.usefulLifeYears ? Number(data.usefulLifeYears) : null,
+                amortizationMethod: (_d = data.amortizationMethod) !== null && _d !== void 0 ? _d : null,
+                amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
+                residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
                 assetCategoryId: data.assetCategoryId,
                 rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
                 referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
                 serialNumber: data.serialNumber,
-                assetPhoto: (_b = data.assetPhoto) !== null && _b !== void 0 ? _b : null,
-                modeOfProcurement: (_c = data.modeOfProcurement) !== null && _c !== void 0 ? _c : "PURCHASE",
-                serviceCoverageType: (_d = data.serviceCoverageType) !== null && _d !== void 0 ? _d : null,
+                assetPhoto: (_e = data.assetPhoto) !== null && _e !== void 0 ? _e : null,
+                modeOfProcurement: (_f = data.modeOfProcurement) !== null && _f !== void 0 ? _f : "PURCHASE",
+                serviceCoverageType: (_g = data.serviceCoverageType) !== null && _g !== void 0 ? _g : null,
                 // PURCHASE
                 invoiceNumber: data.invoiceNumber,
                 purchaseOrderNo: data.purchaseOrderNo,
@@ -193,6 +237,9 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 purchaseDate: data.purchaseDate ? new Date(data.purchaseDate) : null,
                 deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
                 purchaseCost: data.purchaseCost,
+                purchaseVoucherNo: (_h = data.purchaseVoucherNo) !== null && _h !== void 0 ? _h : null,
+                purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
+                purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
                 vendorId: data.vendorId,
                 // DONATION
                 donorName: data.donorName,
@@ -212,27 +259,106 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 rentalAmount: data.rentalAmount,
                 rentalAgreementDoc: data.rentalAgreementDoc,
                 // Inspection (for Donation / Lease / Rental)
-                inspectionDoneBy: (_e = data.inspectionDoneBy) !== null && _e !== void 0 ? _e : null,
-                inspectionCondition: (_f = data.inspectionCondition) !== null && _f !== void 0 ? _f : null,
-                inspectionRemark: (_g = data.inspectionRemark) !== null && _g !== void 0 ? _g : null,
-                physicalInspectionStatus: (_h = data.physicalInspectionStatus) !== null && _h !== void 0 ? _h : null,
+                inspectionDoneBy: (_j = data.inspectionDoneBy) !== null && _j !== void 0 ? _j : null,
+                inspectionCondition: (_k = data.inspectionCondition) !== null && _k !== void 0 ? _k : null,
+                inspectionRemark: (_l = data.inspectionRemark) !== null && _l !== void 0 ? _l : null,
+                physicalInspectionStatus: (_m = data.physicalInspectionStatus) !== null && _m !== void 0 ? _m : null,
                 physicalInspectionDate: data.physicalInspectionDate ? new Date(data.physicalInspectionDate) : null,
-                functionalInspectionStatus: (_j = data.functionalInspectionStatus) !== null && _j !== void 0 ? _j : null,
+                functionalInspectionStatus: (_o = data.functionalInspectionStatus) !== null && _o !== void 0 ? _o : null,
                 functionalInspectionDate: data.functionalInspectionDate ? new Date(data.functionalInspectionDate) : null,
-                functionalTestNotes: (_k = data.functionalTestNotes) !== null && _k !== void 0 ? _k : null,
+                functionalTestNotes: (_p = data.functionalTestNotes) !== null && _p !== void 0 ? _p : null,
                 // GRN
                 grnNumber: data.grnNumber,
                 grnDate: data.grnDate ? new Date(data.grnDate) : null,
                 grnValue: data.grnValue,
                 inspectionStatus: data.inspectionStatus,
                 departmentId: data.departmentId ? Number(data.departmentId) : null,
-                supervisorId: supervisorId,
+                // supervisorId: supervisorId,
                 expectedLifetime: data.expectedLifetime ? Number(data.expectedLifetime) : null,
-                expectedLifetimeUnit: (_l = data.expectedLifetimeUnit) !== null && _l !== void 0 ? _l : null,
+                expectedLifetimeUnit: (_q = data.expectedLifetimeUnit) !== null && _q !== void 0 ? _q : null,
+                // ── Legacy onboarding fields ──────────────────────────────────────────
+                isLegacyAsset: data.isLegacyAsset ? true : false,
+                dataAvailableSince: data.dataAvailableSince ? new Date(data.dataAvailableSince) : null,
+                historicalMaintenanceCost: data.historicalMaintenanceCost ? String(data.historicalMaintenanceCost) : null,
+                historicalSparePartsCost: data.historicalSparePartsCost ? String(data.historicalSparePartsCost) : null,
+                historicalOtherCost: data.historicalOtherCost ? String(data.historicalOtherCost) : null,
+                historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
+                historicalCostNote: (_r = data.historicalCostNote) !== null && _r !== void 0 ? _r : null,
+                // ── Asset Pool linkage ────────────────────────────────────────────────
+                assetPoolId: data.assetPoolId ? Number(data.assetPoolId) : null,
+                financialYearAdded: (_s = data.financialYearAdded) !== null && _s !== void 0 ? _s : null,
                 status: "IN_STORE",
             }
         });
-        res.status(201).json(asset);
+        (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: asset.id, action: "CREATE", description: `Asset ${asset.assetId} created`, newValue: JSON.stringify(asset), performedById: (_t = req.user) === null || _t === void 0 ? void 0 : _t.employeeDbId });
+        // ── Pool linkage post-processing ─────────────────────────────────────────
+        if (data.assetPoolId) {
+            const poolId = Number(data.assetPoolId);
+            // 1. Update pool status (PARTIAL / COMPLETE)
+            const pool = yield prismaClient_1.default.assetPool.findUnique({ where: { id: poolId } });
+            if (pool) {
+                const linkedCount = yield prismaClient_1.default.asset.count({ where: { assetPoolId: poolId } });
+                const remaining = pool.originalQuantity - linkedCount;
+                yield prismaClient_1.default.assetPool.update({
+                    where: { id: poolId },
+                    data: { status: remaining <= 0 ? "COMPLETE" : "PARTIAL" },
+                });
+            }
+            // 2. Auto-create depreciation with proportional opening balance if:
+            //    - asset has purchaseCost
+            //    - pool has a FA schedule uploaded
+            //    - no depreciation record exists yet
+            //    - req.body.autoProportionalDep === true (frontend opt-in) OR depreciationMethod provided
+            const shouldAutoDep = data.autoProportionalDep || data.depreciationMethod;
+            if (shouldAutoDep && data.purchaseCost) {
+                const existingDep = yield prismaClient_1.default.assetDepreciation.findUnique({ where: { assetId: asset.id } });
+                if (!existingDep) {
+                    const schedules = yield prismaClient_1.default.assetPoolDepreciationSchedule.findMany({
+                        where: { poolId },
+                        orderBy: { financialYearEnd: "desc" },
+                        take: 1,
+                    });
+                    const latestSched = (_u = schedules[0]) !== null && _u !== void 0 ? _u : null;
+                    if (latestSched) {
+                        const assetCost = Number(data.purchaseCost);
+                        const poolGross = Number(latestSched.closingGrossBlock);
+                        const poolAccDep = Number(latestSched.closingAccumulatedDep);
+                        const shareRatio = poolGross > 0 ? assetCost / poolGross : 0;
+                        const openingAccDep = Math.round(poolAccDep * shareRatio);
+                        const openingBV = Math.max(0, assetCost - openingAccDep);
+                        const depMethod = data.depreciationMethod || "SL";
+                        const depRate = (_v = data.depreciationRate) !== null && _v !== void 0 ? _v : Number(latestSched.depreciationRate);
+                        const depStart = data.depreciationStart
+                            ? new Date(data.depreciationStart)
+                            : (data.purchaseDate ? new Date(data.purchaseDate) : new Date(latestSched.financialYearEnd));
+                        yield prismaClient_1.default.assetDepreciation.create({
+                            data: {
+                                assetId: asset.id,
+                                depreciationMethod: depMethod,
+                                depreciationRate: String(depRate),
+                                expectedLifeYears: data.expectedLifeYears ? Number(data.expectedLifeYears) : 10,
+                                depreciationStart: depStart,
+                                depreciationFrequency: data.depreciationFrequency || "YEARLY",
+                                salvageValue: null,
+                                accumulatedDepreciation: String(openingAccDep),
+                                currentBookValue: String(openingBV),
+                                lastCalculatedAt: null,
+                                roundOff: false,
+                                decimalPlaces: 2,
+                                isActive: true,
+                                createdById: (_x = (_w = req.user) === null || _w === void 0 ? void 0 : _w.employeeDbId) !== null && _x !== void 0 ? _x : null,
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        // Reload asset with depreciation if auto-created
+        const finalAsset = yield prismaClient_1.default.asset.findUnique({
+            where: { id: asset.id },
+            include: { depreciation: true },
+        });
+        res.status(201).json(finalAsset);
         return;
     }
     catch (err) {
@@ -259,19 +385,7 @@ const hodApproveAsset = (req, res) => __awaiter(void 0, void 0, void 0, function
         }
         if (action === "APPROVED") {
             // Now generate the real Asset ID
-            const now = new Date();
-            const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-            const fyEnd = fyStart + 1;
-            const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-            const latest = yield prismaClient_1.default.asset.findFirst({
-                where: { assetId: { startsWith: `AST-${fyStr}` }, parentAssetId: null },
-                orderBy: { id: "desc" }
-            });
-            let next = 1;
-            if (latest && !latest.assetId.startsWith("TEMP-")) {
-                next = parseInt(latest.assetId.split("-")[3], 10) + 1;
-            }
-            const newAssetId = `AST-${fyStr}-${next.toString().padStart(3, "0")}`;
+            const newAssetId = yield (0, assetIdGenerator_1.generateAssetId)(asset.modeOfProcurement || "PURCHASE", undefined, { categoryId: asset.assetCategoryId });
             // Auto-assign supervisor for location
             let supervisorId = asset.supervisorId;
             if (!supervisorId && asset.departmentId) {
@@ -434,12 +548,20 @@ exports.hodApproveAsset = hodApproveAsset;
 //   res.json(asset);
 // };
 const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f;
     try {
         const id = Number(req.params.id);
         const data = req.body;
         const updateData = {
             assetName: data.assetName,
             assetType: data.assetType,
+            assetNature: (_a = data.assetNature) !== null && _a !== void 0 ? _a : "TANGIBLE",
+            // Intangible-specific
+            intangibleSubType: (_b = data.intangibleSubType) !== null && _b !== void 0 ? _b : null,
+            usefulLifeYears: data.usefulLifeYears ? Number(data.usefulLifeYears) : null,
+            amortizationMethod: (_c = data.amortizationMethod) !== null && _c !== void 0 ? _c : null,
+            amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
+            residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
             referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
             serialNumber: data.serialNumber,
             assetPhoto: data.assetPhoto,
@@ -462,6 +584,14 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             slaResolutionUnit: data.slaResolutionUnit || null,
             // slaDetails: data.slaDetails,
             status: data.status,
+            // ── Legacy onboarding fields ──────────────────────────────────────────
+            isLegacyAsset: data.isLegacyAsset ? true : false,
+            dataAvailableSince: data.dataAvailableSince ? new Date(data.dataAvailableSince) : null,
+            historicalMaintenanceCost: data.historicalMaintenanceCost != null ? String(data.historicalMaintenanceCost) : null,
+            historicalSparePartsCost: data.historicalSparePartsCost != null ? String(data.historicalSparePartsCost) : null,
+            historicalOtherCost: data.historicalOtherCost != null ? String(data.historicalOtherCost) : null,
+            historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
+            historicalCostNote: (_d = data.historicalCostNote) !== null && _d !== void 0 ? _d : null,
         };
         // ---------------------------
         // CATEGORY (SAFE CONNECT)
@@ -510,7 +640,10 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 purchaseOrderNo: data.purchaseOrderNo,
                 purchaseOrderDate: data.purchaseOrderDate ? new Date(data.purchaseOrderDate) : null,
                 deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
-                purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null
+                purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null,
+                purchaseVoucherNo: (_e = data.purchaseVoucherNo) !== null && _e !== void 0 ? _e : null,
+                purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
+                purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
             });
         }
         if (data.modeOfProcurement === "DONATION") {
@@ -549,6 +682,7 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 allottedTo: true,
             },
         });
+        (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: id, action: "UPDATE", description: `Asset updated`, performedById: (_f = req.user) === null || _f === void 0 ? void 0 : _f.employeeDbId });
         res.json(updated);
     }
     catch (err) {
@@ -558,8 +692,10 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
 });
 exports.updateAsset = updateAsset;
 const deleteAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     const id = parseInt(req.params.id);
     yield prismaClient_1.default.asset.delete({ where: { id } });
+    (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: id, action: "DELETE", description: `Asset deleted`, performedById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId });
     res.status(204).send();
 });
 exports.deleteAsset = deleteAsset;

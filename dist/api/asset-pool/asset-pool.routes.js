@@ -1,0 +1,27 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const multer_1 = __importDefault(require("multer"));
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const asset_pool_controller_1 = require("./asset-pool.controller");
+const router = (0, express_1.Router)();
+const upload = (0, multer_1.default)({ dest: "uploads/" });
+router.get("/summary", authMiddleware_1.authenticateToken, asset_pool_controller_1.getPoolSummary);
+router.get("/fa-register-template", authMiddleware_1.authenticateToken, asset_pool_controller_1.downloadFaRegisterTemplate);
+router.post("/import-fa-register", authMiddleware_1.authenticateToken, upload.single("file"), asset_pool_controller_1.importFaRegister);
+router.get("/individual-assets-template", authMiddleware_1.authenticateToken, asset_pool_controller_1.downloadIndividualAssetsTemplate);
+router.post("/import-individual-assets", authMiddleware_1.authenticateToken, upload.single("file"), asset_pool_controller_1.importIndividualAssets);
+router.delete("/reset", authMiddleware_1.authenticateToken, asset_pool_controller_1.resetAllPools);
+router.get("/", authMiddleware_1.authenticateToken, asset_pool_controller_1.listPools);
+router.post("/", authMiddleware_1.authenticateToken, asset_pool_controller_1.createPool);
+router.get("/:id", authMiddleware_1.authenticateToken, asset_pool_controller_1.getPool);
+router.put("/:id", authMiddleware_1.authenticateToken, asset_pool_controller_1.updatePool);
+router.post("/:id/adjustment", authMiddleware_1.authenticateToken, asset_pool_controller_1.addAdjustment);
+router.get("/:id/depreciation-schedule", authMiddleware_1.authenticateToken, asset_pool_controller_1.listDepreciationSchedules);
+router.post("/:id/depreciation-schedule", authMiddleware_1.authenticateToken, asset_pool_controller_1.addDepreciationSchedule);
+router.get("/:id/proportional-dep", authMiddleware_1.authenticateToken, asset_pool_controller_1.getProportionalDep);
+router.get("/:id/activity", authMiddleware_1.authenticateToken, asset_pool_controller_1.getPoolActivity);
+exports.default = router;

@@ -173,4 +173,43 @@ export async function generateLegacyAssetId(
   });
 }
 
+/**
+ * Generate a permanent stores reference ID, assigned when a stores user
+ * fills the asset's basic details. Lives alongside the regular `assetId`
+ * (which still flows TEMP- → AST- via the HOD acknowledgement workflow).
+ *
+ * Format: STR-{ORG}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
+ * Example: STR-JMRH-MED-FY2026-27-00001
+ *
+ * Sequence is per-FY across all categories (pool of stores drafts in that FY).
+ */
+export async function generateStoreAssetId(
+  categoryId?: number | null,
+  tx?: any,
+): Promise<string> {
+  const db = tx || prisma;
+  const org = getOrgCode();
+  const catCode = await resolveCategoryCode(categoryId ?? null, db);
+  const fyStr = getFYString();
+
+  const prefix = catCode
+    ? `STR-${org}-${catCode}-${fyStr}-`
+    : `STR-${org}-${fyStr}-`;
+
+  const existing = await db.asset.findMany({
+    where: { storeAssetId: { startsWith: prefix } },
+    select: { storeAssetId: true },
+  });
+
+  let maxSeq = 0;
+  for (const row of existing) {
+    if (!row.storeAssetId) continue;
+    const seqStr = row.storeAssetId.slice(prefix.length);
+    const seq = parseInt(seqStr, 10);
+    if (!isNaN(seq) && seq > maxSeq) maxSeq = seq;
+  }
+
+  return `${prefix}${(maxSeq + 1).toString().padStart(5, "0")}`;
+}
+
 export { getFYString, getHospitalCode, getOrgCode, getPrefix };

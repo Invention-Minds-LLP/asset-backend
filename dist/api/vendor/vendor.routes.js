@@ -9,6 +9,7 @@ const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = express_1.default.Router();
 router.get("/", authMiddleware_1.authenticateToken, vendor_controller_1.getAllVendors);
 router.post("/", authMiddleware_1.authenticateToken, vendor_controller_1.createVendor);
+router.post("/import", authMiddleware_1.authenticateToken, vendor_controller_1.vendorUpload.single("file"), vendor_controller_1.importVendors);
 router.put("/:id", authMiddleware_1.authenticateToken, vendor_controller_1.updateVendor);
 router.delete("/:id", authMiddleware_1.authenticateToken, vendor_controller_1.deleteVendor);
 exports.default = router;

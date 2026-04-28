@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../../middleware/authMiddleware");
+const chart_of_accounts_controller_1 = require("./chart-of-accounts.controller");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.get("/dropdown", chart_of_accounts_controller_1.getAccountsDropdown);
+router.get("/", chart_of_accounts_controller_1.getAllAccounts);
+router.get("/:id", chart_of_accounts_controller_1.getAccountById);
+router.post("/", chart_of_accounts_controller_1.createAccount);
+router.put("/:id", chart_of_accounts_controller_1.updateAccount);
+router.delete("/:id", chart_of_accounts_controller_1.deleteAccount);
+exports.default = router;

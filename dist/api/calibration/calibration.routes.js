@@ -17,6 +17,7 @@ router.delete("/schedules/:id", authMiddleware_1.authenticateToken, calibration_
 // ── History ────────────────────────────────────────────────────────────────────
 router.post("/history", authMiddleware_1.authenticateToken, calibration_controller_1.logCalibrationHistory);
 router.get("/history/asset/:assetId", authMiddleware_1.authenticateToken, calibration_controller_1.getCalibrationHistoryByAsset);
+router.get("/history/:id/pdf", authMiddleware_1.authenticateToken, calibration_controller_1.getCalibrationHistoryPdf);
 // ── Checklist Templates ────────────────────────────────────────────────────────
 router.get("/templates", authMiddleware_1.authenticateToken, calibration_controller_1.getAllCalibrationTemplates);
 router.post("/templates", authMiddleware_1.authenticateToken, calibration_controller_1.createCalibrationTemplate);

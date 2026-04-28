@@ -37,8 +37,23 @@ const FTP_CONFIG = {
 const PUBLIC_MAINT_REPORT_BASE = process.env.PUBLIC_MAINT_REPORT_BASE ||
     "https://smartassets.inventionminds.com/maintenance_reports";
 const getMaintenanceHistory = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    const user = req.user;
+    // Department scoping: non-admin sees only their department's assets
+    let scopedAssetIds;
+    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+        const deptAssets = yield prismaClient_1.default.asset.findMany({
+            where: { departmentId: Number(user.departmentId) },
+            select: { id: true },
+        });
+        scopedAssetIds = deptAssets.map(a => a.id);
+    }
+    const where = {};
+    if (scopedAssetIds) {
+        where.assetId = { in: scopedAssetIds };
+    }
     const history = yield prismaClient_1.default.maintenanceHistory.findMany({
-        include: { asset: true, ticket: true },
+        where,
+        include: { asset: true, ticket: true, vendor: { select: { id: true, name: true } } },
         orderBy: { id: "desc" },
     });
     res.json(history);
@@ -66,7 +81,7 @@ const getMaintenanceHistoryByAsset = (req, res) => __awaiter(void 0, void 0, voi
         const history = yield prismaClient_1.default.maintenanceHistory.findMany({
             where: { assetId: asset.id },
             orderBy: { actualDoneAt: "desc" },
-            include: { serviceContract: true },
+            include: { serviceContract: true, vendor: { select: { id: true, name: true } } },
         });
         res.status(200).json(history);
     }
@@ -105,7 +120,7 @@ const uploadMaintenanceReport = (req, res) => __awaiter(void 0, void 0, void 0, 
         multiples: false,
     });
     form.parse(req, (err, fields, files) => __awaiter(void 0, void 0, void 0, function* () {
-        var _a, _b, _c, _d, _e, _f, _g, _h;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
         if (err) {
             res.status(500).json({ error: "File parsing failed." });
             return;
@@ -113,13 +128,23 @@ const uploadMaintenanceReport = (req, res) => __awaiter(void 0, void 0, void 0, 
         const assetId = (_a = fields.assetId) === null || _a === void 0 ? void 0 : _a[0];
         const scheduledDue = (_b = fields.scheduledDue) === null || _b === void 0 ? void 0 : _b[0];
         const actualDoneAt = (_c = fields.actualDoneAt) === null || _c === void 0 ? void 0 : _c[0];
-        const wasLate = ((_d = fields.wasLate) === null || _d === void 0 ? void 0 : _d[0]) === "true";
-        const performedBy = (_e = fields.performedBy) === null || _e === void 0 ? void 0 : _e[0];
-        const notes = ((_f = fields.notes) === null || _f === void 0 ? void 0 : _f[0]) || null;
-        const ticketId = ((_g = fields.ticketId) === null || _g === void 0 ? void 0 : _g[0]) || null; // optional link to ticket
-        const serviceContractId = ((_h = fields.serviceContractId) === null || _h === void 0 ? void 0 : _h[0]) || null;
+        const performedBy = (_d = fields.performedBy) === null || _d === void 0 ? void 0 : _d[0];
+        const performedByType = ((_e = fields.performedByType) === null || _e === void 0 ? void 0 : _e[0]) || null; // INTERNAL | VENDOR | EXTERNAL_SERVICE
+        const vendorIdRaw = ((_f = fields.vendorId) === null || _f === void 0 ? void 0 : _f[0]) || null;
+        const externalServiceCenter = ((_g = fields.externalServiceCenter) === null || _g === void 0 ? void 0 : _g[0]) || null;
+        const serviceType = ((_h = fields.serviceType) === null || _h === void 0 ? void 0 : _h[0]) || null; // WARRANTY | AMC | CMC | PAID | INTERNAL
+        const notes = ((_j = fields.notes) === null || _j === void 0 ? void 0 : _j[0]) || null;
+        const ticketId = ((_k = fields.ticketId) === null || _k === void 0 ? void 0 : _k[0]) || null;
+        const serviceContractId = ((_l = fields.serviceContractId) === null || _l === void 0 ? void 0 : _l[0]) || null;
+        const serviceCostRaw = ((_m = fields.serviceCost) === null || _m === void 0 ? void 0 : _m[0]) || null;
+        const partsCostRaw = ((_o = fields.partsCost) === null || _o === void 0 ? void 0 : _o[0]) || null;
         if (!assetId || !scheduledDue || !actualDoneAt || !performedBy) {
             res.status(400).json({ error: "Required fields are missing." });
+            return;
+        }
+        const VALID_PERFORMED_BY_TYPES = ["INTERNAL", "VENDOR", "EXTERNAL_SERVICE"];
+        if (performedByType && !VALID_PERFORMED_BY_TYPES.includes(performedByType)) {
+            res.status(400).json({ error: "Invalid performedByType" });
             return;
         }
         let fileUrl = null;
@@ -158,18 +183,33 @@ const uploadMaintenanceReport = (req, res) => __awaiter(void 0, void 0, void 0, 
                     return;
                 }
             }
+            const actualDate = new Date(actualDoneAt);
+            const scheduledDate = new Date(scheduledDue);
+            const wasLate = actualDate > scheduledDate;
+            const vendorIdInt = vendorIdRaw ? Number(vendorIdRaw) : null;
+            const serviceCost = serviceCostRaw ? Number(serviceCostRaw) : null;
+            const partsCost = partsCostRaw ? Number(partsCostRaw) : null;
+            const totalCost = (serviceCost !== null && serviceCost !== void 0 ? serviceCost : 0) + (partsCost !== null && partsCost !== void 0 ? partsCost : 0) || null;
             const saved = yield prismaClient_1.default.maintenanceHistory.create({
                 data: {
                     assetId: asset.id,
                     serviceContractId: contractIdInt,
-                    scheduledDue: new Date(scheduledDue),
-                    actualDoneAt: new Date(actualDoneAt),
+                    scheduledDue: scheduledDate,
+                    actualDoneAt: actualDate,
                     wasLate,
                     performedBy,
+                    performedByType,
+                    vendorId: vendorIdInt,
+                    externalServiceCenter,
+                    serviceType,
                     notes,
+                    serviceCost,
+                    partsCost,
+                    totalCost,
                     serviceReport: fileUrl,
                     ticketId: ticketId ? parseInt(ticketId) : null,
                 },
+                include: { vendor: { select: { id: true, name: true } } },
             });
             res.status(200).json(saved);
             return;

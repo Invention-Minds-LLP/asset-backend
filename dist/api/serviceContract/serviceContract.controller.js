@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.approveVisitCharge = exports.getServiceVisits = exports.logServiceVisit = exports.uploadContractDocument = exports.expireContracts = exports.getServiceContractStats = exports.getAllServiceContracts = exports.getContractsByAsset = exports.updateServiceContract = exports.createServiceContract = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const asset_1 = require("../../utilis/asset");
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 function mustUser(req) {
     var _a;
     if (!((_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId))
@@ -98,6 +99,14 @@ const createServiceContract = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 vendorResolutionUnit: vendorResolutionUnit !== null && vendorResolutionUnit !== void 0 ? vendorResolutionUnit : null,
             },
         });
+        // Fire-and-forget: notify admins about new service contract
+        (0, notificationHelper_1.getAdminIds)().then(adminIds => (0, notificationHelper_1.notify)({
+            type: "AMC_CMC_EXPIRY",
+            title: "New Service Contract Created",
+            message: `${contract.contractType} contract created for asset ${asset.assetName}`,
+            recipientIds: adminIds,
+            createdById: user.employeeDbId,
+        })).catch(() => { });
         // 🔔 Notify HOD (kept from your logic)
         if (asset.departmentId) {
             const hod = yield prismaClient_1.default.employee.findFirst({
@@ -216,8 +225,21 @@ exports.getContractsByAsset = getContractsByAsset;
 // GET /service-contracts/all (standalone page with filters, pagination, CSV)
 const getAllServiceContracts = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = req.user;
         const { status, contractType, vendorId, search, page = "1", limit = "25", exportCsv, expiringDays } = req.query;
+        // Department scoping: non-admin sees only their department's assets
+        let scopedAssetIds;
+        if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+            const deptAssets = yield prismaClient_1.default.asset.findMany({
+                where: { departmentId: Number(user.departmentId) },
+                select: { id: true },
+            });
+            scopedAssetIds = deptAssets.map(a => a.id);
+        }
         const where = {};
+        if (scopedAssetIds) {
+            where.assetId = { in: scopedAssetIds };
+        }
         if (status)
             where.status = String(status);
         if (contractType)
@@ -283,16 +305,23 @@ exports.getAllServiceContracts = getAllServiceContracts;
 // GET /service-contracts/stats
 const getServiceContractStats = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = _req.user;
         const now = new Date();
         const thirtyDays = new Date();
         thirtyDays.setDate(now.getDate() + 30);
+        // Department scoping
+        let scope = {};
+        if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+            const deptAssets = yield prismaClient_1.default.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
+            scope = { assetId: { in: deptAssets.map(a => a.id) } };
+        }
         const [total, active, expired, expiring30, amcCount, cmcCount] = yield Promise.all([
-            prismaClient_1.default.serviceContract.count(),
-            prismaClient_1.default.serviceContract.count({ where: { status: "ACTIVE" } }),
-            prismaClient_1.default.serviceContract.count({ where: { status: "EXPIRED" } }),
-            prismaClient_1.default.serviceContract.count({ where: { status: "ACTIVE", endDate: { gte: now, lte: thirtyDays } } }),
-            prismaClient_1.default.serviceContract.count({ where: { contractType: "AMC", status: "ACTIVE" } }),
-            prismaClient_1.default.serviceContract.count({ where: { contractType: "CMC", status: "ACTIVE" } }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({}, scope) }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({ status: "ACTIVE" }, scope) }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({ status: "EXPIRED" }, scope) }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({ status: "ACTIVE", endDate: { gte: now, lte: thirtyDays } }, scope) }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({ contractType: "AMC", status: "ACTIVE" }, scope) }),
+            prismaClient_1.default.serviceContract.count({ where: Object.assign({ contractType: "CMC", status: "ACTIVE" }, scope) }),
         ]);
         res.json({ total, active, expired, expiring30, amcCount, cmcCount });
     }
@@ -433,6 +462,14 @@ const logServiceVisit = (req, res) => __awaiter(void 0, void 0, void 0, function
                 createdById: user.employeeDbId,
             },
         });
+        // Fire-and-forget: notify admins about service visit logged
+        (0, notificationHelper_1.getAdminIds)().then(adminIds => (0, notificationHelper_1.notify)({
+            type: "AMC_CMC_EXPIRY",
+            title: "Service Visit Logged",
+            message: `${visitType} visit logged for asset ${contract.asset.assetName} under contract ${contract.contractNumber || contractId}`,
+            recipientIds: adminIds,
+            createdById: user.employeeDbId,
+        })).catch(() => { });
         // If charge > 1000, notify HOD/manager
         if (isChargeable && amount != null && amount > 1000 && contract.asset.departmentId) {
             const hod = yield prismaClient_1.default.employee.findFirst({

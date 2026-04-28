@@ -16,5 +16,6 @@ router.post("/run", authMiddleware_1.authenticateToken, pm_checklist_controller_
 router.post("/run/:runId/submit", authMiddleware_1.authenticateToken, pm_checklist_controller_1.submitChecklistRun);
 // Fetch
 router.get("/run/asset/:assetId", authMiddleware_1.authenticateToken, pm_checklist_controller_1.getRunsByAsset);
+router.get("/run/:runId/pdf", authMiddleware_1.authenticateToken, pm_checklist_controller_1.getRunPdf);
 router.get("/run/:id", authMiddleware_1.authenticateToken, pm_checklist_controller_1.getRunById);
 exports.default = router;

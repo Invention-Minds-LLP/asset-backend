@@ -10,4 +10,7 @@ router.get("/ticket-analytics", authMiddleware_1.authenticateToken, reports_cont
 router.get("/expiry", authMiddleware_1.authenticateToken, reports_controller_1.getExpiryReport);
 router.get("/depreciation", authMiddleware_1.authenticateToken, reports_controller_1.getDepreciationReport);
 router.get("/inventory-stock", authMiddleware_1.authenticateToken, reports_controller_1.getInventoryStockReport);
+router.get("/fixed-assets-schedule", authMiddleware_1.authenticateToken, reports_controller_1.getFixedAssetsSchedule);
+router.get("/fixed-assets-schedule/category-detail", authMiddleware_1.authenticateToken, reports_controller_1.getCategoryAssetDetail);
+router.get("/consolidated", authMiddleware_1.authenticateToken, reports_controller_1.getConsolidatedAssetReport);
 exports.default = router;

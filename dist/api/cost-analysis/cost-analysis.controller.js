@@ -12,11 +12,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteRevenueEntry = exports.addRevenueEntry = exports.getRevenueEntries = exports.getDepreciationAlerts = exports.getAssetCostAnalysis = void 0;
+exports.deleteRevenueEntry = exports.deleteAllocation = exports.updateAllocation = exports.addAllocation = exports.getAllocations = exports.addRevenueEntry = exports.getRevenueEntries = exports.getDepreciationAlerts = exports.getAssetCostAnalysis = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 // GET /cost-analysis/:id
 const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x;
     try {
         const assetDbId = Number(req.params.id);
         if (isNaN(assetDbId)) {
@@ -118,6 +118,13 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
             ageYears = (Date.now() - new Date(ageBasisDate).getTime()) / (1000 * 60 * 60 * 24 * 365.25);
         }
         const remainingLifeYears = Math.max(0, expectedLifeYears - ageYears);
+        // ── Historical (legacy) opening balance ──────────────────────────────────
+        const historicalMaintenanceCost = Number((_s = asset.historicalMaintenanceCost) !== null && _s !== void 0 ? _s : 0);
+        const historicalSparePartsCost = Number((_t = asset.historicalSparePartsCost) !== null && _t !== void 0 ? _t : 0);
+        const historicalOtherCost = Number((_u = asset.historicalOtherCost) !== null && _u !== void 0 ? _u : 0);
+        const totalHistoricalCost = historicalMaintenanceCost + historicalSparePartsCost + historicalOtherCost;
+        // Lifetime TCO includes pre-system spend
+        const lifetimeTotalMaintenanceCost = totalMaintenanceCost + totalHistoricalCost;
         // ── Avg cost per year ────────────────────────────────────────────────────
         // totalMaintenanceCost ÷ ageYears (since first recorded use)
         const costPerYear = ageYears > 0 ? totalMaintenanceCost / ageYears : 0;
@@ -128,19 +135,22 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
         const replacementCostEstimate = originalCost > 0
             ? Math.round(originalCost * Math.pow(1 + inflationRate, roundedAge))
             : null;
-        // ── Revenue (from manual entries) ────────────────────────────────────────
-        const revenueEntries = yield prismaClient_1.default.assetRevenueEntry.findMany({
+        // ── Revenue (from daily usage logs — actual + estimated) ─────────────────
+        const revenueAgg = yield prismaClient_1.default.assetDailyUsageLog.aggregate({
             where: { assetId: assetDbId },
-            select: { totalRevenue: true, revenueType: true, entryDate: true },
+            _sum: { revenueGenerated: true, estimatedRevenue: true },
         });
-        const totalRevenue = revenueEntries.reduce((s, e) => s + Number(e.totalRevenue), 0);
+        const actualRevenue = Number((_v = revenueAgg._sum.revenueGenerated) !== null && _v !== void 0 ? _v : 0);
+        const estimatedRevenue = Number((_w = revenueAgg._sum.estimatedRevenue) !== null && _w !== void 0 ? _w : 0);
+        // Use actual if available, fall back to estimated
+        const totalRevenue = actualRevenue > 0 ? actualRevenue : estimatedRevenue;
         const roi = totalRevenue > 0 && originalCost > 0
             ? ((totalRevenue - totalMaintenanceCost) / originalCost) * 100
             : null;
         // ── Recommendation ───────────────────────────────────────────────────────
         let recommendation = "MONITOR";
         const reasons = [];
-        const maintenanceToPurchaseRatio = originalCost > 0 ? totalMaintenanceCost / originalCost : 0;
+        const maintenanceToPurchaseRatio = originalCost > 0 ? lifetimeTotalMaintenanceCost / originalCost : 0;
         const bookValueToPurchaseRatio = originalCost > 0 ? currentBookValue / originalCost : 1;
         if (expectedLifeYears > 0 && ageYears >= expectedLifeYears) {
             recommendation = "REPLACE";
@@ -173,7 +183,7 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
                 id: asset.id,
                 assetId: asset.assetId,
                 assetName: asset.assetName,
-                category: (_s = asset.assetCategory) === null || _s === void 0 ? void 0 : _s.name,
+                category: (_x = asset.assetCategory) === null || _x === void 0 ? void 0 : _x.name,
                 purchaseDate: asset.purchaseDate,
                 installedAt: asset.installedAt,
                 originalCost,
@@ -229,8 +239,7 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
                     result: replacementCostEstimate,
                 },
                 revenue: {
-                    formula: "Sum of all manually recorded revenue entries for this asset",
-                    entryCount: revenueEntries.length,
+                    formula: "Sum of actual revenue from daily usage logs (falls back to estimated if actual is zero)",
                     totalRevenue,
                     roi: roi != null ? Math.round(roi * 10) / 10 : null,
                     roiFormula: "(Total Revenue − Total Maintenance Cost) ÷ Original Cost × 100",
@@ -246,6 +255,16 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
                     status: s.status,
                 });
             }),
+            legacy: asset.isLegacyAsset ? {
+                isLegacyAsset: true,
+                dataAvailableSince: asset.dataAvailableSince,
+                historicalCostAsOf: asset.historicalCostAsOf,
+                historicalMaintenanceCost,
+                historicalSparePartsCost,
+                historicalOtherCost,
+                totalHistoricalCost,
+                historicalCostNote: asset.historicalCostNote,
+            } : null,
             summary: {
                 repairCount,
                 repairCost,
@@ -259,6 +278,8 @@ const getAssetCostAnalysis = (req, res) => __awaiter(void 0, void 0, void 0, fun
                 subAssetPurchaseCost,
                 subAssetReplacementCost,
                 totalMaintenanceCost,
+                totalHistoricalCost,
+                lifetimeTotalMaintenanceCost,
                 costPerYear: Math.round(costPerYear),
                 maintenanceToPurchaseRatio: Math.round(maintenanceToPurchaseRatio * 100),
                 replacementCostEstimate,
@@ -382,6 +403,94 @@ const addRevenueEntry = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.addRevenueEntry = addRevenueEntry;
+// ─── Cost Allocation CRUD ────────────────────────────────────────────────────
+// GET /cost-analysis/:id/allocations
+const getAllocations = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const assetDbId = Number(req.params.id);
+        const entries = yield prismaClient_1.default.assetCostAllocation.findMany({
+            where: { assetId: assetDbId },
+            orderBy: { entryDate: 'desc' },
+        });
+        const total = entries.reduce((s, e) => s + Number(e.amount), 0);
+        res.json({ data: entries, total: Number(total.toFixed(2)) });
+    }
+    catch (error) {
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+exports.getAllocations = getAllocations;
+// POST /cost-analysis/:id/allocations
+const addAllocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const assetDbId = Number(req.params.id);
+        const { costType, amount, period, description, referenceType, referenceId, entryDate } = req.body;
+        if (!costType || amount == null) {
+            res.status(400).json({ message: 'costType and amount are required' });
+            return;
+        }
+        const validTypes = ['LABOR', 'UTILITY_POWER', 'SPACE_FACILITY', 'OUTSOURCED_SERVICE', 'CONSUMABLE', 'OTHER'];
+        if (!validTypes.includes(costType)) {
+            res.status(400).json({ message: `costType must be one of: ${validTypes.join(', ')}` });
+            return;
+        }
+        const entry = yield prismaClient_1.default.assetCostAllocation.create({
+            data: {
+                assetId: assetDbId,
+                costType,
+                amount: Number(amount),
+                period: period || null,
+                description: description || null,
+                referenceType: referenceType || null,
+                referenceId: referenceId ? Number(referenceId) : null,
+                entryDate: entryDate ? new Date(entryDate) : new Date(),
+                createdById: (_b = (_a = req.user) === null || _a === void 0 ? void 0 : _a.id) !== null && _b !== void 0 ? _b : null,
+            },
+        });
+        res.status(201).json({ data: entry, message: 'Cost allocation added' });
+    }
+    catch (error) {
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+exports.addAllocation = addAllocation;
+// PUT /cost-analysis/allocations/:entryId
+const updateAllocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const entryId = Number(req.params.entryId);
+        const { costType, amount, period, description, referenceType, referenceId, entryDate } = req.body;
+        const updated = yield prismaClient_1.default.assetCostAllocation.update({
+            where: { id: entryId },
+            data: {
+                costType: costType !== null && costType !== void 0 ? costType : undefined,
+                amount: amount != null ? Number(amount) : undefined,
+                period: period !== null && period !== void 0 ? period : undefined,
+                description: description !== null && description !== void 0 ? description : undefined,
+                referenceType: referenceType !== null && referenceType !== void 0 ? referenceType : undefined,
+                referenceId: referenceId != null ? Number(referenceId) : undefined,
+                entryDate: entryDate ? new Date(entryDate) : undefined,
+            },
+        });
+        res.json({ data: updated, message: 'Cost allocation updated' });
+    }
+    catch (error) {
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+exports.updateAllocation = updateAllocation;
+// DELETE /cost-analysis/allocations/:entryId
+const deleteAllocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const entryId = Number(req.params.entryId);
+        yield prismaClient_1.default.assetCostAllocation.delete({ where: { id: entryId } });
+        res.json({ message: 'Cost allocation deleted' });
+    }
+    catch (error) {
+        res.status(500).json({ message: 'Internal server error', error: error.message });
+    }
+});
+exports.deleteAllocation = deleteAllocation;
 // DELETE /cost-analysis/revenue/:entryId
 const deleteRevenueEntry = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {

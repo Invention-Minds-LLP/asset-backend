@@ -12,11 +12,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.downloadLegacyTemplate = void 0;
 exports.importAssetsExcel = importAssetsExcel;
 exports.importChecklistWorkbook = importChecklistWorkbook;
 const fs_1 = __importDefault(require("fs"));
 const xlsx_1 = __importDefault(require("xlsx"));
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const assetIdGenerator_1 = require("../../utilis/assetIdGenerator");
+const depreciationEngine_1 = require("../../utilis/depreciationEngine");
 function parseDate(value) {
     if (value === null || value === undefined || value === '')
         return null;
@@ -61,110 +64,10 @@ function getFinancialYearParts(date = new Date()) {
 }
 function createAssetWithGeneratedId(assetData) {
     return __awaiter(this, void 0, void 0, function* () {
-        const now = new Date();
-        const fyStart = now.getMonth() >= 3
-            ? now.getFullYear()
-            : now.getFullYear() - 1;
-        const fyEnd = fyStart + 1;
-        const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-        const prefix = `AST-${fyStr}-`;
-        const existing = yield prismaClient_1.default.asset.findMany({
-            where: {
-                assetId: {
-                    startsWith: prefix
-                }
-            },
-            select: {
-                assetId: true
-            }
-        });
-        let maxSeq = 0;
-        for (const row of existing) {
-            const parts = row.assetId.split("-");
-            if (parts.length !== 4)
-                continue;
-            const seq = Number(parts[3]);
-            if (Number.isInteger(seq) && seq > maxSeq) {
-                maxSeq = seq;
-            }
-        }
-        for (let seq = maxSeq + 1; seq <= maxSeq + 100; seq++) {
-            const candidate = `${prefix}${String(seq).padStart(3, "0")}`;
-            const exists = yield prismaClient_1.default.asset.findUnique({
-                where: { assetId: candidate },
-                select: { id: true }
-            });
-            if (exists)
-                continue;
-            try {
-                return yield prismaClient_1.default.asset.create({
-                    data: Object.assign({ assetId: candidate }, assetData)
-                });
-            }
-            catch (err) {
-                if (err.code === 'P2002')
-                    continue;
-                throw err;
-            }
-        }
-        throw new Error('Unable to generate unique assetId after scanning available sequence range');
-    });
-}
-function generateAssetId() {
-    return __awaiter(this, void 0, void 0, function* () {
-        const now = new Date();
-        const fyStart = now.getMonth() >= 3
-            ? now.getFullYear()
-            : now.getFullYear() - 1;
-        const fyEnd = fyStart + 1;
-        const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-        const prefix = `AST-${fyStr}-`;
-        const existing = yield prismaClient_1.default.asset.findMany({
-            where: {
-                assetId: {
-                    startsWith: prefix
-                }
-            },
-            select: {
-                assetId: true
-            }
-        });
-        let maxSeq = 0;
-        for (const row of existing) {
-            const parts = row.assetId.split("-");
-            // Expect: AST-FY2025-26-007  => 4 parts
-            if (parts.length !== 4)
-                continue;
-            const lastPart = parts[3];
-            const seq = Number(lastPart);
-            if (Number.isInteger(seq) && seq > maxSeq) {
-                maxSeq = seq;
-            }
-        }
-        return `${prefix}${String(maxSeq + 1).padStart(3, "0")}`;
-    });
-}
-function generateSubAssetId(parentAsset) {
-    return __awaiter(this, void 0, void 0, function* () {
-        const existingSubAssets = yield prismaClient_1.default.asset.findMany({
-            where: {
-                parentAssetId: parentAsset.id
-            },
-            select: {
-                assetId: true
-            }
-        });
-        let maxSeq = 0;
-        for (const item of existingSubAssets) {
-            const suffix = item.assetId.split("-").pop();
-            if (suffix && /^\d{3}$/.test(suffix)) {
-                const num = Number(suffix);
-                if (num > maxSeq)
-                    maxSeq = num;
-            }
-        }
-        const next = String(maxSeq + 1).padStart(3, "0");
-        return `${parentAsset.assetId}-${next}`;
+        const assetId = assetData.isLegacyAsset
+            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)(assetData.purchaseDate, undefined, assetData.assetCategoryId)
+            : yield (0, assetIdGenerator_1.generateAssetId)(assetData.modeOfProcurement || "PURCHASE", undefined, { categoryId: assetData.assetCategoryId, purchaseDate: assetData.purchaseDate });
+        return yield prismaClient_1.default.asset.create({ data: Object.assign({ assetId }, assetData) });
     });
 }
 function getOrCreateVendor(row) {
@@ -254,7 +157,7 @@ function findAssetByReferenceOrSerial(referenceCode, serialNumber) {
 }
 function importAssetsExcel(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6;
         const file = req.file;
         if (!file) {
             res.status(400).json({ message: 'Excel file is required' });
@@ -563,14 +466,16 @@ function importAssetsExcel(req, res) {
             for (let i = 0; i < assetsRows.length; i++) {
                 const row = assetsRows[i];
                 try {
-                    if (!row.referenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
+                    // referenceCode is OPTIONAL — auto-generated serial used if both serial+ref are blank
+                    if (!row.assetName || !row.assetType || !row.assetCategory) {
                         summary.errors.push({
                             sheet: 'Assets',
                             row: i + 2,
-                            message: 'referenceCode, assetName, assetType, assetCategory are required'
+                            message: 'assetName, assetType, assetCategory are required'
                         });
                         continue;
                     }
+                    const isLegacy = String(row.isLegacyAsset || '').trim().toLowerCase() === 'true' || String(row.isLegacyAsset || '') === '1';
                     const modeOfProcurement = String(row.modeOfProcurement || 'PURCHASE')
                         .trim()
                         .toUpperCase();
@@ -582,47 +487,31 @@ function importAssetsExcel(req, res) {
                         });
                         continue;
                     }
-                    // ---------------------------
-                    // Mode-based validation
-                    // ---------------------------
-                    if (modeOfProcurement === 'PURCHASE') {
-                        if (!row.vendorName || !row.purchaseCost) {
-                            summary.errors.push({
-                                sheet: 'Assets',
-                                row: i + 2,
-                                message: 'For PURCHASE, vendorName and purchaseCost are required'
-                            });
-                            continue;
+                    // Mode-based validation — relaxed for legacy assets
+                    if (!isLegacy) {
+                        if (modeOfProcurement === 'PURCHASE') {
+                            if (!row.vendorName || !row.purchaseCost) {
+                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For PURCHASE, vendorName and purchaseCost are required' });
+                                continue;
+                            }
                         }
-                    }
-                    if (modeOfProcurement === 'DONATION') {
-                        if (!row.donorName || !row.donationDate) {
-                            summary.errors.push({
-                                sheet: 'Assets',
-                                row: i + 2,
-                                message: 'For DONATION, donorName and donationDate are required'
-                            });
-                            continue;
+                        if (modeOfProcurement === 'DONATION') {
+                            if (!row.donorName || !row.donationDate) {
+                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For DONATION, donorName and donationDate are required' });
+                                continue;
+                            }
                         }
-                    }
-                    if (modeOfProcurement === 'LEASE') {
-                        if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
-                            summary.errors.push({
-                                sheet: 'Assets',
-                                row: i + 2,
-                                message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required'
-                            });
-                            continue;
+                        if (modeOfProcurement === 'LEASE') {
+                            if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
+                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required' });
+                                continue;
+                            }
                         }
-                    }
-                    if (modeOfProcurement === 'RENTAL') {
-                        if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
-                            summary.errors.push({
-                                sheet: 'Assets',
-                                row: i + 2,
-                                message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required'
-                            });
-                            continue;
+                        if (modeOfProcurement === 'RENTAL') {
+                            if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
+                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required' });
+                                continue;
+                            }
                         }
                     }
                     const category = yield prismaClient_1.default.assetCategory.upsert({
@@ -636,12 +525,16 @@ function importAssetsExcel(req, res) {
                     const allottedToId = yield getEmployeeIdByCode(row.endUserEmployeeCode);
                     const supervisorId = yield getEmployeeIdByCode(row.supervisorEmployeeCode);
                     const existing = yield findAssetByReferenceOrSerial(row.referenceCode, row.serialNumber);
+                    // Serial number / reference code — both optional. Auto-generate serial if missing.
+                    const cleanSerial = toStringOrNull(row.serialNumber);
+                    const cleanRefCode = toStringOrNull(row.referenceCode);
+                    const finalSerial = cleanSerial || cleanRefCode || `SN-${Date.now()}-${i}`;
                     const assetData = {
                         assetName: String(row.assetName).trim(),
                         assetType: String(row.assetType).trim(),
                         assetCategoryId: category.id,
-                        serialNumber: String(row.serialNumber || row.referenceCode).trim(),
-                        referenceCode: String(row.referenceCode).trim(),
+                        serialNumber: finalSerial,
+                        referenceCode: cleanRefCode,
                         purchaseDate: parseDate(row.purchaseDate),
                         modeOfProcurement,
                         isBranded: (_a = toBool(row.isBranded)) !== null && _a !== void 0 ? _a : false,
@@ -692,6 +585,17 @@ function importAssetsExcel(req, res) {
                         grnValue: toNumber(row.grnValue),
                         inspectionStatus: toStringOrNull(row.inspectionStatus),
                         inspectionRemarks: toStringOrNull(row.inspectionRemarks),
+                        // Legacy onboarding fields
+                        isLegacyAsset: isLegacy,
+                        dataAvailableSince: parseDate(row.dataAvailableSince),
+                        historicalMaintenanceCost: toNumber(row.historicalMaintenanceCost),
+                        historicalSparePartsCost: toNumber(row.historicalSparePartsCost),
+                        historicalOtherCost: toNumber(row.historicalOtherCost),
+                        historicalCostAsOf: parseDate(row.historicalCostAsOf),
+                        historicalCostNote: toStringOrNull(row.historicalCostNote),
+                        // Asset Pool linkage
+                        financialYearAdded: toStringOrNull(row.financialYearAdded),
+                        // assetPoolId resolved below after pool lookup
                         //     rfidCode: toStringOrNull(row.rfidCode),
                         //     qrCode: toStringOrNull(row.qrCode),
                         //     specificationSummary: toStringOrNull(row.specificationSummary),
@@ -699,16 +603,142 @@ function importAssetsExcel(req, res) {
                         //     ticketHierarchyNotes: toStringOrNull(row.ticketHierarchyNotes),
                         //     pmFormatNotes: toStringOrNull(row.pmFormatNotes),
                     };
+                    // Resolve poolReferenceCode → assetPoolId
+                    let resolvedPoolId = null;
+                    if (row.poolReferenceCode) {
+                        const pool = yield prismaClient_1.default.assetPool.findUnique({
+                            where: { poolCode: String(row.poolReferenceCode).trim() }
+                        });
+                        if (pool) {
+                            resolvedPoolId = pool.id;
+                            assetData.assetPoolId = pool.id;
+                        }
+                    }
+                    let savedAssetId;
                     if (existing) {
                         yield prismaClient_1.default.asset.update({
                             where: { id: existing.id },
                             data: assetData
                         });
+                        savedAssetId = existing.id;
                         summary.assetsUpdated++;
                     }
                     else {
-                        yield createAssetWithGeneratedId(assetData);
+                        const created = yield createAssetWithGeneratedId(assetData);
+                        savedAssetId = created.id;
                         summary.assetsCreated++;
+                    }
+                    // Update pool status/remainingQuantity after linking an asset
+                    if (resolvedPoolId) {
+                        const pool = yield prismaClient_1.default.assetPool.findUnique({ where: { id: resolvedPoolId } });
+                        if (pool) {
+                            const linkedCount = yield prismaClient_1.default.asset.count({ where: { assetPoolId: resolvedPoolId } });
+                            const remaining = Math.max(0, pool.originalQuantity - linkedCount);
+                            yield prismaClient_1.default.assetPool.update({
+                                where: { id: resolvedPoolId },
+                                data: {
+                                    status: remaining === 0 ? 'COMPLETE' : 'PARTIAL',
+                                }
+                            });
+                        }
+                    }
+                    // ── Auto-create depreciation with category fallback ─────────────
+                    // Priority for each field: row → category default → safe fallback
+                    // depreciationStart priority: row → installedAt → purchaseDate
+                    const rawDepMethod = (_e = toStringOrNull(row.depreciationMethod)) === null || _e === void 0 ? void 0 : _e.toUpperCase();
+                    let depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod !== null && rawDepMethod !== void 0 ? rawDepMethod : null);
+                    let depRate = toNumber(row.depreciationRate);
+                    let depLife = toNumber(row.expectedLifeYears);
+                    // Fall back to category defaults
+                    const catWithDefaults = yield prismaClient_1.default.assetCategory.findUnique({
+                        where: { id: category.id },
+                        select: {
+                            defaultDepreciationMethod: true,
+                            defaultDepreciationRate: true,
+                            defaultLifeYears: true,
+                        },
+                    });
+                    if (!depMethod && (catWithDefaults === null || catWithDefaults === void 0 ? void 0 : catWithDefaults.defaultDepreciationMethod)) {
+                        depMethod = catWithDefaults.defaultDepreciationMethod;
+                    }
+                    if (depRate == null && (catWithDefaults === null || catWithDefaults === void 0 ? void 0 : catWithDefaults.defaultDepreciationRate) != null) {
+                        depRate = Number(catWithDefaults.defaultDepreciationRate);
+                    }
+                    if (depLife == null && (catWithDefaults === null || catWithDefaults === void 0 ? void 0 : catWithDefaults.defaultLifeYears) != null) {
+                        depLife = Number(catWithDefaults.defaultLifeYears);
+                    }
+                    // For DB method, life is not strictly needed — auto-derive from rate
+                    if (depMethod === 'DB' && depLife == null && depRate && depRate > 0) {
+                        depLife = Math.ceil(100 / depRate);
+                    }
+                    // Default SL life if still missing
+                    if (depMethod === 'SL' && depLife == null)
+                        depLife = 10;
+                    // depreciationStart priority: row → installedAt → purchaseDate
+                    const depStart = parseDate(row.depreciationStart)
+                        || parseDate(row.installedAt)
+                        || parseDate(row.purchaseDate);
+                    if (depMethod && depRate != null && depLife != null && depStart) {
+                        const existingDep = yield prismaClient_1.default.assetDepreciation.findUnique({ where: { assetId: savedAssetId } });
+                        if (!existingDep) {
+                            const asset = yield prismaClient_1.default.asset.findUnique({ where: { id: savedAssetId } });
+                            const cost = Number((_g = (_f = asset === null || asset === void 0 ? void 0 : asset.purchaseCost) !== null && _f !== void 0 ? _f : asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _g !== void 0 ? _g : 0);
+                            const openingDep = (_h = toNumber(row.openingAccumulatedDepreciation)) !== null && _h !== void 0 ? _h : 0;
+                            const newDep = yield prismaClient_1.default.assetDepreciation.create({
+                                data: {
+                                    assetId: savedAssetId,
+                                    depreciationMethod: depMethod,
+                                    depreciationRate: String(depRate),
+                                    expectedLifeYears: depLife,
+                                    depreciationStart: depStart,
+                                    depreciationFrequency: 'YEARLY',
+                                    salvageValue: null,
+                                    accumulatedDepreciation: String(openingDep),
+                                    currentBookValue: String(Math.max(0, cost - openingDep)),
+                                    lastCalculatedAt: null,
+                                    roundOff: false,
+                                    decimalPlaces: 2,
+                                    isActive: true,
+                                },
+                            });
+                            // ── Backfill historical FY logs ─────────────────────────
+                            // Generate one DepreciationLog per completed FY from
+                            // depreciationStart (or financialYearAdded for pool assets)
+                            // up to today, so FA Schedule shows correct historical values.
+                            try {
+                                const assetForBackfill = {
+                                    id: savedAssetId,
+                                    assetId: (_j = asset === null || asset === void 0 ? void 0 : asset.assetId) !== null && _j !== void 0 ? _j : '',
+                                    purchaseCost: cost,
+                                    estimatedValue: Number((_k = asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _k !== void 0 ? _k : 0),
+                                    purchaseDate: (_l = asset === null || asset === void 0 ? void 0 : asset.purchaseDate) !== null && _l !== void 0 ? _l : null,
+                                    installedAt: (_m = asset === null || asset === void 0 ? void 0 : asset.installedAt) !== null && _m !== void 0 ? _m : null,
+                                    isLegacyAsset: (_o = asset === null || asset === void 0 ? void 0 : asset.isLegacyAsset) !== null && _o !== void 0 ? _o : false,
+                                    migrationMode: (_p = asset === null || asset === void 0 ? void 0 : asset.migrationMode) !== null && _p !== void 0 ? _p : null,
+                                    migrationDate: (_q = asset === null || asset === void 0 ? void 0 : asset.migrationDate) !== null && _q !== void 0 ? _q : null,
+                                    originalPurchaseDate: (_r = asset === null || asset === void 0 ? void 0 : asset.originalPurchaseDate) !== null && _r !== void 0 ? _r : null,
+                                    originalCost: (_s = asset === null || asset === void 0 ? void 0 : asset.originalCost) !== null && _s !== void 0 ? _s : null,
+                                    accDepAtMigration: (_t = asset === null || asset === void 0 ? void 0 : asset.accDepAtMigration) !== null && _t !== void 0 ? _t : null,
+                                    openingWdvAtMigration: (_u = asset === null || asset === void 0 ? void 0 : asset.openingWdvAtMigration) !== null && _u !== void 0 ? _u : null,
+                                    financialYearAdded: (_v = asset === null || asset === void 0 ? void 0 : asset.financialYearAdded) !== null && _v !== void 0 ? _v : null,
+                                    assetPoolId: (_w = asset === null || asset === void 0 ? void 0 : asset.assetPoolId) !== null && _w !== void 0 ? _w : null,
+                                };
+                                const cfgForBackfill = {
+                                    method: depMethod,
+                                    rate: depRate,
+                                    lifeYears: depLife,
+                                    salvage: 0,
+                                    depreciationStart: depStart,
+                                    frequency: 'YEARLY',
+                                    roundOff: false,
+                                    decimalPlaces: 2,
+                                };
+                                yield (0, depreciationEngine_1.backfillHistoricalDepreciation)(savedAssetId, newDep.id, assetForBackfill, cfgForBackfill, null);
+                            }
+                            catch (bfErr) {
+                                console.warn(`Backfill failed for asset ${savedAssetId}:`, bfErr.message);
+                            }
+                        }
                     }
                 }
                 catch (err) {
@@ -756,8 +786,8 @@ function importAssetsExcel(req, res) {
                         specificationGroup: toStringOrNull(row.specificationGroup),
                         valueType: toStringOrNull(row.valueType),
                         unit: toStringOrNull(row.unit),
-                        sortOrder: (_e = toNumber(row.sortOrder)) !== null && _e !== void 0 ? _e : 0,
-                        isMandatory: (_f = toBool(row.isMandatory)) !== null && _f !== void 0 ? _f : false,
+                        sortOrder: (_x = toNumber(row.sortOrder)) !== null && _x !== void 0 ? _x : 0,
+                        isMandatory: (_y = toBool(row.isMandatory)) !== null && _y !== void 0 ? _y : false,
                         source: toStringOrNull(row.source),
                         remarks: toStringOrNull(row.remarks),
                     };
@@ -801,7 +831,7 @@ function importAssetsExcel(req, res) {
                         continue;
                     }
                     const vendorId = yield getOrCreateVendor(row);
-                    const isUnderWarranty = (_g = toBool(row.isUnderWarranty)) !== null && _g !== void 0 ? _g : false;
+                    const isUnderWarranty = (_z = toBool(row.isUnderWarranty)) !== null && _z !== void 0 ? _z : false;
                     const warrantyStart = parseDate(row.warrantyStart);
                     const warrantyEnd = parseDate(row.warrantyEnd);
                     if (isUnderWarranty && (!warrantyStart || !warrantyEnd)) {
@@ -982,7 +1012,7 @@ function importAssetsExcel(req, res) {
                             room: toStringOrNull(row.room),
                             departmentSnapshot: toStringOrNull(row.departmentSnapshot),
                             employeeResponsibleId,
-                            isActive: (_h = toBool(row.isActive)) !== null && _h !== void 0 ? _h : true,
+                            isActive: (_0 = toBool(row.isActive)) !== null && _0 !== void 0 ? _0 : true,
                         }
                     });
                     summary.locationsCreated++;
@@ -1001,11 +1031,12 @@ function importAssetsExcel(req, res) {
             for (let i = 0; i < subAssetsRows.length; i++) {
                 const row = subAssetsRows[i];
                 try {
-                    if (!row.parentReferenceCode || !row.referenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
+                    // parentReferenceCode required to locate parent; sub-asset's own referenceCode is optional
+                    if (!row.parentReferenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
                         summary.errors.push({
                             sheet: 'SubAssets',
                             row: i + 2,
-                            message: 'parentReferenceCode,referenceCode, assetName, assetType, assetCategory are required'
+                            message: 'parentReferenceCode, assetName, assetType, assetCategory are required'
                         });
                         continue;
                     }
@@ -1042,11 +1073,11 @@ function importAssetsExcel(req, res) {
                         referenceCode: toStringOrNull(row.referenceCode),
                         status: String(row.status || 'ACTIVE'),
                         parentAssetId: parent.id,
-                        isBranded: (_j = toBool(row.isBranded)) !== null && _j !== void 0 ? _j : false,
-                        isAssembled: (_k = toBool(row.isAssembled)) !== null && _k !== void 0 ? _k : false,
-                        isCustomized: (_l = toBool(row.isCustomized)) !== null && _l !== void 0 ? _l : false,
+                        isBranded: (_1 = toBool(row.isBranded)) !== null && _1 !== void 0 ? _1 : false,
+                        isAssembled: (_2 = toBool(row.isAssembled)) !== null && _2 !== void 0 ? _2 : false,
+                        isCustomized: (_3 = toBool(row.isCustomized)) !== null && _3 !== void 0 ? _3 : false,
                         customDetails: toStringOrNull(row.customDetails),
-                        hasSpecifications: (_m = toBool(row.hasSpecifications)) !== null && _m !== void 0 ? _m : false,
+                        hasSpecifications: (_4 = toBool(row.hasSpecifications)) !== null && _4 !== void 0 ? _4 : false,
                         specificationSummary: toStringOrNull(row.specificationSummary),
                     };
                     if (existingSubAsset) {
@@ -1057,7 +1088,7 @@ function importAssetsExcel(req, res) {
                         summary.subAssetsUpdated++;
                     }
                     else {
-                        const generatedSubAssetId = yield generateSubAssetId(parent);
+                        const generatedSubAssetId = yield (0, assetIdGenerator_1.generateSubAssetId)(parent.assetId, parent.id);
                         yield prismaClient_1.default.asset.create({
                             data: Object.assign({ assetId: generatedSubAssetId }, subAssetData)
                         });
@@ -1096,7 +1127,7 @@ function importAssetsExcel(req, res) {
                             frequencyValue: Number(row.frequencyValue),
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
-                            isActive: (_o = toBool(row.isActive)) !== null && _o !== void 0 ? _o : true,
+                            isActive: (_5 = toBool(row.isActive)) !== null && _5 !== void 0 ? _5 : true,
                             reminderDays: toNumber(row.reminderDays),
                             createdBy: toStringOrNull(row.createdBy),
                             reason: toStringOrNull(row.reason),
@@ -1138,7 +1169,7 @@ function importAssetsExcel(req, res) {
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
                             lastCalibratedAt: parseDate(row.lastCalibratedAt),
-                            isActive: (_p = toBool(row.isActive)) !== null && _p !== void 0 ? _p : true,
+                            isActive: (_6 = toBool(row.isActive)) !== null && _6 !== void 0 ? _6 : true,
                             standardProcedure: toStringOrNull(row.standardProcedure),
                             vendorId,
                             reminderDays: toNumber(row.reminderDays),
@@ -1563,3 +1594,128 @@ function importChecklistWorkbook(req, res) {
         }
     });
 }
+// ─── Download Legacy Asset Import Template ───────────────────────────────────
+const downloadLegacyTemplate = (req, res) => {
+    // Assets sheet — standard columns + legacy columns
+    const assetsHeaders = [
+        // Required
+        'referenceCode', 'assetName', 'assetType', 'assetCategory',
+        // Optional basic
+        'serialNumber', 'modeOfProcurement', 'department',
+        'purchaseDate', 'purchaseCost', 'vendorName',
+        'manufacturer', 'modelNumber', 'currentLocation', 'status',
+        // Legacy flag + opening balances
+        'isLegacyAsset',
+        'historicalMaintenanceCost',
+        'historicalSparePartsCost',
+        'historicalOtherCost',
+        'historicalCostAsOf',
+        'dataAvailableSince',
+        'historicalCostNote',
+        // Depreciation setup (optional — auto-created on import if provided)
+        'depreciationMethod',
+        'depreciationRate',
+        'expectedLifeYears',
+        'depreciationStart',
+        'openingAccumulatedDepreciation',
+    ];
+    const assetsExample = [
+        {
+            referenceCode: 'REF-001',
+            assetName: 'MRI Scanner',
+            assetType: 'Medical Equipment',
+            assetCategory: 'Radiology',
+            serialNumber: 'SN-12345',
+            modeOfProcurement: 'PURCHASE',
+            department: 'Radiology',
+            purchaseDate: '2021-06-01',
+            purchaseCost: 2500000,
+            vendorName: 'GE Healthcare',
+            manufacturer: 'GE',
+            modelNumber: 'SIGNA',
+            currentLocation: 'Block A - Room 101',
+            status: 'ACTIVE',
+            isLegacyAsset: 'true',
+            historicalMaintenanceCost: 180000,
+            historicalSparePartsCost: 45000,
+            historicalOtherCost: 15000,
+            historicalCostAsOf: '2024-03-31',
+            dataAvailableSince: '2024-04-01',
+            historicalCostNote: 'Based on service register and vendor invoices 2021–2024',
+            depreciationMethod: 'SL',
+            depreciationRate: 10,
+            expectedLifeYears: 10,
+            depreciationStart: '2021-06-01',
+            openingAccumulatedDepreciation: 750000,
+        },
+        {
+            referenceCode: 'REF-002',
+            assetName: 'Ventilator',
+            assetType: 'Life Support',
+            assetCategory: 'ICU Equipment',
+            serialNumber: '',
+            modeOfProcurement: 'PURCHASE',
+            department: 'ICU',
+            purchaseDate: '2020-01-15',
+            purchaseCost: 350000,
+            vendorName: 'Medtronic',
+            manufacturer: 'Medtronic',
+            modelNumber: 'PB980',
+            currentLocation: 'ICU - Bed 3',
+            status: 'ACTIVE',
+            isLegacyAsset: 'true',
+            historicalMaintenanceCost: 52000,
+            historicalSparePartsCost: 18000,
+            historicalOtherCost: 0,
+            historicalCostAsOf: '2024-03-31',
+            dataAvailableSince: '2024-04-01',
+            historicalCostNote: 'From maintenance logbook',
+            depreciationMethod: 'DB',
+            depreciationRate: 15,
+            expectedLifeYears: 8,
+            depreciationStart: '2020-01-15',
+            openingAccumulatedDepreciation: 157500,
+        },
+    ];
+    // Instructions sheet
+    const instructions = [
+        { Field: 'referenceCode', Required: 'YES', Notes: 'Unique code per asset. Used to match on re-import.' },
+        { Field: 'assetName', Required: 'YES', Notes: 'Full asset name' },
+        { Field: 'assetType', Required: 'YES', Notes: 'e.g. Medical Equipment, Furniture, IT Equipment' },
+        { Field: 'assetCategory', Required: 'YES', Notes: 'Category name — created automatically if not exists' },
+        { Field: 'serialNumber', Required: 'NO (legacy)', Notes: 'Leave blank if unknown for legacy assets' },
+        { Field: 'modeOfProcurement', Required: 'NO', Notes: 'PURCHASE / DONATION / LEASE / RENTAL. Default: PURCHASE' },
+        { Field: 'department', Required: 'NO', Notes: 'Department name — created automatically if not exists' },
+        { Field: 'purchaseDate', Required: 'NO', Notes: 'YYYY-MM-DD format' },
+        { Field: 'purchaseCost', Required: 'NO (legacy)', Notes: 'Original purchase cost in INR. Skip if unknown for legacy.' },
+        { Field: 'vendorName', Required: 'NO (legacy)', Notes: 'Vendor name — created automatically if not exists' },
+        { Field: 'status', Required: 'NO', Notes: 'ACTIVE / IN_STORE / IN_MAINTENANCE / RETIRED. Default: ACTIVE' },
+        { Field: 'isLegacyAsset', Required: 'NO', Notes: 'Set to true for assets onboarded from pre-system history' },
+        { Field: 'historicalMaintenanceCost', Required: 'NO', Notes: 'Total repair/service spend BEFORE system onboarding (INR)' },
+        { Field: 'historicalSparePartsCost', Required: 'NO', Notes: 'Total spare parts/consumables spend before onboarding (INR)' },
+        { Field: 'historicalOtherCost', Required: 'NO', Notes: 'Other historical costs — calibration, transport, etc. (INR)' },
+        { Field: 'historicalCostAsOf', Required: 'NO', Notes: 'Date up to which historical costs are captured (YYYY-MM-DD)' },
+        { Field: 'dataAvailableSince', Required: 'NO', Notes: 'Date from which live system tracking begins (YYYY-MM-DD)' },
+        { Field: 'historicalCostNote', Required: 'NO', Notes: 'Source of historical figures — e.g. "From service register 2021-2024"' },
+        { Field: 'depreciationMethod', Required: 'NO', Notes: 'SL (Straight Line) or DB (Declining Balance). Leave blank to skip depreciation setup.' },
+        { Field: 'depreciationRate', Required: 'NO', Notes: 'Annual depreciation rate in %. E.g. 10 for 10%.' },
+        { Field: 'expectedLifeYears', Required: 'NO', Notes: 'Total expected useful life of the asset in years.' },
+        { Field: 'depreciationStart', Required: 'NO', Notes: 'Date depreciation began (usually purchaseDate). YYYY-MM-DD format.' },
+        { Field: 'openingAccumulatedDepreciation', Required: 'NO', Notes: 'Amount already depreciated before system onboarding (INR). Sets correct opening book value = purchaseCost − this value.' },
+    ];
+    const wb = xlsx_1.default.utils.book_new();
+    // Sheet 1: Assets (with example rows)
+    const assetsWs = xlsx_1.default.utils.json_to_sheet(assetsExample, { header: assetsHeaders });
+    // Style header row width (approximate)
+    assetsWs['!cols'] = assetsHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    xlsx_1.default.utils.book_append_sheet(wb, assetsWs, 'Assets');
+    // Sheet 2: Instructions
+    const instrWs = xlsx_1.default.utils.json_to_sheet(instructions);
+    instrWs['!cols'] = [{ wch: 30 }, { wch: 15 }, { wch: 60 }];
+    xlsx_1.default.utils.book_append_sheet(wb, instrWs, 'Instructions');
+    const buffer = xlsx_1.default.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=legacy-asset-import-template.xlsx');
+    res.send(buffer);
+};
+exports.downloadLegacyTemplate = downloadLegacyTemplate;

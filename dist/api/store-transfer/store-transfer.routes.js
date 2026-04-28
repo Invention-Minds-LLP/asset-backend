@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const store_transfer_controller_1 = require("./store-transfer.controller");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, store_transfer_controller_1.getAllTransfers);
+router.post("/", authMiddleware_1.authenticateToken, store_transfer_controller_1.createTransfer);
+router.get("/:id", authMiddleware_1.authenticateToken, store_transfer_controller_1.getTransferById);
+router.patch("/:id/approve", authMiddleware_1.authenticateToken, store_transfer_controller_1.approveTransfer);
+router.patch("/:id/in-transit", authMiddleware_1.authenticateToken, store_transfer_controller_1.markInTransit);
+router.patch("/:id/receive", authMiddleware_1.authenticateToken, store_transfer_controller_1.receiveTransfer);
+router.patch("/:id/cancel", authMiddleware_1.authenticateToken, store_transfer_controller_1.cancelTransfer);
+exports.default = router;

@@ -6,7 +6,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
-import { generateAssetId, generateLegacyAssetId } from "../../utilis/assetIdGenerator";
+import { generateAssetId, generateLegacyAssetId, generateStoreAssetId } from "../../utilis/assetIdGenerator";
 
 
 const FTP_CONFIG = {
@@ -186,10 +186,31 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
       }
     }
 
+    // ── Serial-number requirement (driven by category.serialRequired) ────────
+    const categoryIdNum = data.assetCategoryId ? Number(data.assetCategoryId) : null;
+    let categoryRecord: { serialRequired: boolean; name: string } | null = null;
+    if (categoryIdNum) {
+      categoryRecord = await prisma.assetCategory.findUnique({
+        where: { id: categoryIdNum },
+        select: { serialRequired: true, name: true },
+      });
+    }
+    const serialProvided = data.serialNumber && String(data.serialNumber).trim() !== "";
+    const isLegacy = data.isLegacyAsset === true || data.isLegacyAsset === 'true';
+    if (categoryRecord?.serialRequired && !serialProvided && !isLegacy) {
+      res.status(400).json({
+        message: `Serial Number is required for category "${categoryRecord.name}".`,
+      });
+      return;
+    }
+
     // ── Asset ID — legacy assets get a legacy ID immediately; others get TEMP ──
-    const newAssetId = data.isLegacyAsset === true || data.isLegacyAsset === 'true'
-      ? await generateLegacyAssetId(data.purchaseDate ?? null, undefined, data.assetCategoryId ? Number(data.assetCategoryId) : null)
+    const newAssetId = isLegacy
+      ? await generateLegacyAssetId(data.purchaseDate ?? null, undefined, categoryIdNum)
       : `TEMP-${Date.now()}`;
+
+    // Permanent stores reference (always generated on create, separate from assetId)
+    const newStoreAssetId = await generateStoreAssetId(categoryIdNum);
 
     // Auto-assign supervisor for department
     // let supervisorId: number | null = null;
@@ -216,6 +237,7 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
     const asset = await prisma.asset.create({
       data: {
         assetId: newAssetId,
+        storeAssetId: newStoreAssetId,
         assetName: data.assetName,
         assetType: data.assetType,
         assetNature: data.assetNature ?? "TANGIBLE",
@@ -227,7 +249,7 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         assetCategoryId: data.assetCategoryId,
         rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
         referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
-        serialNumber: data.serialNumber,
+        serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
         assetPhoto: data.assetPhoto ?? null,
         modeOfProcurement: data.modeOfProcurement ?? "PURCHASE",
         serviceCoverageType: data.serviceCoverageType ?? null,
@@ -582,6 +604,37 @@ export const updateAsset = async (req: Request, res: Response) => {
     const id = Number(req.params.id);
     const data = req.body;
 
+    // ── Serial-number requirement (driven by category.serialRequired) ────────
+    // Resolve the effective category: payload value if provided, otherwise the asset's existing category.
+    let effectiveCategoryId: number | null = data.assetCategoryId ? Number(data.assetCategoryId) : null;
+    if (!effectiveCategoryId) {
+      const existing = await prisma.asset.findUnique({
+        where: { id },
+        select: { assetCategoryId: true, isLegacyAsset: true },
+      });
+      effectiveCategoryId = existing?.assetCategoryId ?? null;
+    }
+    let serialRequiredCategory: { serialRequired: boolean; name: string } | null = null;
+    if (effectiveCategoryId) {
+      serialRequiredCategory = await prisma.assetCategory.findUnique({
+        where: { id: effectiveCategoryId },
+        select: { serialRequired: true, name: true },
+      });
+    }
+    const serialProvided = data.serialNumber !== undefined && data.serialNumber !== null && String(data.serialNumber).trim() !== "";
+    const isLegacy = data.isLegacyAsset === true || data.isLegacyAsset === 'true';
+    if (
+      serialRequiredCategory?.serialRequired &&
+      data.serialNumber !== undefined &&
+      !serialProvided &&
+      !isLegacy
+    ) {
+      res.status(400).json({
+        message: `Serial Number is required for category "${serialRequiredCategory.name}".`,
+      });
+      return;
+    }
+
     const updateData: any = {
       assetName: data.assetName,
       assetType: data.assetType,
@@ -593,7 +646,7 @@ export const updateAsset = async (req: Request, res: Response) => {
       amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
       residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
       referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
-      serialNumber: data.serialNumber,
+      serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
       assetPhoto: data.assetPhoto,
       rfidCode: data.rfidCode,
       modeOfProcurement: data.modeOfProcurement,

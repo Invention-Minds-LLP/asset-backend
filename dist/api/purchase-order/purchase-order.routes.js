@@ -1,0 +1,20 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const purchase_order_controller_1 = require("./purchase-order.controller");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const router = express_1.default.Router();
+router.get("/", authMiddleware_1.authenticateToken, purchase_order_controller_1.getAllPurchaseOrders);
+router.get("/:id", authMiddleware_1.authenticateToken, purchase_order_controller_1.getPurchaseOrderById);
+router.post("/", authMiddleware_1.authenticateToken, purchase_order_controller_1.createPurchaseOrder);
+router.post("/from-indent/:indentId", authMiddleware_1.authenticateToken, purchase_order_controller_1.createPOFromIndent);
+router.put("/:id", authMiddleware_1.authenticateToken, purchase_order_controller_1.updatePurchaseOrder);
+router.patch("/:id/approve", authMiddleware_1.authenticateToken, purchase_order_controller_1.approvePO);
+router.patch("/:id/send", authMiddleware_1.authenticateToken, purchase_order_controller_1.sendToVendor);
+router.patch("/:id/cancel", authMiddleware_1.authenticateToken, purchase_order_controller_1.cancelPO);
+router.patch("/:id/amend", authMiddleware_1.authenticateToken, purchase_order_controller_1.amendPO);
+router.get("/:id/amendments", authMiddleware_1.authenticateToken, purchase_order_controller_1.getPOAmendments);
+exports.default = router;

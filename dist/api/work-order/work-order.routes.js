@@ -1,0 +1,18 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const work_order_controller_1 = require("./work-order.controller");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, work_order_controller_1.getAllWorkOrders);
+router.post("/", authMiddleware_1.authenticateToken, work_order_controller_1.createWorkOrder);
+router.get("/:id", authMiddleware_1.authenticateToken, work_order_controller_1.getWorkOrderById);
+router.put("/:id", authMiddleware_1.authenticateToken, work_order_controller_1.updateWorkOrder);
+router.patch("/:id/approve", authMiddleware_1.authenticateToken, work_order_controller_1.approveWorkOrder);
+router.patch("/:id/start", authMiddleware_1.authenticateToken, work_order_controller_1.startWorkOrder);
+router.post("/:id/issue-material", authMiddleware_1.authenticateToken, work_order_controller_1.issueMaterial);
+router.patch("/:id/complete", authMiddleware_1.authenticateToken, work_order_controller_1.completeWorkOrder);
+router.post("/:id/wcc", authMiddleware_1.authenticateToken, work_order_controller_1.issueWCC);
+router.patch("/:id/close", authMiddleware_1.authenticateToken, work_order_controller_1.closeWorkOrder);
+router.patch("/:id/cancel", authMiddleware_1.authenticateToken, work_order_controller_1.cancelWorkOrder);
+exports.default = router;

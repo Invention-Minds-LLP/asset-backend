@@ -14,4 +14,5 @@ router.put("/:id/review", authMiddleware_1.authenticateToken, disposal_controlle
 router.put("/:id/approve", authMiddleware_1.authenticateToken, disposal_controller_1.approveDisposal);
 router.put("/:id/reject", authMiddleware_1.authenticateToken, disposal_controller_1.rejectDisposal);
 router.put("/:id/complete", authMiddleware_1.authenticateToken, disposal_controller_1.completeDisposal);
+router.get("/:id/sub-assets", authMiddleware_1.authenticateToken, disposal_controller_1.getDisposalSubAssets);
 exports.default = router;

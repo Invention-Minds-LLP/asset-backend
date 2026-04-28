@@ -54,20 +54,45 @@ const getAllCategories = (req, res) => __awaiter(void 0, void 0, void 0, functio
     }
 });
 exports.getAllCategories = getAllCategories;
+// Allowed fields for create/update — prevents Prisma errors from extra fields
+function pickCategoryFields(body) {
+    var _a, _b, _c;
+    return {
+        name: (_a = body.name) === null || _a === void 0 ? void 0 : _a.trim(),
+        code: ((_b = body.code) === null || _b === void 0 ? void 0 : _b.trim()) || null,
+        description: (_c = body.description) !== null && _c !== void 0 ? _c : null,
+        defaultDepreciationMethod: body.defaultDepreciationMethod || null,
+        defaultDepreciationRate: body.defaultDepreciationRate != null && body.defaultDepreciationRate !== ''
+            ? Number(body.defaultDepreciationRate) : null,
+        defaultLifeYears: body.defaultLifeYears != null && body.defaultLifeYears !== ''
+            ? Number(body.defaultLifeYears) : null,
+    };
+}
 const createCategory = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const category = yield prismaClient_1.default.assetCategory.create({ data: req.body });
-    res.status(201).json(category);
+    try {
+        const data = pickCategoryFields(req.body);
+        if (!data.name) {
+            res.status(400).json({ message: "Category name is required" });
+            return;
+        }
+        const category = yield prismaClient_1.default.assetCategory.create({ data: data });
+        res.status(201).json(category);
+    }
+    catch (error) {
+        console.error("createCategory error:", error);
+        res.status(500).json({ message: error.message || "Failed to create category" });
+    }
 });
 exports.createCategory = createCategory;
 const updateCategory = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const id = parseInt(req.params.id);
-        const { name } = req.body;
-        if (!(name === null || name === void 0 ? void 0 : name.trim())) {
+        const data = pickCategoryFields(req.body);
+        if (!data.name) {
             res.status(400).json({ message: "Category name is required" });
             return;
         }
-        const updated = yield prismaClient_1.default.assetCategory.update({ where: { id }, data: { name: name.trim() } });
+        const updated = yield prismaClient_1.default.assetCategory.update({ where: { id }, data: data });
         res.json(updated);
     }
     catch (error) {

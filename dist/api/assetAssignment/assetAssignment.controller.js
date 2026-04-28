@@ -18,6 +18,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
 const client_1 = require("@prisma/client");
+const assetIdGenerator_1 = require("../../utilis/assetIdGenerator");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439", // Your FTP username
@@ -126,9 +127,10 @@ const initiateDepartmentAcknowledgement = (req, res) => __awaiter(void 0, void 0
             return;
         }
         // set initial (source) department
-        yield prismaClient_1.default.asset.update({
+        const updatedAsset = yield prismaClient_1.default.asset.update({
             where: { id: assetId },
             data: { departmentId: Number(departmentId) },
+            select: { assetId: true, assetName: true },
         });
         const hodId = yield getDepartmentHodEmployeeId(Number(departmentId));
         yield deactivateOtherActiveAssignments(assetId);
@@ -143,7 +145,7 @@ const initiateDepartmentAcknowledgement = (req, res) => __awaiter(void 0, void 0
         yield createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset requires acknowledgement (Source HOD)",
-            message: `Asset #${assetId} has been assigned to your department. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been assigned to your department. Please acknowledge.`,
             assetId,
             createdByEmployeeId: (_e = (_d = req.user) === null || _d === void 0 ? void 0 : _d.employeeDbId) !== null && _e !== void 0 ? _e : null,
             recipientEmployeeIds: [hodId],
@@ -388,7 +390,7 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
         let issuedAssetId = null;
         const currentAsset = yield prismaClient_1.default.asset.findUnique({
             where: { id: assignment.assetId },
-            select: { assetId: true, departmentId: true },
+            select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true },
         });
         if ((currentAsset === null || currentAsset === void 0 ? void 0 : currentAsset.assetId.startsWith("TEMP-")) && currentAsset.departmentId) {
             const acknowledger = yield prismaClient_1.default.employee.findUnique({
@@ -396,19 +398,7 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 select: { role: true, departmentId: true },
             });
             if ((acknowledger === null || acknowledger === void 0 ? void 0 : acknowledger.role) === "HOD" && acknowledger.departmentId === currentAsset.departmentId) {
-                const now = new Date();
-                const fyStart = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
-                const fyEnd = fyStart + 1;
-                const fyStr = `FY${fyStart}-${(fyEnd % 100).toString().padStart(2, "0")}`;
-                const latestAsset = yield prismaClient_1.default.asset.findFirst({
-                    where: { assetId: { startsWith: `AST-${fyStr}` }, parentAssetId: null },
-                    orderBy: { id: "desc" },
-                });
-                let nextSeq = 1;
-                if (latestAsset) {
-                    nextSeq = parseInt(latestAsset.assetId.split("-")[3], 10) + 1;
-                }
-                issuedAssetId = `AST-${fyStr}-${nextSeq.toString().padStart(3, "0")}`;
+                issuedAssetId = yield (0, assetIdGenerator_1.generateAssetId)(currentAsset.modeOfProcurement || "PURCHASE", undefined, { categoryId: currentAsset.assetCategoryId });
                 yield prismaClient_1.default.asset.update({
                     where: { id: assignment.assetId },
                     data: { assetId: issuedAssetId },
@@ -509,9 +499,10 @@ const hodAssignSupervisor = (req, res) => __awaiter(void 0, void 0, void 0, func
             res.status(400).json({ message: "Source HOD has not acknowledged yet." });
             return;
         }
-        yield prismaClient_1.default.asset.update({
+        const updatedAsset = yield prismaClient_1.default.asset.update({
             where: { id: assetId },
             data: { supervisorId: Number(supervisorId) },
+            select: { assetId: true, assetName: true },
         });
         yield deactivateOtherActiveAssignments(assetId);
         const assignment = yield createAssignment({
@@ -525,7 +516,7 @@ const hodAssignSupervisor = (req, res) => __awaiter(void 0, void 0, void 0, func
         yield createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset assigned to you (Supervisor acknowledgement)",
-            message: `Asset #${assetId} has been assigned to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been assigned to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(supervisorId)],
@@ -576,11 +567,12 @@ const supervisorAssignTargetDepartment = (req, res) => __awaiter(void 0, void 0,
         const targetHodId = yield getDepartmentHodEmployeeId(Number(targetDepartmentId));
         // Move asset ownership to target department (this is the “handover”)
         // Also clear supervisorId/allottedToId because new dept will decide
-        yield prismaClient_1.default.asset.update({
+        const updatedAsset = yield prismaClient_1.default.asset.update({
             where: { id: assetId },
             data: {
                 targetDepartmentId: targetDepartmentId
             },
+            select: { assetId: true, assetName: true },
         });
         yield deactivateOtherActiveAssignments(assetId);
         const assignment = yield createAssignment({
@@ -594,7 +586,7 @@ const supervisorAssignTargetDepartment = (req, res) => __awaiter(void 0, void 0,
         yield createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset requires acknowledgement (Target HOD)",
-            message: `Asset #${assetId} is being transferred to your department. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} is being transferred to your department. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [targetHodId],
@@ -652,9 +644,10 @@ const targetHodAssignEndUser = (req, res) => __awaiter(void 0, void 0, void 0, f
             res.json({ message: "Flow closed (Target End User not assigned).", closed: true });
             return;
         }
-        yield prismaClient_1.default.asset.update({
+        const updatedAsset = yield prismaClient_1.default.asset.update({
             where: { id: assetId },
             data: { allottedToId: Number(allottedToId) },
+            select: { assetId: true, assetName: true },
         });
         yield deactivateOtherActiveAssignments(assetId);
         const assignment = yield createAssignment({
@@ -668,7 +661,7 @@ const targetHodAssignEndUser = (req, res) => __awaiter(void 0, void 0, void 0, f
         yield createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset allocated to you (End User acknowledgement)",
-            message: `Asset #${assetId} has been allocated to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been allocated to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(allottedToId)],
@@ -721,9 +714,10 @@ const supervisorAssignEndUser = (req, res) => __awaiter(void 0, void 0, void 0, 
             res.json({ message: "Flow closed (End User not assigned).", closed: true });
             return;
         }
-        yield prismaClient_1.default.asset.update({
+        const updatedAsset = yield prismaClient_1.default.asset.update({
             where: { id: assetId },
             data: { allottedToId: Number(allottedToId) },
+            select: { assetId: true, assetName: true },
         });
         yield deactivateOtherActiveAssignments(assetId);
         const assignment = yield createAssignment({
@@ -737,7 +731,7 @@ const supervisorAssignEndUser = (req, res) => __awaiter(void 0, void 0, void 0, 
         yield createNotificationToEmployees({
             type: "ASSET_ASSIGNMENT",
             title: "Asset allocated to you (End User acknowledgement)",
-            message: `Asset #${assetId} has been allocated to you. Please acknowledge.`,
+            message: `Asset ${updatedAsset.assetId} — ${updatedAsset.assetName} has been allocated to you. Please acknowledge.`,
             assetId,
             createdByEmployeeId: req.user.employeeDbId,
             recipientEmployeeIds: [Number(allottedToId)],

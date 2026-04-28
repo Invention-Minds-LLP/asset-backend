@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const reconciliation_controller_1 = require("./reconciliation.controller");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, reconciliation_controller_1.getVarianceReport);
+router.get("/:id", authMiddleware_1.authenticateToken, reconciliation_controller_1.getSnapshotDetail);
+router.get("/:id/export", authMiddleware_1.authenticateToken, reconciliation_controller_1.exportSnapshot);
+router.post("/run", authMiddleware_1.authenticateToken, reconciliation_controller_1.runReconciliation);
+router.put("/:id/resolve", authMiddleware_1.authenticateToken, reconciliation_controller_1.resolveSnapshot);
+exports.default = router;

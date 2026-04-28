@@ -29,6 +29,8 @@ const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
+const audit_trail_controller_1 = require("../audit-trail/audit-trail.controller");
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 /**
  * ✅ Keep secrets in env
  * .env:
@@ -313,7 +315,7 @@ const getAllTickets = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             }
             where.departmentId = me.departmentId;
         }
-        else if (role !== "ADMIN") {
+        else if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(role)) {
             where.OR = [{ assignedToId: employeeDbId }, { raisedById: employeeDbId }];
         }
         // Additional filters
@@ -647,6 +649,18 @@ const createTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             data: recipients.map(empId => ({ notificationId: notif.id, employeeId: empId })),
             skipDuplicates: true,
         });
+        // Auto-update asset status for breakdown/corrective tickets
+        if (created.workCategory === 'BREAKDOWN' || created.workCategory === 'CORRECTIVE') {
+            yield prismaClient_1.default.asset.update({
+                where: { id: created.assetId },
+                data: { status: 'UNDER_OBSERVATION' },
+            });
+        }
+        (0, audit_trail_controller_1.logAction)({ entityType: "TICKET", entityId: created.id, action: "CREATE", description: `Ticket ${newTicketId} created for asset ${asset.assetId}`, performedById: user.employeeDbId });
+        // Notify HOD about new ticket
+        const hodIds = yield (0, notificationHelper_1.getDepartmentHODs)(created.departmentId);
+        const isHighPriority = ["HIGH", "CRITICAL"].includes(created.priority || "");
+        (0, notificationHelper_1.notify)(Object.assign(Object.assign({ type: "TICKET_UPDATE", title: "New Ticket Raised", message: `Ticket ${created.ticketId} raised: ${created.issueType}`, recipientIds: hodIds, assetId: created.assetId, ticketId: created.id, createdById: user.employeeDbId }, (isHighPriority ? { channel: "BOTH" } : {})), { templateCode: "TICKET_RAISED", templateData: { ticketId: created.ticketId, issueType: created.issueType || '', assetName: asset.assetName || asset.assetId, priority: created.priority || '', description: created.detailedDesc || '' } }));
         res.status(201).json(created);
     }
     catch (error) {
@@ -703,6 +717,12 @@ const updateTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             }
             return updated;
         }));
+        if (status && status !== existingTicket.status) {
+            (0, audit_trail_controller_1.logAction)({ entityType: "TICKET", entityId: id, action: "STATUS_CHANGE", description: `Ticket status changed from ${existingTicket.status} to ${status}`, performedById: user.employeeDbId });
+        }
+        else {
+            (0, audit_trail_controller_1.logAction)({ entityType: "TICKET", entityId: id, action: "UPDATE", description: `Ticket updated`, performedById: user.employeeDbId });
+        }
         res.json(updatedTicket);
     }
     catch (error) {
@@ -807,6 +827,9 @@ const assignTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             changedById: (_d = user.employeeDbId) !== null && _d !== void 0 ? _d : null,
             note: comment,
         });
+        (0, audit_trail_controller_1.logAction)({ entityType: "TICKET", entityId: ticketId, action: "UPDATE", description: `Ticket assigned to employee #${toEmployeeId}`, performedById: user.employeeDbId });
+        // Notify assigned employee
+        (0, notificationHelper_1.notify)({ type: "TICKET_UPDATE", title: "Ticket Assigned", message: `Ticket ${ticket.ticketId} assigned to you`, recipientIds: [toEmployeeId], ticketId: ticket.id, channel: "BOTH", templateCode: "TICKET_ASSIGNED", templateData: { ticketId: ticket.ticketId, assetName: '', issueType: ticket.issueType || '' } });
         res.json(updated);
         return;
     }
@@ -868,6 +891,10 @@ const reassignTicket = (req, res) => __awaiter(void 0, void 0, void 0, function*
             });
             return upd;
         }));
+        // Notify old assignee about reassignment
+        if (ticket.assignedToId && ticket.assignedToId !== toEmployeeId) {
+            (0, notificationHelper_1.notify)({ type: "TICKET_UPDATE", title: "Ticket Reassigned", message: `Ticket ${ticket.ticketId} has been reassigned to another technician`, recipientIds: [ticket.assignedToId], ticketId: ticket.id, createdById: user.employeeDbId });
+        }
         res.json(updated);
     }
     catch (e) {
@@ -884,7 +911,7 @@ const terminateTicket = (req, res) => __awaiter(void 0, void 0, void 0, function
             res.status(400).json({ message: "termination note required" });
             return;
         }
-        yield requireAssetDeptHod(user, ticketId);
+        const ticket = yield requireAssetDeptHod(user, ticketId);
         const upd = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
             var _a, _b, _c;
             const u = yield tx.ticket.update({
@@ -905,6 +932,11 @@ const terminateTicket = (req, res) => __awaiter(void 0, void 0, void 0, function
             });
             return u;
         }));
+        // Notify raiser + assignee about termination
+        const notifyIds = [ticket.raisedById, ticket.assignedToId].filter((id) => !!id && id !== user.employeeDbId);
+        if (notifyIds.length > 0) {
+            (0, notificationHelper_1.notify)({ type: "TICKET_UPDATE", title: "Ticket Terminated", message: `Ticket ${ticket.ticketId} has been terminated. Reason: ${note}`, recipientIds: notifyIds, ticketId: ticket.id, createdById: user.employeeDbId });
+        }
         res.json(upd);
     }
     catch (e) {
@@ -950,8 +982,17 @@ const closeTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 changedById: (_c = user.employeeDbId) !== null && _c !== void 0 ? _c : null,
                 note: remarks || null,
             });
+            // Auto-update asset status back to ACTIVE
+            yield tx.asset.update({
+                where: { id: ticket.assetId },
+                data: { status: 'ACTIVE' },
+            });
             return u;
         }));
+        (0, audit_trail_controller_1.logAction)({ entityType: "TICKET", entityId: ticketId, action: "STATUS_CHANGE", description: `Ticket closed`, performedById: user.employeeDbId });
+        // Notify raiser when ticket closed
+        if (ticket.raisedById)
+            (0, notificationHelper_1.notify)({ type: "TICKET_UPDATE", title: "Ticket Closed", message: `Ticket ${ticket.ticketId} has been closed`, recipientIds: [ticket.raisedById], ticketId: ticket.id });
         res.json(upd);
     }
     catch (e) {
@@ -1769,6 +1810,11 @@ const startWork = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 changedById: user.employeeDbId,
                 note: "Work started",
             });
+            // Auto-update asset status to IN_MAINTENANCE
+            yield tx.asset.update({
+                where: { id: ticket.assetId },
+                data: { status: 'IN_MAINTENANCE' },
+            });
             return u;
         }));
         res.json(upd);
@@ -1874,8 +1920,16 @@ const resolveTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* 
                 changedById: user.employeeDbId,
                 note: note || "Resolved by HOD after review",
             });
+            // Auto-update asset status back to ACTIVE
+            yield tx.asset.update({
+                where: { id: ticket.assetId },
+                data: { status: 'ACTIVE' },
+            });
             return u;
         }));
+        // Notify raiser when ticket resolved
+        if (ticket.raisedById)
+            (0, notificationHelper_1.notify)({ type: "TICKET_UPDATE", title: "Ticket Resolved", message: `Ticket ${ticket.ticketId} has been resolved`, recipientIds: [ticket.raisedById], ticketId: ticket.id, channel: "BOTH", templateCode: "TICKET_RESOLVED", templateData: { ticketId: ticket.ticketId, resolution: '' } });
         res.json(upd);
     }
     catch (e) {

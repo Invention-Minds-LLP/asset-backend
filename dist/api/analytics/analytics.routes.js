@@ -1,0 +1,16 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const analytics_controller_1 = require("./analytics.controller");
+const router = (0, express_1.Router)();
+router.get("/tco", authMiddleware_1.authenticateToken, analytics_controller_1.getAssetTCO);
+router.get("/asset-turnover", authMiddleware_1.authenticateToken, analytics_controller_1.getAssetTurnover);
+router.get("/cfo-dashboard", authMiddleware_1.authenticateToken, analytics_controller_1.getCfoDashboard);
+router.get("/coo-dashboard", authMiddleware_1.authenticateToken, analytics_controller_1.getCooDashboard);
+router.get("/idle-capital", authMiddleware_1.authenticateToken, analytics_controller_1.getIdleCapitalAnalysis);
+router.get("/in-store-aging", authMiddleware_1.authenticateToken, analytics_controller_1.getInStoreAging);
+router.get("/uncovered-assets", authMiddleware_1.authenticateToken, analytics_controller_1.getUncoveredAssets);
+router.get("/maintenance-by-category", authMiddleware_1.authenticateToken, analytics_controller_1.getMaintenanceByCategory);
+router.get("/asset-value-buckets", authMiddleware_1.authenticateToken, analytics_controller_1.getAssetValueBuckets);
+exports.default = router;

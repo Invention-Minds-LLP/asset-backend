@@ -3,6 +3,7 @@ import fs from 'fs';
 import XLSX from 'xlsx';
 import prisma from '../../prismaClient';
 import { generateAssetId, generateLegacyAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
+import { backfillHistoricalDepreciation } from '../../utilis/depreciationEngine';
 
 function parseDate(value: any): Date | null {
     if (value === null || value === undefined || value === '') return null;
@@ -51,7 +52,11 @@ function getFinancialYearParts(date = new Date()) {
 async function createAssetWithGeneratedId(assetData: any) {
     const assetId = assetData.isLegacyAsset
         ? await generateLegacyAssetId(assetData.purchaseDate, undefined, assetData.assetCategoryId)
-        : await generateAssetId(assetData.modeOfProcurement || "PURCHASE", undefined, { categoryId: assetData.assetCategoryId });
+        : await generateAssetId(
+            assetData.modeOfProcurement || "PURCHASE",
+            undefined,
+            { categoryId: assetData.assetCategoryId, purchaseDate: assetData.purchaseDate },
+          );
     return await prisma.asset.create({ data: { assetId, ...assetData } });
 }
 
@@ -496,11 +501,12 @@ export async function importAssetsExcel(req: Request, res: Response) {
             const row = assetsRows[i];
 
             try {
-                if (!row.referenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
+                // referenceCode is OPTIONAL — auto-generated serial used if both serial+ref are blank
+                if (!row.assetName || !row.assetType || !row.assetCategory) {
                     summary.errors.push({
                         sheet: 'Assets',
                         row: i + 2,
-                        message: 'referenceCode, assetName, assetType, assetCategory are required'
+                        message: 'assetName, assetType, assetCategory are required'
                     });
                     continue;
                 }
@@ -562,12 +568,17 @@ export async function importAssetsExcel(req: Request, res: Response) {
 
                 const existing = await findAssetByReferenceOrSerial(row.referenceCode, row.serialNumber);
 
+                // Serial number / reference code — both optional. Auto-generate serial if missing.
+                const cleanSerial = toStringOrNull(row.serialNumber);
+                const cleanRefCode = toStringOrNull(row.referenceCode);
+                const finalSerial = cleanSerial || cleanRefCode || `SN-${Date.now()}-${i}`;
+
                 const assetData = {
                     assetName: String(row.assetName).trim(),
                     assetType: String(row.assetType).trim(),
                     assetCategoryId: category.id,
-                    serialNumber: String(row.serialNumber || row.referenceCode).trim(),
-                    referenceCode: String(row.referenceCode).trim(),
+                    serialNumber: finalSerial,
+                    referenceCode: cleanRefCode,
 
                     purchaseDate: parseDate(row.purchaseDate),
                     modeOfProcurement,
@@ -692,20 +703,53 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     }
                 }
 
-                // Auto-create depreciation if method + rate + life are provided and no record exists yet
-                // Normalise common aliases → canonical values (SLM→SL, WDV→DB)
+                // ── Auto-create depreciation with category fallback ─────────────
+                // Priority for each field: row → category default → safe fallback
+                // depreciationStart priority: row → installedAt → purchaseDate
                 const rawDepMethod = toStringOrNull(row.depreciationMethod)?.toUpperCase();
-                const depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod ?? null);
-                const depRate   = toNumber(row.depreciationRate);
-                const depLife   = toNumber(row.expectedLifeYears);
-                const depStart  = parseDate(row.depreciationStart);
+                let depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod ?? null);
+                let depRate   = toNumber(row.depreciationRate);
+                let depLife   = toNumber(row.expectedLifeYears);
+
+                // Fall back to category defaults
+                const catWithDefaults = await prisma.assetCategory.findUnique({
+                    where: { id: category.id },
+                    select: {
+                        defaultDepreciationMethod: true,
+                        defaultDepreciationRate: true,
+                        defaultLifeYears: true,
+                    } as any,
+                }) as any;
+
+                if (!depMethod && catWithDefaults?.defaultDepreciationMethod) {
+                    depMethod = catWithDefaults.defaultDepreciationMethod;
+                }
+                if (depRate == null && catWithDefaults?.defaultDepreciationRate != null) {
+                    depRate = Number(catWithDefaults.defaultDepreciationRate);
+                }
+                if (depLife == null && catWithDefaults?.defaultLifeYears != null) {
+                    depLife = Number(catWithDefaults.defaultLifeYears);
+                }
+
+                // For DB method, life is not strictly needed — auto-derive from rate
+                if (depMethod === 'DB' && depLife == null && depRate && depRate > 0) {
+                    depLife = Math.ceil(100 / depRate);
+                }
+                // Default SL life if still missing
+                if (depMethod === 'SL' && depLife == null) depLife = 10;
+
+                // depreciationStart priority: row → installedAt → purchaseDate
+                const depStart = parseDate(row.depreciationStart)
+                    || parseDate(row.installedAt)
+                    || parseDate(row.purchaseDate);
+
                 if (depMethod && depRate != null && depLife != null && depStart) {
                     const existingDep = await prisma.assetDepreciation.findUnique({ where: { assetId: savedAssetId } });
                     if (!existingDep) {
                         const asset = await prisma.asset.findUnique({ where: { id: savedAssetId } });
                         const cost = Number(asset?.purchaseCost ?? asset?.estimatedValue ?? 0);
                         const openingDep = toNumber(row.openingAccumulatedDepreciation) ?? 0;
-                        await prisma.assetDepreciation.create({
+                        const newDep = await prisma.assetDepreciation.create({
                             data: {
                                 assetId: savedAssetId,
                                 depreciationMethod: depMethod,
@@ -722,6 +766,45 @@ export async function importAssetsExcel(req: Request, res: Response) {
                                 isActive: true,
                             },
                         });
+
+                        // ── Backfill historical FY logs ─────────────────────────
+                        // Generate one DepreciationLog per completed FY from
+                        // depreciationStart (or financialYearAdded for pool assets)
+                        // up to today, so FA Schedule shows correct historical values.
+                        try {
+                            const assetForBackfill: any = {
+                                id: savedAssetId,
+                                assetId: asset?.assetId ?? '',
+                                purchaseCost: cost,
+                                estimatedValue: Number((asset as any)?.estimatedValue ?? 0),
+                                purchaseDate: (asset as any)?.purchaseDate ?? null,
+                                installedAt: (asset as any)?.installedAt ?? null,
+                                isLegacyAsset: (asset as any)?.isLegacyAsset ?? false,
+                                migrationMode: (asset as any)?.migrationMode ?? null,
+                                migrationDate: (asset as any)?.migrationDate ?? null,
+                                originalPurchaseDate: (asset as any)?.originalPurchaseDate ?? null,
+                                originalCost: (asset as any)?.originalCost ?? null,
+                                accDepAtMigration: (asset as any)?.accDepAtMigration ?? null,
+                                openingWdvAtMigration: (asset as any)?.openingWdvAtMigration ?? null,
+                                financialYearAdded: (asset as any)?.financialYearAdded ?? null,
+                                assetPoolId: (asset as any)?.assetPoolId ?? null,
+                            };
+                            const cfgForBackfill = {
+                                method: depMethod,
+                                rate: depRate,
+                                lifeYears: depLife,
+                                salvage: 0,
+                                depreciationStart: depStart,
+                                frequency: 'YEARLY',
+                                roundOff: false,
+                                decimalPlaces: 2,
+                            };
+                            await backfillHistoricalDepreciation(
+                                savedAssetId, newDep.id, assetForBackfill, cfgForBackfill, null,
+                            );
+                        } catch (bfErr: any) {
+                            console.warn(`Backfill failed for asset ${savedAssetId}:`, bfErr.message);
+                        }
                     }
                 }
             } catch (err: any) {
@@ -1044,11 +1127,12 @@ export async function importAssetsExcel(req: Request, res: Response) {
             const row = subAssetsRows[i];
 
             try {
-                if (!row.parentReferenceCode || !row.referenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
+                // parentReferenceCode required to locate parent; sub-asset's own referenceCode is optional
+                if (!row.parentReferenceCode || !row.assetName || !row.assetType || !row.assetCategory) {
                     summary.errors.push({
                         sheet: 'SubAssets',
                         row: i + 2,
-                        message: 'parentReferenceCode,referenceCode, assetName, assetType, assetCategory are required'
+                        message: 'parentReferenceCode, assetName, assetType, assetCategory are required'
                     });
                     continue;
                 }

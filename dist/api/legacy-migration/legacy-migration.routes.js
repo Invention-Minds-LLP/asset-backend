@@ -1,0 +1,12 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const legacy_migration_controller_1 = require("./legacy-migration.controller");
+const router = (0, express_1.Router)();
+router.get("/list", authMiddleware_1.authenticateToken, legacy_migration_controller_1.listMigratedAssets);
+router.post("/single", authMiddleware_1.authenticateToken, legacy_migration_controller_1.migrateSingleAsset);
+router.post("/bulk", authMiddleware_1.authenticateToken, legacy_migration_controller_1.migrateBulk);
+router.post("/proportional", authMiddleware_1.authenticateToken, legacy_migration_controller_1.migrateProportional);
+router.delete("/:assetId", authMiddleware_1.authenticateToken, legacy_migration_controller_1.revertMigration);
+exports.default = router;

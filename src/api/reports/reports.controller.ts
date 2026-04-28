@@ -817,22 +817,28 @@ function _faIsSecondHalfFY(date: Date): boolean {
   return m >= 9 || m <= 2;  // Oct(9), Nov(10), Dec(11), Jan(0), Feb(1), Mar(2)
 }
 
-// Replay annual WDV from depStart and return the WDV at targetDate (before that period's dep).
+// Replay WDV per Indian FY (Apr 1 – Mar 31) from depStart and return the WDV at targetDate.
+// Year of acquisition: half-rate if depStart falls in Oct–Mar (second half), else full rate.
+// All subsequent FYs: full rate. Stops once a completed FY would extend past targetDate.
 function _wdvAtDate(cost: number, salvage: number, rate: number, depStart: Date, targetDate: Date): number {
   let wdv = cost;
-  let periodStart = new Date(depStart);
-  let yearNum = 0;
+  // Acquisition FY start = Apr 1 of (depStart year if month >= Apr, else previous year)
+  const acqMonth = depStart.getMonth();
+  const acqFYStartYear = acqMonth >= 3 ? depStart.getFullYear() : depStart.getFullYear() - 1;
+  let fyStartYear = acqFYStartYear;
+  let isFirstFY = true;
 
   while (wdv > salvage) {
-    const periodEnd = new Date(periodStart);
-    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    if (periodEnd > targetDate) break; // targetDate is inside this period — stop before applying dep
+    // Each iteration represents one Indian FY: Apr 1 fyStartYear → Mar 31 (fyStartYear+1)
+    const fyEnd = new Date(fyStartYear + 1, 2, 31, 23, 59, 59, 999); // Mar 31 end-of-day
+    if (fyEnd > targetDate) break; // targetDate falls inside this FY → don't apply its dep yet
 
-    yearNum++;
-    const effectiveRate = (yearNum === 1 && _faIsSecondHalfFY(depStart)) ? rate / 200 : rate / 100;
+    const effectiveRate = (isFirstFY && _faIsSecondHalfFY(depStart)) ? rate / 200 : rate / 100;
     const dep = Math.min(wdv * effectiveRate, Math.max(0, wdv - salvage));
     wdv = Math.max(salvage, wdv - dep);
-    periodStart = periodEnd;
+
+    isFirstFY = false;
+    fyStartYear += 1;
   }
 
   return wdv;
@@ -865,6 +871,7 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         disposalDate: true,
         status: true,
         assetPoolId: true,
+        financialYearAdded: true,
         assetCategory: { select: { id: true, name: true } },
         depreciation: {
           select: {
@@ -879,6 +886,26 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
       },
       orderBy: [{ assetCategory: { name: "asc" } }, { purchaseDate: "asc" }],
     });
+
+    // ── Pre-fetch all depreciation logs covering the selected FY ──────────────
+    // Source-of-truth: if a log exists for an asset's FY, use it (audit-approved).
+    // Otherwise fall back to on-the-fly calculation via _wdvAtDate().
+    const fyLogs = await prisma.depreciationLog.findMany({
+      where: {
+        assetId: { in: assets.map(a => a.id) },
+        periodStart: { gte: fyStart, lte: fyEnd },
+      },
+      select: {
+        assetId: true,
+        depreciationAmount: true,
+        bookValueAfter: true,
+        openingWdv: true,
+        depOnOpening: true,
+        depOnAdditions: true,
+      },
+    });
+    const logByAssetId = new Map<number, typeof fyLogs[0]>();
+    for (const l of fyLogs) logByAssetId.set(l.assetId, l);
 
     // ── Fetch pool depreciation schedules for this FY ──────────────────────────
     // The FA schedule stored per pool is the auditor-certified source of truth for
@@ -1000,6 +1027,18 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         const purchaseDate = asset.purchaseDate ? new Date(asset.purchaseDate) : null;
         const disposalDate = asset.disposalDate ? new Date(asset.disposalDate) : null;
 
+        // ── Skip pool-individualized assets for years before their handover ─────
+        // Pool-individualized assets only "exist" as standalone records from
+        // financialYearAdded onward. For prior years, the pool schedule is the
+        // source of truth — so don't double-count.
+        if (asset.assetPoolId && asset.financialYearAdded) {
+          const m = String(asset.financialYearAdded).match(/FY(\d{4})/);
+          if (m) {
+            const handoverFyStart = Number(m[1]);
+            if (fiscalYear < handoverFyStart) continue;
+          }
+        }
+
         const isDisposedBeforeFY = disposalDate && disposalDate < fyStart;
         const isDisposedInFY = disposalDate && disposalDate >= fyStart && disposalDate <= fyEnd;
         const isAcquiredBeforeFY = purchaseDate && purchaseDate < fyStart;
@@ -1034,26 +1073,57 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
 
         if (assetRate > 0) { totalRate += assetRate; rateCount++; }
 
-        // ── Per-asset period depreciation (Indian IT Act 180-day convention) ──
-        if (isAcquiredBeforeFY && !isDisposedBeforeFY) {
-          // Opening block: asset is in year 2+ → full rate on opening WDV
-          closingAccDep += Number(dep.accumulatedDepreciation || 0);
-          if (assetRate > 0 && depStart) {
-            if (method === "DB") {
-              const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
-              const d = Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
-              depOnOpening += d;
-            } else {
-              depOnOpening += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
-            }
+        // ── Source-of-truth: prefer DepreciationLog if it exists for this FY ──
+        // Logs are written by batch runs / backfill / per-asset runs and reflect
+        // the audit-approved values (with rounding settings applied).
+        const fyLog = logByAssetId.get(asset.id);
+
+        if (fyLog) {
+          // Use stored values from the log
+          const logDep = Number(fyLog.depreciationAmount);
+          const logBookAfter = Number(fyLog.bookValueAfter);
+          const logDepOnOpen = Number(fyLog.depOnOpening ?? 0);
+          const logDepOnAdd = Number(fyLog.depOnAdditions ?? 0);
+
+          // Closing acc dep at this FY's end = cost − bookValueAfter
+          closingAccDep += Math.max(0, cost - logBookAfter);
+          depOnOpening  += logDepOnOpen;
+          depOnAdditions += logDepOnAdd;
+
+          // If split components are missing (older logs), fall back to total
+          if (logDepOnOpen === 0 && logDepOnAdd === 0) {
+            if (isAcquiredInFY) depOnAdditions += logDep;
+            else depOnOpening += logDep;
+          }
+          continue;
+        }
+
+        // ── No log → calculate on-the-fly (estimated) ──────────────────────────
+        if (isAcquiredBeforeFY && !isDisposedBeforeFY && assetRate > 0 && depStart) {
+          // Compute what acc dep WOULD BE at this FY's end (not what's currently in DB)
+          if (method === "DB") {
+            const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
+            const closingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyEnd);
+            closingAccDep += Math.max(0, cost - closingWDV);
+            const d = Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
+            depOnOpening += d;
+          } else {
+            const yearsElapsed = Math.max(0, (fyEnd.getTime() - depStart.getTime()) / (365.25 * 86400000));
+            const annualSL = (cost - salvageVal) * assetRate / 100;
+            closingAccDep += Math.min((cost - salvageVal), annualSL * yearsElapsed);
+            depOnOpening += Math.min(annualSL, Math.max(0, cost - salvageVal));
           }
         } else if (isAcquiredInFY && assetRate > 0 && purchaseDate) {
-          // Addition: Indian IT Act half-year rule applies for DB method only
+          // First-FY addition: half-year rule for DB
           if (method === "DB") {
             const halfYear = _faIsSecondHalfFY(purchaseDate);
-            depOnAdditions += cost * (halfYear ? assetRate / 200 : assetRate / 100);
+            const d = cost * (halfYear ? assetRate / 200 : assetRate / 100);
+            depOnAdditions += d;
+            closingAccDep += d;
           } else {
-            depOnAdditions += Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+            const d = Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+            depOnAdditions += d;
+            closingAccDep += d;
           }
         }
       }
@@ -1399,6 +1469,185 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
     res.json({ data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
   } catch (err: any) {
     console.error("getConsolidatedAssetReport error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ── GET /reports/fixed-assets-schedule/category-detail ───────────────────────
+// Returns per-asset breakdown for a single category in the FA schedule
+// matching the same Opening / Addition / Deletion / Depreciation / Net layout.
+// The sum of per-asset values MUST equal the category-level totals.
+export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const fiscalYear = Number(req.query.fiscalYear) || new Date().getFullYear();
+    const categoryName = String(req.query.category || "").trim();
+    if (!categoryName) {
+      res.status(400).json({ message: "category is required" });
+      return;
+    }
+
+    const fyStart = new Date(`${fiscalYear}-04-01T00:00:00.000`);
+    const fyEnd = new Date(`${fiscalYear + 1}-03-31T23:59:59.999`);
+
+    // Find category
+    const category = await prisma.assetCategory.findFirst({ where: { name: categoryName } });
+    if (!category) { res.status(404).json({ message: `Category "${categoryName}" not found` }); return; }
+
+    // Fetch all assets in this category that could appear in this FY
+    const assets = await prisma.asset.findMany({
+      where: { assetCategoryId: category.id, purchaseDate: { lte: fyEnd } },
+      select: {
+        id: true, assetId: true, assetName: true, serialNumber: true,
+        purchaseCost: true, purchaseDate: true, disposalDate: true, status: true,
+        depreciation: {
+          select: {
+            depreciationRate: true, depreciationMethod: true, depreciationStart: true,
+            salvageValue: true, accumulatedDepreciation: true, currentBookValue: true,
+          },
+        },
+      },
+      orderBy: { purchaseDate: "asc" },
+    });
+
+    // Pre-fetch FY-scoped logs (same source-of-truth priority as category view)
+    const fyLogs = await prisma.depreciationLog.findMany({
+      where: { assetId: { in: assets.map(a => a.id) }, periodStart: { gte: fyStart, lte: fyEnd } },
+      select: { assetId: true, depreciationAmount: true, bookValueAfter: true, depOnOpening: true, depOnAdditions: true },
+    });
+    const logByAssetId = new Map<number, typeof fyLogs[0]>();
+    for (const l of fyLogs) logByAssetId.set(l.assetId, l);
+
+    const isSecondHalf = (d: Date) => { const m = d.getMonth(); return m >= 9 || m <= 2; };
+
+    const rows = assets.map(a => {
+      const cost = Number(a.purchaseCost || 0);
+      const purchaseDate = a.purchaseDate ? new Date(a.purchaseDate) : null;
+      const disposalDate = a.disposalDate ? new Date(a.disposalDate) : null;
+
+      const isDisposedBeforeFY = disposalDate && disposalDate < fyStart;
+      const isDisposedInFY = disposalDate && disposalDate >= fyStart && disposalDate <= fyEnd;
+      const isAcquiredBeforeFY = purchaseDate && purchaseDate < fyStart;
+      const isAcquiredInFY = purchaseDate && purchaseDate >= fyStart && purchaseDate <= fyEnd;
+
+      let openingGross = 0, additions = 0, additions1H = 0, additions2H = 0;
+      let deletions = 0, deletions1H = 0, deletions2H = 0;
+
+      if (isAcquiredBeforeFY && !isDisposedBeforeFY) openingGross = cost;
+      if (isAcquiredInFY && purchaseDate) {
+        additions = cost;
+        if (isSecondHalf(purchaseDate)) additions2H = cost; else additions1H = cost;
+      }
+      if (isDisposedInFY && disposalDate) {
+        deletions = cost;
+        if (isSecondHalf(disposalDate)) deletions2H = cost; else deletions1H = cost;
+      }
+      const closingGross = openingGross + additions - deletions;
+
+      const dep = a.depreciation;
+      const rate = Number(dep?.depreciationRate || 0);
+      const method = dep?.depreciationMethod;
+      const depStart = dep?.depreciationStart ? new Date(dep.depreciationStart) : purchaseDate;
+      const salvage = Number(dep?.salvageValue ?? 0);
+
+      // FY-scoped closing dep (must match category view's logic, not live DB value)
+      let depOnOpening = 0, depOnAdditions = 0, closingDep = 0;
+      const fyLog = logByAssetId.get(a.id);
+
+      if (fyLog) {
+        // Source of truth: stored log for this FY
+        closingDep = Math.max(0, cost - Number(fyLog.bookValueAfter));
+        depOnOpening = Number(fyLog.depOnOpening ?? 0);
+        depOnAdditions = Number(fyLog.depOnAdditions ?? 0);
+      } else if (rate > 0 && depStart && !isDisposedBeforeFY) {
+        if (method === "DB") {
+          const openingWDV = _wdvAtDate(cost, salvage, rate, depStart, fyStart);
+          const closingWDV = _wdvAtDate(cost, salvage, rate, depStart, fyEnd);
+          closingDep = Math.max(0, cost - closingWDV);
+          if (isAcquiredBeforeFY) {
+            depOnOpening = Math.min(openingWDV * rate / 100, Math.max(0, openingWDV - salvage));
+          } else if (isAcquiredInFY && purchaseDate) {
+            const halfYear = _faIsSecondHalfFY(purchaseDate);
+            depOnAdditions = cost * (halfYear ? rate / 200 : rate / 100);
+          }
+        } else {
+          // SL
+          if (isAcquiredBeforeFY) {
+            depOnOpening = Math.min((cost - salvage) * rate / 100, Math.max(0, cost - salvage));
+          } else if (isAcquiredInFY) {
+            depOnAdditions = Math.min((cost - salvage) * rate / 100, Math.max(0, cost - salvage));
+          }
+          // SL closing dep: replay from depStart to fyEnd
+          const yearsToFyEnd = Math.max(0, (fyEnd.getTime() - depStart.getTime()) / (365.25 * 86400000));
+          const annual = (cost - salvage) * rate / 100;
+          closingDep = Math.min(yearsToFyEnd * annual, Math.max(0, cost - salvage));
+        }
+      }
+
+      const periodDep = +(depOnOpening + depOnAdditions).toFixed(2);
+      const openingDep = +Math.max(0, closingDep - periodDep).toFixed(2);
+      const netCurrent = +(closingGross - closingDep).toFixed(2);
+      const netPrevious = +(openingGross - openingDep).toFixed(2);
+
+      return {
+        assetId: a.assetId,
+        assetName: a.assetName,
+        serialNumber: a.serialNumber,
+        purchaseDate: purchaseDate?.toISOString().split("T")[0] ?? null,
+        openingGross: +openingGross.toFixed(2),
+        additions: +additions.toFixed(2),
+        additions1H: +additions1H.toFixed(2),
+        additions2H: +additions2H.toFixed(2),
+        deletions: +deletions.toFixed(2),
+        deletions1H: +deletions1H.toFixed(2),
+        deletions2H: +deletions2H.toFixed(2),
+        closingGross: +closingGross.toFixed(2),
+        rate,
+        openingDep,
+        depOnOpening: +depOnOpening.toFixed(2),
+        depOnAdditions: +depOnAdditions.toFixed(2),
+        periodDep,
+        closingDep: +closingDep.toFixed(2),
+        netCurrent,
+        netPrevious,
+      };
+    }).filter(r => r.openingGross !== 0 || r.additions !== 0 || r.deletions !== 0 || r.closingDep !== 0);
+
+    // Sum totals
+    const totals = rows.reduce((acc, r) => ({
+      openingGross: acc.openingGross + r.openingGross,
+      additions: acc.additions + r.additions,
+      additions1H: acc.additions1H + r.additions1H,
+      additions2H: acc.additions2H + r.additions2H,
+      deletions: acc.deletions + r.deletions,
+      deletions1H: acc.deletions1H + r.deletions1H,
+      deletions2H: acc.deletions2H + r.deletions2H,
+      closingGross: acc.closingGross + r.closingGross,
+      openingDep: acc.openingDep + r.openingDep,
+      depOnOpening: acc.depOnOpening + r.depOnOpening,
+      depOnAdditions: acc.depOnAdditions + r.depOnAdditions,
+      periodDep: acc.periodDep + r.periodDep,
+      closingDep: acc.closingDep + r.closingDep,
+      netCurrent: acc.netCurrent + r.netCurrent,
+      netPrevious: acc.netPrevious + r.netPrevious,
+    }), {
+      openingGross: 0, additions: 0, additions1H: 0, additions2H: 0,
+      deletions: 0, deletions1H: 0, deletions2H: 0, closingGross: 0,
+      openingDep: 0, depOnOpening: 0, depOnAdditions: 0, periodDep: 0,
+      closingDep: 0, netCurrent: 0, netPrevious: 0,
+    });
+
+    Object.keys(totals).forEach(k => { (totals as any)[k] = +(totals as any)[k].toFixed(2); });
+
+    res.json({
+      category: categoryName,
+      fiscalYear,
+      fyLabel: `FY ${fiscalYear}-${String(fiscalYear + 1).slice(2)}`,
+      assetCount: rows.length,
+      rows,
+      totals,
+    });
+  } catch (err: any) {
+    console.error("getCategoryAssetDetail error:", err);
     res.status(500).json({ message: err.message });
   }
 };

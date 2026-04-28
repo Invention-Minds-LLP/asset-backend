@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const service_invoices_controller_1 = require("./service-invoices.controller");
+const router = (0, express_1.Router)();
+router.get("/stats", authMiddleware_1.authenticateToken, service_invoices_controller_1.getStats);
+router.get("/", authMiddleware_1.authenticateToken, service_invoices_controller_1.getAll);
+router.get("/:id", authMiddleware_1.authenticateToken, service_invoices_controller_1.getById);
+router.post("/", authMiddleware_1.authenticateToken, service_invoices_controller_1.create);
+router.put("/:id/approve", authMiddleware_1.authenticateToken, service_invoices_controller_1.approve);
+router.put("/:id/reject", authMiddleware_1.authenticateToken, service_invoices_controller_1.reject);
+router.put("/:id/mark-paid", authMiddleware_1.authenticateToken, service_invoices_controller_1.markPaid);
+router.post("/:id/upload", authMiddleware_1.authenticateToken, service_invoices_controller_1.upload.single("file"), service_invoices_controller_1.uploadDoc);
+exports.default = router;

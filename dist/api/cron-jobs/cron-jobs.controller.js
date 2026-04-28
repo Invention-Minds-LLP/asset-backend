@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.checkMaintenanceSLABreach = exports.runAllChecks = exports.checkContractExpiry = exports.checkSLABreach = exports.checkInsuranceExpiry = exports.checkWarrantyExpiry = void 0;
+exports.checkMaintenanceSLABreach = exports.runAllChecks = exports.checkAssetActivation = exports.checkContractExpiry = exports.checkSLABreach = exports.checkInsuranceExpiry = exports.checkWarrantyExpiry = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 // ─── Helper: Get Active SMTP Config ──────────────────────────────────────────
@@ -269,15 +269,26 @@ const checkContractExpiry = (_req, res) => __awaiter(void 0, void 0, void 0, fun
     }
 });
 exports.checkContractExpiry = checkContractExpiry;
+// ─── Asset Activation via Depreciation Start Date ───────────────────────────
+// Logic: new assets start as IN_STORE. When their depreciation start date
+// arrives (depreciationStart <= today), they are "put into service" → ACTIVE.
+// Past assets already have their correct status set by the user — they won't
+// be IN_STORE so this query will never touch them.
+const checkAssetActivation = (_req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const result = yield checkAssetActivationInternal();
+        res.json(Object.assign({ message: `${result.activated} asset(s) activated` }, result));
+    }
+    catch (error) {
+        console.error("checkAssetActivation error:", error);
+        res.status(500).json({ message: "Failed to run asset activation check" });
+    }
+});
+exports.checkAssetActivation = checkAssetActivation;
 // ─── Run All Checks (single endpoint for cron) ──────────────────────────────
 const runAllChecks = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const results = {};
-        // We'll call each check internally
-        const mockRes = {
-            json: (data) => data,
-            status: () => ({ json: (data) => data }),
-        };
         // Run sequentially to avoid overwhelming the DB
         try {
             results.warranty = yield checkWarrantyExpiryInternal();
@@ -308,6 +319,12 @@ const runAllChecks = (req, res) => __awaiter(void 0, void 0, void 0, function* (
         }
         catch (e) {
             results.contract = { error: true };
+        }
+        try {
+            results.assetActivation = yield checkAssetActivationInternal();
+        }
+        catch (e) {
+            results.assetActivation = { error: true };
         }
         res.json({ message: "All checks completed", results });
     }
@@ -415,5 +432,46 @@ function checkContractExpiryInternal() {
             where: { status: "ACTIVE", endDate: { gte: now, lte: thirtyDays } },
         });
         return { type: "contract", expiringCount: count };
+    });
+}
+// ─── Asset Activation Internal ───────────────────────────────────────────────
+// Finds IN_STORE assets whose depreciationStart has arrived → marks them ACTIVE.
+// Only touches assets that:
+//   1. Are currently IN_STORE (past assets already have their real status)
+//   2. Have a depreciation record configured (meaning they were deliberately commissioned)
+//   3. depreciationStart <= today (the "put into service" date has been reached)
+function checkAssetActivationInternal() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const today = new Date();
+        today.setHours(23, 59, 59, 999); // include the full current day
+        // Find all IN_STORE assets that have a depreciation record with depreciationStart <= today
+        const candidates = yield prismaClient_1.default.assetDepreciation.findMany({
+            where: {
+                isActive: true,
+                depreciationStart: { lte: today },
+                asset: { status: "IN_STORE" },
+            },
+            select: {
+                assetId: true,
+                depreciationStart: true,
+                asset: { select: { id: true, assetId: true, assetName: true } },
+            },
+        });
+        if (!candidates.length) {
+            return { type: "assetActivation", activated: 0, assets: [] };
+        }
+        const assetDbIds = candidates.map(c => c.assetId);
+        yield prismaClient_1.default.asset.updateMany({
+            where: { id: { in: assetDbIds }, status: "IN_STORE" },
+            data: { status: "ACTIVE" },
+        });
+        const activatedAssets = candidates.map(c => ({
+            id: c.asset.id,
+            assetId: c.asset.assetId,
+            assetName: c.asset.assetName,
+            depreciationStart: c.depreciationStart,
+        }));
+        console.log(`[Asset Activation] ${activatedAssets.length} asset(s) moved to ACTIVE:`, activatedAssets.map(a => a.assetId).join(", "));
+        return { type: "assetActivation", activated: activatedAssets.length, assets: activatedAssets };
     });
 }

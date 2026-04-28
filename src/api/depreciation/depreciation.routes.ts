@@ -18,6 +18,7 @@ import {
     getDepreciableAssets,
     getDepreciationSchedule,
     getRoundOffImpact,
+    backfillDepreciationLogs,
 } from "./depreciation.controller";
 
 // Standalone depreciation management page
@@ -41,5 +42,8 @@ router.put("/depreciation/:id", authenticateToken, updateDepreciation);
 router.get("/assets/:assetId/depreciation/calc", authenticateToken, calculateDepreciation);
 
 router.post("/depreciation/run-batch", authenticateToken, runDepreciationForAsset);
+
+// Backfill historical depreciation logs for existing assets
+router.post("/backfill-logs", authenticateToken, backfillDepreciationLogs);
 
 export default router;

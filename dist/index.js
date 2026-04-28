@@ -39,8 +39,10 @@ const financial_dashboard_routes_1 = __importDefault(require("./api/financial-da
 const audit_trail_routes_1 = __importDefault(require("./api/audit-trail/audit-trail.routes"));
 const reports_routes_1 = __importDefault(require("./api/reports/reports.routes"));
 const disposal_routes_1 = __importDefault(require("./api/disposal/disposal.routes"));
+const e_waste_routes_1 = __importDefault(require("./api/e-waste/e-waste.routes"));
 const asset_audit_routes_1 = __importDefault(require("./api/asset-audit/asset-audit.routes"));
 const preventive_maintenance_routes_1 = __importDefault(require("./api/preventive-maintenance/preventive-maintenance.routes"));
+const pm_checklist_routes_1 = __importDefault(require("./api/pm-checklist/pm-checklist.routes"));
 const vendor_performance_routes_1 = __importDefault(require("./api/vendor-performance/vendor-performance.routes"));
 const cost_analysis_routes_1 = __importDefault(require("./api/cost-analysis/cost-analysis.routes"));
 const knowledge_base_routes_1 = __importDefault(require("./api/knowledge-base/knowledge-base.routes"));
@@ -48,14 +50,42 @@ const global_search_routes_1 = __importDefault(require("./api/global-search/glob
 const quick_actions_routes_1 = __importDefault(require("./api/quick-actions/quick-actions.routes"));
 const cron_jobs_routes_1 = __importDefault(require("./api/cron-jobs/cron-jobs.routes"));
 const asset_indent_routes_1 = __importDefault(require("./api/asset-indent/asset-indent.routes"));
+const asset_pool_routes_1 = __importDefault(require("./api/asset-pool/asset-pool.routes"));
 const employee_exit_routes_1 = __importDefault(require("./api/employee-exit/employee-exit.routes"));
+const decision_engine_routes_1 = __importDefault(require("./api/decision-engine/decision-engine.routes"));
+const tenant_config_routes_1 = __importDefault(require("./api/tenant-config/tenant-config.routes"));
+const store_routes_1 = __importDefault(require("./api/store/store.routes"));
+const rca_routes_1 = __importDefault(require("./api/rca/rca.routes"));
+const purchase_order_routes_1 = __importDefault(require("./api/purchase-order/purchase-order.routes"));
+const goods_receipt_routes_1 = __importDefault(require("./api/goods-receipt/goods-receipt.routes"));
+const work_order_routes_1 = __importDefault(require("./api/work-order/work-order.routes"));
+const store_transfer_routes_1 = __importDefault(require("./api/store-transfer/store-transfer.routes"));
+const store_stock_routes_1 = __importDefault(require("./api/store-stock/store-stock.routes"));
+const analytics_routes_1 = __importDefault(require("./api/analytics/analytics.routes"));
+const revenue_log_routes_1 = __importDefault(require("./api/revenue-log/revenue-log.routes"));
+const hierarchy_config_routes_1 = __importDefault(require("./api/hierarchy-config/hierarchy-config.routes"));
+const material_request_routes_1 = __importDefault(require("./api/material-request/material-request.routes"));
+const approval_config_routes_1 = __importDefault(require("./api/approval-config/approval-config.routes"));
+const mobile_auth_routes_1 = __importDefault(require("./api/mobile-auth/mobile-auth.routes"));
+const chart_of_accounts_routes_1 = __importDefault(require("./api/accounts/chart-of-accounts/chart-of-accounts.routes"));
+const purchase_vouchers_routes_1 = __importDefault(require("./api/accounts/purchase-vouchers/purchase-vouchers.routes"));
+const payment_vouchers_routes_1 = __importDefault(require("./api/accounts/payment-vouchers/payment-vouchers.routes"));
+const journal_entries_routes_1 = __importDefault(require("./api/accounts/journal-entries/journal-entries.routes"));
+const accounts_summary_routes_1 = __importDefault(require("./api/accounts/accounts-summary/accounts-summary.routes"));
+const finance_routes_1 = __importDefault(require("./api/finance/finance.routes"));
+const service_invoices_routes_1 = __importDefault(require("./api/service-invoices/service-invoices.routes"));
+const legacy_migration_routes_1 = __importDefault(require("./api/legacy-migration/legacy-migration.routes"));
+const reconciliation_routes_1 = __importDefault(require("./api/reconciliation/reconciliation.routes"));
 const cors_1 = __importDefault(require("cors"));
+const path_1 = __importDefault(require("path"));
 const app = (0, express_1.default)();
 const port = 3001;
 // Middleware to parse JSON bodies
 app.use(express_1.default.json());
+// Serve uploaded files
+app.use('/uploads', express_1.default.static(path_1.default.join(process.cwd(), 'uploads')));
 app.use((0, cors_1.default)({
-    origin: ["http://localhost:4200", "https://sademo.inventionminds.com"], // Allow your Angular app
+    origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100'], // Allow your Angular app
     credentials: true // Optional: if you plan to send cookies
 }));
 // Mount routers
@@ -94,8 +124,10 @@ app.use("/api/financial-dashboard", financial_dashboard_routes_1.default);
 app.use("/api/audit-trail", audit_trail_routes_1.default);
 app.use("/api/reports", reports_routes_1.default);
 app.use("/api/disposal", disposal_routes_1.default);
+app.use("/api/e-waste", e_waste_routes_1.default);
 app.use("/api/asset-audit", asset_audit_routes_1.default);
 app.use("/api/preventive-maintenance", preventive_maintenance_routes_1.default);
+app.use("/api/pm-checklist", pm_checklist_routes_1.default);
 app.use("/api/vendor-performance", vendor_performance_routes_1.default);
 app.use("/api/cost-analysis", cost_analysis_routes_1.default);
 app.use("/api/knowledge-base", knowledge_base_routes_1.default);
@@ -104,6 +136,36 @@ app.use("/api/quick-actions", quick_actions_routes_1.default);
 app.use("/api/cron-jobs", cron_jobs_routes_1.default);
 app.use("/api/asset-indent", asset_indent_routes_1.default);
 app.use("/api/employee-exit", employee_exit_routes_1.default);
+app.use("/api/decision-engine", decision_engine_routes_1.default);
+app.use("/api/tenant-config", tenant_config_routes_1.default);
+app.use("/api/store", store_routes_1.default);
+app.use("/api/rca", rca_routes_1.default);
+app.use("/api/purchase-order", purchase_order_routes_1.default);
+app.use("/api/goods-receipt", goods_receipt_routes_1.default);
+app.use("/api/work-order", work_order_routes_1.default);
+app.use("/api/store-transfer", store_transfer_routes_1.default);
+app.use("/api/store-stock", store_stock_routes_1.default);
+app.use("/api/analytics", analytics_routes_1.default);
+app.use("/api/revenue-log", revenue_log_routes_1.default);
+app.use("/api/hierarchy-config", hierarchy_config_routes_1.default);
+app.use("/api/material-request", material_request_routes_1.default);
+app.use("/api/approval-config", approval_config_routes_1.default);
+app.use("/api/mobile", mobile_auth_routes_1.default);
+app.use("/api/asset-pool", asset_pool_routes_1.default);
+// ── Accounts Module ─────────────────────────────────────────────────────────
+app.use("/api/accounts/chart-of-accounts", chart_of_accounts_routes_1.default);
+app.use("/api/accounts/purchase-vouchers", purchase_vouchers_routes_1.default);
+app.use("/api/accounts/payment-vouchers", payment_vouchers_routes_1.default);
+app.use("/api/accounts/journal-entries", journal_entries_routes_1.default);
+app.use("/api/accounts/summary", accounts_summary_routes_1.default);
+// ── Finance Engine ───────────────────────────────────────────────────────────
+app.use("/api/finance", finance_routes_1.default);
+// ── Service Invoices ─────────────────────────────────────────────────────────
+app.use("/api/service-invoices", service_invoices_routes_1.default);
+// ── Legacy Asset Migration ───────────────────────────────────────────────────
+app.use("/api/legacy-migration", legacy_migration_routes_1.default);
+// ── Reconciliation (Books vs Audit vs System) ────────────────────────────────
+app.use("/api/reconciliation", reconciliation_routes_1.default);
 // Default route
 app.get("/", (req, res) => {
     res.send("Asset Management API is running!");

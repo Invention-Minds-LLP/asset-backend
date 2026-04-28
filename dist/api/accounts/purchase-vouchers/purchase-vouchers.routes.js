@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../../middleware/authMiddleware");
+const purchase_vouchers_controller_1 = require("./purchase-vouchers.controller");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.get("/", purchase_vouchers_controller_1.getAllPurchaseVouchers);
+router.get("/:id", purchase_vouchers_controller_1.getPurchaseVoucherById);
+router.post("/", purchase_vouchers_controller_1.createPurchaseVoucher);
+router.put("/:id", purchase_vouchers_controller_1.updatePurchaseVoucher);
+router.patch("/:id/approve", purchase_vouchers_controller_1.approvePurchaseVoucher);
+router.patch("/:id/post", purchase_vouchers_controller_1.postPurchaseVoucher);
+router.patch("/:id/cancel", purchase_vouchers_controller_1.cancelPurchaseVoucher);
+exports.default = router;

@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getInsuranceStats = exports.getAllInsuranceClaims = exports.getAllInsurancePolicies = exports.getClaimsByAsset = exports.updateClaimStatus = exports.createInsuranceClaim = exports.renewInsurancePolicy = exports.uploadInsuranceDocument = exports.markInsuranceExpired = exports.getInsuranceHistory = exports.updateInsurancePolicy = exports.addInsurancePolicy = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 const addInsurancePolicy = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         // if (req.user.role !== "department_user" && req.user.role !== "superadmin") {
@@ -37,8 +38,20 @@ const addInsurancePolicy = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 notes,
                 policyType: policyType,
                 renewalReminderDays: renewalReminderDays
-            }
+            },
+            include: { asset: { select: { assetId: true, assetName: true } } },
         });
+        // Fire-and-forget: notify admins about new insurance policy
+        (0, notificationHelper_1.getAdminIds)().then(adminIds => {
+            var _a;
+            return (0, notificationHelper_1.notify)({
+                type: "INSURANCE",
+                title: "Insurance Policy Created",
+                message: `Insurance policy "${policyNumber}" created for asset ${insurance.asset.assetId} — ${insurance.asset.assetName}`,
+                recipientIds: adminIds,
+                createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
+            });
+        }).catch(() => { });
         res.status(201).json(insurance);
     }
     catch (err) {
@@ -243,6 +256,17 @@ const createInsuranceClaim = (req, res) => __awaiter(void 0, void 0, void 0, fun
                 claimedBy: (_a = req.user.employeeDbId) === null || _a === void 0 ? void 0 : _a.toString()
             }
         });
+        // Fire-and-forget: notify admins about new insurance claim
+        (0, notificationHelper_1.getAdminIds)().then(adminIds => {
+            var _a;
+            return (0, notificationHelper_1.notify)({
+                type: "INSURANCE",
+                title: "Insurance Claim Filed",
+                message: `Claim "${claimNumber}" filed for policy "${policy.policyNumber}" (₹${amount})`,
+                recipientIds: adminIds,
+                createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
+            });
+        }).catch(() => { });
         res.status(201).json(claim);
         return;
     }
@@ -292,8 +316,21 @@ exports.getClaimsByAsset = getClaimsByAsset;
 // ─── Get All Insurance Policies (standalone page) ─────────────────────────────
 const getAllInsurancePolicies = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = req.user;
         const { status, assetId, provider, page = "1", limit = "25", search, exportCsv } = req.query;
+        // Department scoping: non-admin sees only their department's assets
+        let scopedAssetIds;
+        if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+            const deptAssets = yield prismaClient_1.default.asset.findMany({
+                where: { departmentId: Number(user.departmentId) },
+                select: { id: true },
+            });
+            scopedAssetIds = deptAssets.map(a => a.id);
+        }
         const where = {};
+        if (scopedAssetIds) {
+            where.assetId = { in: scopedAssetIds };
+        }
         if (status)
             where.policyStatus = String(status);
         if (assetId)
@@ -351,8 +388,21 @@ exports.getAllInsurancePolicies = getAllInsurancePolicies;
 // ─── Get All Insurance Claims (standalone page) ──────────────────────────────
 const getAllInsuranceClaims = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = req.user;
         const { status, assetId, page = "1", limit = "25", search, exportCsv } = req.query;
+        // Department scoping: non-admin sees only their department's assets
+        let scopedAssetIds;
+        if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+            const deptAssets = yield prismaClient_1.default.asset.findMany({
+                where: { departmentId: Number(user.departmentId) },
+                select: { id: true },
+            });
+            scopedAssetIds = deptAssets.map(a => a.id);
+        }
         const where = {};
+        if (scopedAssetIds) {
+            where.assetId = { in: scopedAssetIds };
+        }
         if (status)
             where.claimStatus = String(status);
         if (assetId)
@@ -407,24 +457,31 @@ exports.getAllInsuranceClaims = getAllInsuranceClaims;
 // ─── Insurance Dashboard Stats ───────────────────────────────────────────────
 const getInsuranceStats = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
+        const user = req.user;
+        // Department scoping
+        let scope = {};
+        let claimScope = {};
+        if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user === null || user === void 0 ? void 0 : user.role) && (user === null || user === void 0 ? void 0 : user.departmentId)) {
+            const deptAssets = yield prismaClient_1.default.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
+            const ids = deptAssets.map(a => a.id);
+            scope = { assetId: { in: ids } };
+            claimScope = { assetId: { in: ids } };
+        }
         const [totalPolicies, activePolicies, expiredPolicies, totalClaims, pendingClaims, approvedClaims, settledClaims] = yield Promise.all([
-            prismaClient_1.default.assetInsurance.count(),
-            prismaClient_1.default.assetInsurance.count({ where: { policyStatus: "ACTIVE" } }),
-            prismaClient_1.default.assetInsurance.count({ where: { policyStatus: "EXPIRED" } }),
-            prismaClient_1.default.insuranceClaim.count(),
-            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "SUBMITTED" } }),
-            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "APPROVED" } }),
-            prismaClient_1.default.insuranceClaim.count({ where: { claimStatus: "SETTLED" } }),
+            prismaClient_1.default.assetInsurance.count({ where: Object.assign({}, scope) }),
+            prismaClient_1.default.assetInsurance.count({ where: Object.assign({ policyStatus: "ACTIVE" }, scope) }),
+            prismaClient_1.default.assetInsurance.count({ where: Object.assign({ policyStatus: "EXPIRED" }, scope) }),
+            prismaClient_1.default.insuranceClaim.count({ where: Object.assign({}, claimScope) }),
+            prismaClient_1.default.insuranceClaim.count({ where: Object.assign({ claimStatus: "SUBMITTED" }, claimScope) }),
+            prismaClient_1.default.insuranceClaim.count({ where: Object.assign({ claimStatus: "APPROVED" }, claimScope) }),
+            prismaClient_1.default.insuranceClaim.count({ where: Object.assign({ claimStatus: "SETTLED" }, claimScope) }),
         ]);
         // Expiring soon (within 30 days)
         const now = new Date();
         const thirtyDaysLater = new Date();
         thirtyDaysLater.setDate(now.getDate() + 30);
         const expiringSoon = yield prismaClient_1.default.assetInsurance.count({
-            where: {
-                policyStatus: "ACTIVE",
-                endDate: { gte: now, lte: thirtyDaysLater },
-            },
+            where: Object.assign({ policyStatus: "ACTIVE", endDate: { gte: now, lte: thirtyDaysLater } }, scope),
         });
         res.json({
             totalPolicies,

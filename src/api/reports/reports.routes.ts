@@ -8,6 +8,7 @@ import {
   getDepreciationReport,
   getInventoryStockReport,
   getFixedAssetsSchedule,
+  getCategoryAssetDetail,
   getConsolidatedAssetReport,
 } from "./reports.controller";
 
@@ -20,6 +21,7 @@ router.get("/expiry", authenticateToken, getExpiryReport);
 router.get("/depreciation", authenticateToken, getDepreciationReport);
 router.get("/inventory-stock", authenticateToken, getInventoryStockReport);
 router.get("/fixed-assets-schedule", authenticateToken, getFixedAssetsSchedule);
+router.get("/fixed-assets-schedule/category-detail", authenticateToken, getCategoryAssetDetail);
 router.get("/consolidated", authenticateToken, getConsolidatedAssetReport);
 
 export default router;

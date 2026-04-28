@@ -1,0 +1,10 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const hierarchy_config_controller_1 = require("./hierarchy-config.controller");
+const router = (0, express_1.Router)();
+router.get("/sla-breach-alerts", authMiddleware_1.authenticateToken, hierarchy_config_controller_1.getSlaBreachAlerts);
+router.get("/repeat-tickets", authMiddleware_1.authenticateToken, hierarchy_config_controller_1.getRepeatTickets);
+router.get("/escalation-summary", authMiddleware_1.authenticateToken, hierarchy_config_controller_1.getEscalationSummary);
+exports.default = router;

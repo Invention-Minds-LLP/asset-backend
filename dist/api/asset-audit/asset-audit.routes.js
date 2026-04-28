@@ -7,6 +7,7 @@ const express_1 = __importDefault(require("express"));
 const authMiddleware_1 = require("../../middleware/authMiddleware");
 const asset_audit_controller_1 = require("./asset-audit.controller");
 const router = express_1.default.Router();
+router.get("/locations", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAuditLocationOptions);
 router.get("/", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAllAudits);
 router.get("/:id", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAuditById);
 router.post("/", authMiddleware_1.authenticateToken, asset_audit_controller_1.createAudit);

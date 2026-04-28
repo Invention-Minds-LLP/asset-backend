@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getExitByEmployee = exports.completeExit = exports.returnAsset = exports.initiateExit = exports.getExitById = exports.getAllExits = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 function mustUser(req) {
     const u = req.user;
     if (!(u === null || u === void 0 ? void 0 : u.employeeDbId))
@@ -75,7 +76,7 @@ const getExitById = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
         const exit = yield prismaClient_1.default.employeeExit.findUnique({
             where: { id: Number(req.params.id) },
             include: {
-                employee: { select: { id: true, name: true, employeeId: true, designation: true, departmentId: true } },
+                employee: { select: { id: true, name: true, employeeID: true, designation: true, departmentId: true } },
                 handledBy: { select: { id: true, name: true } },
                 handoverItems: {
                     include: {
@@ -132,6 +133,25 @@ const initiateExit = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 handoverItems: true,
             },
         });
+        // Fetch employee info for notification
+        const employee = yield prismaClient_1.default.employee.findUnique({
+            where: { id: Number(employeeId) },
+            select: { id: true, name: true, departmentId: true },
+        });
+        // Notify the employee being offboarded + their dept HOD about pending asset handover
+        if (employee) {
+            const notifyIds = [employee.id];
+            const hodIds = yield (0, notificationHelper_1.getDepartmentHODs)(employee.departmentId);
+            const allIds = [...new Set([...notifyIds, ...hodIds])];
+            (0, notificationHelper_1.notify)({
+                type: "OTHER",
+                title: "Employee Exit Initiated",
+                message: `Exit process initiated for ${employee.name}. ${assignedAssets.length} asset(s) pending handover before ${new Date(exitDate).toLocaleDateString()}`,
+                recipientIds: allIds,
+                priority: "HIGH",
+                createdById: user.employeeDbId,
+            }).catch(() => { });
+        }
         res.status(201).json(exit);
     }
     catch (e) {
@@ -210,6 +230,18 @@ const completeExit = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             where: { id: exitId },
             data: { status: "COMPLETED" },
         });
+        // Notify admins about exit completion (for write-off / asset reconciliation)
+        const adminIds = yield (0, notificationHelper_1.getAdminIds)();
+        if (adminIds.length > 0) {
+            (0, notificationHelper_1.notify)({
+                type: "OTHER",
+                title: "Employee Exit Completed",
+                message: `Exit record ${exit.exitNumber} marked as completed${exit.assetsPending > 0 ? ` with ${exit.assetsPending} asset(s) still pending handover` : ""}`,
+                recipientIds: adminIds,
+                priority: exit.assetsPending > 0 ? "HIGH" : "MEDIUM",
+                createdById: user.employeeDbId,
+            }).catch(() => { });
+        }
         res.json(updated);
     }
     catch (e) {

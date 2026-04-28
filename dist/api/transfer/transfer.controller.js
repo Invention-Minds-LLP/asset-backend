@@ -18,6 +18,8 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
 const client_1 = require("@prisma/client");
+const audit_trail_controller_1 = require("../audit-trail/audit-trail.controller");
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439", // Your FTP username
@@ -32,7 +34,7 @@ function toDateOrNull(value) {
 }
 // POST /assets/transfer/request
 const requestAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e;
     try {
         const { assetId, transferType, externalType, toBranchId, block, floor, room, destinationType, destinationName, destinationAddress, destinationContactPerson, destinationContactNumber, temporary, expiresAt, reason } = req.body;
         if (!assetId || !transferType) {
@@ -80,6 +82,10 @@ const requestAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fun
                 requestedBy: true
             }
         });
+        (0, audit_trail_controller_1.logAction)({ entityType: "TRANSFER", entityId: transfer.id, action: "CREATE", description: `Transfer request for asset #${assetId} (${transferType})`, performedById: (_d = req.user) === null || _d === void 0 ? void 0 : _d.employeeDbId });
+        // Notify HODs about transfer request
+        const hodIds = yield (0, notificationHelper_1.getDepartmentHODs)(asset.departmentId);
+        (0, notificationHelper_1.notify)({ type: "TRANSFER", title: "Transfer Request", message: `Asset transfer requested for ${asset.assetName || asset.assetId} (${transferType})`, recipientIds: hodIds, assetId: asset.id, createdById: (_e = req.user) === null || _e === void 0 ? void 0 : _e.employeeDbId, channel: "BOTH", templateCode: "TRANSFER_REQUEST", templateData: { assetName: asset.assetName || asset.assetId, transferType } });
         res.status(201).json({
             message: "Transfer request submitted",
             transfer
@@ -93,7 +99,7 @@ const requestAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fun
 exports.requestAssetTransfer = requestAssetTransfer;
 // POST /assets/transfer/:id/approve
 const approveAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a;
+    var _a, _b;
     try {
         const transferId = Number(req.params.id);
         const { approvalReason } = req.body;
@@ -197,6 +203,10 @@ const approveAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fun
             }
             return { updatedTransfer, newLocation, gatePass };
         }));
+        (0, audit_trail_controller_1.logAction)({ entityType: "TRANSFER", entityId: transferId, action: "APPROVE", description: `Transfer #${transferId} approved for asset #${transfer.assetId}`, performedById: (_b = req.user) === null || _b === void 0 ? void 0 : _b.employeeDbId });
+        // Notify requester that transfer is approved
+        if (transfer.requestedById)
+            (0, notificationHelper_1.notify)({ type: "TRANSFER", title: "Transfer Approved", message: `Transfer for asset ${asset.assetId} — ${asset.assetName} has been approved`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
         res.json(Object.assign({ message: "Transfer approved successfully" }, result));
     }
     catch (err) {
@@ -207,7 +217,7 @@ const approveAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, fun
 exports.approveAssetTransfer = approveAssetTransfer;
 // POST /assets/transfer/:id/reject
 const rejectAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     try {
         const transferId = Number(req.params.id);
         const { rejectionReason } = req.body;
@@ -243,6 +253,10 @@ const rejectAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, func
                 approvedBy: true
             }
         });
+        (0, audit_trail_controller_1.logAction)({ entityType: "TRANSFER", entityId: transferId, action: "STATUS_CHANGE", description: `Transfer #${transferId} rejected`, performedById: (_d = req.user) === null || _d === void 0 ? void 0 : _d.employeeDbId });
+        // Notify requester that transfer is rejected
+        if (transfer.requestedById)
+            (0, notificationHelper_1.notify)({ type: "TRANSFER", title: "Transfer Rejected", message: `Transfer for asset ${asset.assetId} — ${asset.assetName} has been rejected`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
         res.json({
             message: "Transfer rejected",
             transfer: updated
@@ -256,7 +270,7 @@ const rejectAssetTransfer = (req, res) => __awaiter(void 0, void 0, void 0, func
 exports.rejectAssetTransfer = rejectAssetTransfer;
 // POST /assets/transfer/:id/return
 const returnTransferredAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     try {
         const transferId = Number(req.params.id);
         const { returnReason } = req.body;
@@ -362,6 +376,12 @@ const returnTransferredAsset = (req, res) => __awaiter(void 0, void 0, void 0, f
                 approvedBy: true
             }
         });
+        // Notify HOD of asset's department about the return
+        const { asset: retAsset } = yield getAssetDepartmentHod(originalTransfer.assetId);
+        const retHodIds = yield (0, notificationHelper_1.getDepartmentHODs)(retAsset.departmentId);
+        if (retHodIds.length > 0) {
+            (0, notificationHelper_1.notify)({ type: "OTHER", title: "Asset Returned", message: `Asset ${retAsset.assetId} — ${retAsset.assetName} has been returned${returnReason ? `. Reason: ${returnReason}` : ""}`, recipientIds: retHodIds, assetId: originalTransfer.assetId, createdById: (_d = req.user) === null || _d === void 0 ? void 0 : _d.employeeDbId });
+        }
         res.json({
             message: "Asset returned successfully",
             returnEntry,
@@ -617,7 +637,7 @@ function getAssetDepartmentHod(assetId) {
     return __awaiter(this, void 0, void 0, function* () {
         const asset = yield prismaClient_1.default.asset.findUnique({
             where: { id: assetId },
-            select: { id: true, departmentId: true }
+            select: { id: true, departmentId: true, assetId: true, assetName: true }
         });
         if (!asset) {
             throw new Error("Asset not found");
@@ -638,7 +658,7 @@ function getAssetDepartmentHod(assetId) {
     });
 }
 const completeTransferredAssetReturn = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     try {
         const returnTransferId = Number(req.params.id);
         const returnNote = req.body.returnNote;
@@ -651,7 +671,7 @@ const completeTransferredAssetReturn = (req, res) => __awaiter(void 0, void 0, v
                 return;
             }
         }
-        catch (_d) {
+        catch (_e) {
             res.status(400).json({ message: "Invalid checklist format" });
             return;
         }
@@ -817,6 +837,7 @@ const completeTransferredAssetReturn = (req, res) => __awaiter(void 0, void 0, v
                 }
             });
         }
+        (0, audit_trail_controller_1.logAction)({ entityType: "TRANSFER", entityId: returnTransferId, action: "STATUS_CHANGE", description: `Transfer return #${returnTransferId} completed for asset #${returnRequest.assetId}`, performedById: (_d = req.user) === null || _d === void 0 ? void 0 : _d.employeeDbId });
         res.json({
             message: "Asset return completed with checklist",
             completedReturn,

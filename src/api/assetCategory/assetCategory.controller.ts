@@ -40,20 +40,42 @@ export const getAllCategories = async (req: Request, res: Response) => {
   }
 };
 
+// Allowed fields for create/update — prevents Prisma errors from extra fields
+function pickCategoryFields(body: any) {
+  return {
+    name: body.name?.trim(),
+    code: body.code?.trim() || null,
+    description: body.description ?? null,
+    serialRequired: body.serialRequired === undefined ? true : Boolean(body.serialRequired),
+    defaultDepreciationMethod: body.defaultDepreciationMethod || null,
+    defaultDepreciationRate: body.defaultDepreciationRate != null && body.defaultDepreciationRate !== ''
+      ? Number(body.defaultDepreciationRate) : null,
+    defaultLifeYears: body.defaultLifeYears != null && body.defaultLifeYears !== ''
+      ? Number(body.defaultLifeYears) : null,
+  };
+}
+
 export const createCategory = async (req: Request, res: Response) => {
-  const category = await prisma.assetCategory.create({ data: req.body });
-   res.status(201).json(category);
+  try {
+    const data = pickCategoryFields(req.body);
+    if (!data.name) { res.status(400).json({ message: "Category name is required" }); return; }
+    const category = await prisma.assetCategory.create({ data: data as any });
+    res.status(201).json(category);
+  } catch (error: any) {
+    console.error("createCategory error:", error);
+    res.status(500).json({ message: error.message || "Failed to create category" });
+  }
 };
 
 export const updateCategory = async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id);
-    const { name } = req.body;
-    if (!name?.trim()) {
+    const data = pickCategoryFields(req.body);
+    if (!data.name) {
       res.status(400).json({ message: "Category name is required" });
       return;
     }
-    const updated = await prisma.assetCategory.update({ where: { id }, data: { name: name.trim() } });
+    const updated = await prisma.assetCategory.update({ where: { id }, data: data as any });
     res.json(updated);
   } catch (error) {
     console.error("updateCategory error:", error);

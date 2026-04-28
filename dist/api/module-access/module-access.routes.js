@@ -9,6 +9,7 @@ const module_access_controller_1 = require("./module-access.controller");
 const router = express_1.default.Router();
 // Seed (one-time setup)
 router.post("/seed", authMiddleware_1.authenticateToken, module_access_controller_1.seedDefaultModules);
+router.post("/reset-and-reseed", authMiddleware_1.authenticateToken, module_access_controller_1.resetAndReseed);
 // App Modules CRUD
 router.get("/modules", authMiddleware_1.authenticateToken, module_access_controller_1.getAllModules);
 router.post("/modules", authMiddleware_1.authenticateToken, module_access_controller_1.createModule);

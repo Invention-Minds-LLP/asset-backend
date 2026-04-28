@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.cancelIndent = exports.fulfillIndent = exports.managementApproveIndent = exports.hodApproveIndent = exports.createIndent = exports.getIndentById = exports.getAllIndents = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 function mustUser(req) {
     const u = req.user;
     if (!(u === null || u === void 0 ? void 0 : u.employeeDbId))
@@ -58,7 +59,7 @@ const getAllIndents = (req, res) => __awaiter(void 0, void 0, void 0, function* 
         const indents = yield prismaClient_1.default.assetIndent.findMany({
             where,
             include: {
-                raisedBy: { select: { id: true, name: true, employeeId: true } },
+                raisedBy: { select: { id: true, name: true, employeeID: true } },
                 department: { select: { id: true, name: true } },
                 assetCategory: { select: { id: true, name: true } },
                 hodApprovedBy: { select: { id: true, name: true } },
@@ -79,7 +80,7 @@ const getIndentById = (req, res) => __awaiter(void 0, void 0, void 0, function* 
         const indent = yield prismaClient_1.default.assetIndent.findUnique({
             where: { id: Number(req.params.id) },
             include: {
-                raisedBy: { select: { id: true, name: true, employeeId: true, designation: true } },
+                raisedBy: { select: { id: true, name: true, employeeID: true, designation: true } },
                 department: { select: { id: true, name: true } },
                 assetCategory: { select: { id: true, name: true } },
                 hodApprovedBy: { select: { id: true, name: true } },
@@ -129,6 +130,15 @@ const createIndent = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 hodApprovalStatus: "PENDING",
             },
         });
+        // Fire-and-forget: notify department HODs about new indent
+        (0, notificationHelper_1.getDepartmentHODs)(deptId).then(hodIds => (0, notificationHelper_1.notify)({
+            type: "OTHER",
+            title: `New Asset Indent ${indentNumber}`,
+            message: `Asset indent for "${assetName}" requires HOD approval`,
+            recipientIds: hodIds,
+            priority: urgency === "URGENT" ? "HIGH" : "MEDIUM",
+            createdById: user.employeeDbId,
+        })).catch(() => { });
         // Notify department HOD
         const hod = yield prismaClient_1.default.employee.findFirst({
             where: { departmentId: deptId, role: "HOD" },
@@ -187,6 +197,29 @@ const hodApproveIndent = (req, res) => __awaiter(void 0, void 0, void 0, functio
                 managementApprovalStatus: decision === "APPROVED" ? "PENDING" : null,
             },
         });
+        // Fire-and-forget: notify raiser about HOD decision
+        (0, notificationHelper_1.notify)({
+            type: "OTHER",
+            title: `Indent ${indent.indentNumber} ${decision === "APPROVED" ? "Approved" : "Rejected"} by HOD`,
+            message: remarks || (decision === "APPROVED" ? "Indent forwarded for management review" : "Indent rejected"),
+            recipientIds: [indent.raisedById],
+            priority: "MEDIUM",
+            createdById: user.employeeDbId,
+            channel: "BOTH",
+            templateCode: decision === "APPROVED" ? "INDENT_APPROVED" : "INDENT_REJECTED",
+            templateData: { indentNumber: indent.indentNumber, assetName: indent.assetName || '', reason: remarks || '' },
+        }).catch(() => { });
+        // Fire-and-forget: if HOD approved, notify admins for management approval
+        if (decision === "APPROVED") {
+            (0, notificationHelper_1.getAdminIds)().then(adminIds => (0, notificationHelper_1.notify)({
+                type: "OTHER",
+                title: `Indent ${indent.indentNumber} Awaiting Management Approval`,
+                message: `Asset indent for "${indent.assetName}" approved by HOD, pending management approval`,
+                recipientIds: adminIds,
+                priority: "MEDIUM",
+                createdById: user.employeeDbId,
+            })).catch(() => { });
+        }
         // Notify raiser
         const notif = yield prismaClient_1.default.notification.create({
             data: {
@@ -234,6 +267,18 @@ const managementApproveIndent = (req, res) => __awaiter(void 0, void 0, void 0, 
                 status: decision === "APPROVED" ? "MANAGEMENT_APPROVED" : "REJECTED",
             },
         });
+        // Fire-and-forget: notify raiser about management decision
+        (0, notificationHelper_1.notify)({
+            type: "OTHER",
+            title: `Indent ${indent.indentNumber} ${decision === "APPROVED" ? "Management Approved" : "Rejected"}`,
+            message: remarks || `Management has ${decision === "APPROVED" ? "approved" : "rejected"} your indent`,
+            recipientIds: [indent.raisedById],
+            priority: "MEDIUM",
+            createdById: user.employeeDbId,
+            channel: "BOTH",
+            templateCode: decision === "APPROVED" ? "INDENT_APPROVED" : "INDENT_REJECTED",
+            templateData: { indentNumber: indent.indentNumber, assetName: indent.assetName || '', reason: remarks || '' },
+        }).catch(() => { });
         // Notify raiser
         const notif = yield prismaClient_1.default.notification.create({
             data: {
@@ -321,6 +366,17 @@ const cancelIndent = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             where: { id: indentId },
             data: { status: "CANCELLED" },
         });
+        // Notify HOD about cancellation
+        if (indent.departmentId) {
+            (0, notificationHelper_1.getDepartmentHODs)(indent.departmentId).then(hodIds => (0, notificationHelper_1.notify)({
+                type: "OTHER",
+                title: `Indent ${indent.indentNumber} Cancelled`,
+                message: `Asset indent for "${indent.assetName}" has been cancelled by the raiser`,
+                recipientIds: hodIds,
+                priority: "MEDIUM",
+                createdById: user.employeeDbId,
+            })).catch(() => { });
+        }
         res.json(updated);
     }
     catch (e) {

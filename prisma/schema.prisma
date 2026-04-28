@@ -110,6 +110,9 @@ enum AcknowledgementPurpose {
 model Asset {
   id                Int           @id @default(autoincrement())
   assetId           String        @unique
+  // Permanent stores reference. Format: STR-{ORG}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
+  // Generated when stores user fills basic details, never overwritten.
+  storeAssetId      String?       @unique
   assetName         String
   assetType         String
   assetNature       AssetNature  @default(TANGIBLE)
@@ -123,7 +126,7 @@ model Asset {
 
   assetCategoryId   Int
   assetCategory     AssetCategory @relation(fields: [assetCategoryId], references: [id])
-  serialNumber      String        @unique
+  serialNumber      String?       @unique
   purchaseDate      DateTime?
   modeOfProcurement String        @default("PURCHASE") // PURCHASE | DONATION | LEASE | RENTAL 
 
@@ -636,6 +639,15 @@ model AssetCategory {
   code                          String?                        @unique
   description                   String?
   isActive                      Boolean                        @default(true)
+
+  // Whether assets in this category must have a serial number.
+  // Set false for non-serialized items (Office Equipment, Furniture, Stationery, etc.)
+  serialRequired                Boolean                        @default(true)
+
+  // Default depreciation config — auto-applied to imported / new assets when not specified
+  defaultDepreciationMethod     String?    // "SL" | "DB"
+  defaultDepreciationRate       Decimal?   @db.Decimal(5, 2)   // e.g. 15.00 for 15%
+  defaultLifeYears              Int?       // useful life in years (mainly for SL)
   assets                        Asset[]
   createdById                   Int?
   updatedById                   Int?

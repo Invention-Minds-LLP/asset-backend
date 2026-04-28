@@ -891,33 +891,35 @@ export const runBatchDepreciation = async (req: AuthenticatedRequest, res: Respo
         },
       });
 
-      // Create draft log entries linked to this batch run — with split breakdown
-      for (const e of eligible) {
-        await tx.depreciationLog.create({
-          data: {
-            assetId: e.assetDbId,
-            periodStart: e.periodStart,
-            periodEnd: e.periodEnd,
-            depreciationAmount: String(e.depreciationAmount.toFixed(2)),
-            bookValueAfter: String(e.newBookValue.toFixed(2)),
-            fyLabel: e.fyLabel ?? null,
-            openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
-            depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
-            depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
-            additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
-            effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
-            halfYearApplied: e.halfYearApplied ?? false,
-            isFirstFY: e.isFirstFY ?? false,
-            openingWdvSource: e.openingWdvSource ?? null,
-            doneById: employeeId,
-            reason: "BATCH_DRAFT",
-            batchRunId: run.id,
-          },
-        });
+      // Bulk-insert all draft log entries in one round-trip
+      const logRows = eligible.map(e => ({
+        assetId: e.assetDbId,
+        periodStart: e.periodStart,
+        periodEnd: e.periodEnd,
+        depreciationAmount: String(e.depreciationAmount.toFixed(2)),
+        bookValueAfter: String(e.newBookValue.toFixed(2)),
+        fyLabel: e.fyLabel ?? null,
+        openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
+        depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
+        depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
+        additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
+        effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
+        halfYearApplied: e.halfYearApplied ?? false,
+        isFirstFY: e.isFirstFY ?? false,
+        openingWdvSource: e.openingWdvSource ?? null,
+        doneById: employeeId,
+        reason: "BATCH_DRAFT",
+        batchRunId: run.id,
+      }));
+
+      // Chunk to keep the single SQL packet under MySQL's max_allowed_packet
+      const CHUNK = 500;
+      for (let i = 0; i < logRows.length; i += CHUNK) {
+        await tx.depreciationLog.createMany({ data: logRows.slice(i, i + CHUNK) });
       }
 
       return run;
-    });
+    }, { timeout: 60_000, maxWait: 10_000 });
 
     res.json({
       message: `Draft batch run created: ${runNumber}. Pending FINANCE approval to commit values.`,
@@ -1162,13 +1164,13 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
             updatedById: employeeId,
           },
         });
-
-        // Update log reason from DRAFT to BATCH_RUN
-        await tx.depreciationLog.update({
-          where: { id: log.id },
-          data: { reason: "BATCH_RUN" },
-        });
       }
+
+      // Bulk-flip log status DRAFT → BATCH_RUN in one query
+      await tx.depreciationLog.updateMany({
+        where: { batchRunId: runId },
+        data: { reason: "BATCH_RUN" },
+      });
 
       await tx.batchDepreciationRun.update({
         where: { id: runId },
@@ -1178,7 +1180,7 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
           approvedAt: new Date(),
         },
       });
-    });
+    }, { timeout: 120_000, maxWait: 10_000 });
 
     // Auto-voucher: DR Depreciation Expense / CR Accumulated Depreciation (per GL mappings)
     // We fire-and-forget — a missing GL mapping just skips the voucher gracefully
@@ -1349,5 +1351,145 @@ export const getDepreciationLogs = async (req: AuthenticatedRequest, res: Respon
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch depreciation logs" });
+  }
+};
+
+// ─── POST /depreciation/backfill-logs ────────────────────────────────────────
+// Generates DepreciationLog entries for all completed FYs between each asset's
+// depreciation start date and today. Idempotent — skips assets that already
+// have logs. Useful for assets imported before backfill was wired into import.
+//
+// Body (all optional):
+//   assetIds: number[]    — limit to specific asset IDs
+//   categoryId: number    — limit to one category
+//   resetExisting: boolean — if true, deletes existing logs first then re-generates
+//   dryRun: boolean       — calculate but don't persist (for preview)
+import { backfillHistoricalDepreciation } from "../../utilis/depreciationEngine";
+
+export const backfillDepreciationLogs = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { assetIds, categoryId, resetExisting, dryRun } = req.body ?? {};
+
+    const where: any = { isActive: true };
+    if (assetIds && Array.isArray(assetIds) && assetIds.length > 0) {
+      where.assetId = { in: assetIds.map((n: any) => Number(n)) };
+    }
+    if (categoryId) {
+      where.asset = { assetCategoryId: Number(categoryId) };
+    }
+
+    const depreciations = await prisma.assetDepreciation.findMany({
+      where,
+      include: {
+        asset: {
+          select: {
+            id: true, assetId: true, assetName: true,
+            purchaseCost: true, estimatedValue: true, purchaseDate: true,
+            isLegacyAsset: true, migrationMode: true, migrationDate: true,
+            originalPurchaseDate: true, originalCost: true,
+            accDepAtMigration: true, openingWdvAtMigration: true,
+            financialYearAdded: true, assetPoolId: true,
+          },
+        },
+      },
+    });
+
+    if (!depreciations.length) {
+      res.json({ message: "No matching assets found", processed: 0 });
+      return;
+    }
+
+    const employeeId = req.user?.employeeDbId ?? null;
+    const results: any[] = [];
+    let totalCreated = 0, totalSkipped = 0, totalErrors = 0;
+
+    for (const dep of depreciations) {
+      const a = dep.asset;
+      try {
+        // If resetExisting → wipe existing logs + reset cumulative values first
+        if (resetExisting && !dryRun) {
+          await prisma.depreciationLog.deleteMany({ where: { assetId: a.id } });
+          const cost = Number(a.purchaseCost ?? a.estimatedValue ?? 0);
+          await prisma.assetDepreciation.update({
+            where: { id: dep.id },
+            data: {
+              accumulatedDepreciation: "0",
+              currentBookValue: String(cost),
+              lastCalculatedAt: null,
+            } as any,
+          });
+        }
+
+        const cost = Number(a.purchaseCost ?? a.estimatedValue ?? 0);
+        const assetForDep: any = {
+          id: a.id,
+          assetId: a.assetId,
+          purchaseCost: cost,
+          estimatedValue: Number(a.estimatedValue ?? 0),
+          purchaseDate: a.purchaseDate,
+          installedAt: null,
+          isLegacyAsset: a.isLegacyAsset,
+          migrationMode: a.migrationMode,
+          migrationDate: a.migrationDate,
+          originalPurchaseDate: a.originalPurchaseDate,
+          originalCost: a.originalCost,
+          accDepAtMigration: a.accDepAtMigration,
+          openingWdvAtMigration: a.openingWdvAtMigration,
+          financialYearAdded: a.financialYearAdded,
+          assetPoolId: a.assetPoolId,
+        };
+        const cfg = {
+          method: dep.depreciationMethod,
+          rate: Number(dep.depreciationRate ?? 0),
+          lifeYears: dep.expectedLifeYears,
+          salvage: Number(dep.salvageValue ?? 0),
+          depreciationStart: dep.depreciationStart ? new Date(dep.depreciationStart) : new Date(),
+          frequency: dep.depreciationFrequency || "YEARLY",
+          roundOff: (dep as any).roundOff ?? false,
+          decimalPlaces: (dep as any).decimalPlaces ?? 2,
+        };
+
+        if (dryRun) {
+          // Just count what WOULD be created (don't persist)
+          const existingCount = await prisma.depreciationLog.count({ where: { assetId: a.id } });
+          results.push({
+            assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
+            existingLogs: existingCount,
+            wouldGenerate: "(dry run — actual count requires execution)",
+          });
+          continue;
+        }
+
+        const result = await backfillHistoricalDepreciation(a.id, dep.id, assetForDep, cfg, employeeId);
+        results.push({
+          assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
+          created: result.created, skipped: result.skipped, latestFy: result.latestFy,
+        });
+        totalCreated += result.created;
+        totalSkipped += result.skipped;
+      } catch (err: any) {
+        console.error(`Backfill failed for asset ${a.id}:`, err.message);
+        results.push({
+          assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
+          error: err.message,
+        });
+        totalErrors++;
+      }
+    }
+
+    res.json({
+      message: dryRun
+        ? `Dry run complete — ${depreciations.length} assets analysed`
+        : `Backfill complete — ${totalCreated} log(s) created, ${totalSkipped} asset(s) skipped (already had logs), ${totalErrors} error(s)`,
+      processed: depreciations.length,
+      totalLogsCreated: totalCreated,
+      totalSkipped,
+      totalErrors,
+      dryRun: !!dryRun,
+      details: results,
+    });
+  } catch (err: any) {
+    console.error("backfillDepreciationLogs error:", err);
+    res.status(500).json({ message: "Backfill failed", error: err.message });
   }
 };

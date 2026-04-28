@@ -1,0 +1,15 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../../middleware/authMiddleware");
+const payment_vouchers_controller_1 = require("./payment-vouchers.controller");
+const router = (0, express_1.Router)();
+router.use(authMiddleware_1.authenticateToken);
+router.get("/", payment_vouchers_controller_1.getAllPaymentVouchers);
+router.get("/:id", payment_vouchers_controller_1.getPaymentVoucherById);
+router.post("/", payment_vouchers_controller_1.createPaymentVoucher);
+router.put("/:id", payment_vouchers_controller_1.updatePaymentVoucher);
+router.patch("/:id/approve", payment_vouchers_controller_1.approvePaymentVoucher);
+router.patch("/:id/post", payment_vouchers_controller_1.postPaymentVoucher);
+router.patch("/:id/cancel", payment_vouchers_controller_1.cancelPaymentVoucher);
+exports.default = router;

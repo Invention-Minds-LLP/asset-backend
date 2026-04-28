@@ -8,6 +8,7 @@ const assets_controller_1 = require("./assets.controller");
 const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = express_1.default.Router();
 router.get("/", authMiddleware_1.authenticateToken, assets_controller_1.getAllAssets);
+router.get("/all-dropdown", authMiddleware_1.authenticateToken, assets_controller_1.getAllAssetsForDropdown);
 router.get('/:assetId', authMiddleware_1.authenticateToken, assets_controller_1.getAssetByAssetId);
 router.patch("/:id/assignment", authMiddleware_1.authenticateToken, assets_controller_1.updateAssetAssignment);
 router.get("/scan/:assetId", assets_controller_1.getAssetScanDetails);

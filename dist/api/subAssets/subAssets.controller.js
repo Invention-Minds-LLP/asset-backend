@@ -14,6 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.getSparePartOptions = exports.getReplacementHistory = exports.replaceSubAsset = exports.createSubAsset = exports.getParentOptions = exports.getAssetTree = exports.linkOrDetachParent = exports.getSubAssetsByAssetId = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+const assetIdGenerator_1 = require("../../utilis/assetIdGenerator");
 /**
  * GET /assets/:assetId/children
  * assetId = alphanumeric Asset.assetId (string)
@@ -539,6 +540,7 @@ function isDescendant(candidateParentId, childId) {
 // };
 const client_1 = require("@prisma/client");
 const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d;
     try {
         const { parentAssetId } = req.params;
         const { sourceType, sparePartId, quantity, assetName, assetType, assetCategoryId, serialNumber, referenceCode, modeOfProcurement, vendorId, departmentId, status, inheritFromParent, invoiceNumber, purchaseDate, purchaseOrderNo, purchaseOrderDate, purchaseCost, donorName, donationDate, assetCondition, estimatedValue, leaseStartDate, leaseEndDate, leaseAmount, rentalStartDate, rentalEndDate, rentalAmount, workingCondition, remarks, sourceReference } = req.body;
@@ -550,6 +552,7 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
             res.status(400).json({ message: "Missing required fields" });
             return;
         }
+        const { forceCreate, createAsStandalone } = req.body;
         const parent = yield prismaClient_1.default.asset.findUnique({
             where: { assetId: parentAssetId },
             select: {
@@ -557,10 +560,57 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 assetId: true,
                 vendorId: true,
                 departmentId: true,
+                purchaseCost: true,
+                estimatedValue: true,
             },
         });
         if (!parent) {
             res.status(404).json({ message: "Parent asset not found" });
+            return;
+        }
+        // ── 40% threshold check ────────────────────────────────────────────────────
+        if (!forceCreate && !createAsStandalone) {
+            const parentValue = Number((_b = (_a = parent.purchaseCost) !== null && _a !== void 0 ? _a : parent.estimatedValue) !== null && _b !== void 0 ? _b : 0);
+            const subValue = Number((_d = (_c = req.body.purchaseCost) !== null && _c !== void 0 ? _c : req.body.estimatedValue) !== null && _d !== void 0 ? _d : 0);
+            if (parentValue > 0 && subValue > 0) {
+                const pct = (subValue / parentValue) * 100;
+                if (pct >= 40) {
+                    res.status(422).json({
+                        thresholdWarning: true,
+                        message: `Sub-asset value (₹${subValue.toLocaleString()}) is ${pct.toFixed(1)}% of the parent asset value (₹${parentValue.toLocaleString()}), which exceeds the 40% threshold. Consider creating it as a standalone Functional Asset.`,
+                        parentValue,
+                        subAssetValue: subValue,
+                        percentage: Math.round(pct * 10) / 10,
+                    });
+                    return;
+                }
+            }
+        }
+        // If user chose standalone, create without parentAssetId
+        if (createAsStandalone) {
+            const standaloneId = yield (0, assetIdGenerator_1.generateAssetId)(undefined, undefined, { categoryId: Number(assetCategoryId) });
+            const standaloneChild = yield prismaClient_1.default.asset.create({
+                data: {
+                    assetId: standaloneId,
+                    assetName,
+                    assetType,
+                    assetCategoryId: Number(assetCategoryId),
+                    serialNumber,
+                    referenceCode: req.body.referenceCode || null,
+                    sourceType: sourceType || "NEW",
+                    remarks: req.body.remarks || null,
+                    modeOfProcurement: req.body.modeOfProcurement || "PURCHASE",
+                    status,
+                    vendorId: req.body.vendorId != null ? Number(req.body.vendorId) : parent.vendorId,
+                    departmentId: req.body.departmentId != null ? Number(req.body.departmentId) : parent.departmentId,
+                    invoiceNumber: req.body.invoiceNumber || null,
+                    purchaseDate: req.body.purchaseDate ? new Date(req.body.purchaseDate) : null,
+                    purchaseCost: req.body.purchaseCost != null ? Number(req.body.purchaseCost) : null,
+                    estimatedValue: req.body.estimatedValue != null ? Number(req.body.estimatedValue) : null,
+                    workingCondition: req.body.workingCondition || null,
+                },
+            });
+            res.status(201).json(Object.assign(Object.assign({}, standaloneChild), { createdAsStandalone: true }));
             return;
         }
         const useInherit = inheritFromParent !== false;
@@ -985,29 +1035,6 @@ const getSparePartOptions = (req, res) => __awaiter(void 0, void 0, void 0, func
 exports.getSparePartOptions = getSparePartOptions;
 function generateSubAssetId(parentAsset) {
     return __awaiter(this, void 0, void 0, function* () {
-        const existingSubAssets = yield prismaClient_1.default.asset.findMany({
-            where: {
-                parentAssetId: parentAsset.id
-            },
-            select: {
-                assetId: true
-            }
-        });
-        let maxSeq = 0;
-        const prefix = `${parentAsset.assetId}-`;
-        for (const item of existingSubAssets) {
-            // only consider IDs that actually belong to this parent's generated sub-asset series
-            if (!item.assetId.startsWith(prefix))
-                continue;
-            const suffix = item.assetId.slice(prefix.length);
-            // only accept exact 3-digit suffix like 001, 002
-            if (/^\d{3}$/.test(suffix)) {
-                const num = Number(suffix);
-                if (num > maxSeq)
-                    maxSeq = num;
-            }
-        }
-        const next = String(maxSeq + 1).padStart(3, "0");
-        return `${parentAsset.assetId}-${next}`;
+        return (0, assetIdGenerator_1.generateSubAssetId)(parentAsset.assetId, parentAsset.id);
     });
 }
