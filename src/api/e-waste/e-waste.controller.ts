@@ -175,13 +175,20 @@ export const securitySign = async (req: AuthenticatedRequest, res: Response) => 
   try {
     const user = (req as any).user;
     const id = Number(req.params.id);
-    const { signature, remarks, gatePassNo } = req.body;
+    const { signature, remarks, gatePassNo, gatePassId } = req.body;
 
     if (!signature) { res.status(400).json({ message: "Signature is required" }); return; }
 
     const record = await prisma.eWasteRecord.findUnique({ where: { id } });
     if (!record) { res.status(404).json({ message: "Record not found" }); return; }
     if (record.status !== "PENDING_SECURITY") { res.status(400).json({ message: `Cannot sign at Security stage — current status is ${record.status}` }); return; }
+
+    // Resolve gate pass FK: explicit id wins; otherwise look up by number.
+    let resolvedGatePassId: number | null = gatePassId ? Number(gatePassId) : null;
+    if (!resolvedGatePassId && gatePassNo) {
+      const gp = await prisma.gatePass.findUnique({ where: { gatePassNo: String(gatePassNo) }, select: { id: true } });
+      resolvedGatePassId = gp?.id ?? null;
+    }
 
     const updated = await prisma.eWasteRecord.update({
       where: { id },
@@ -192,6 +199,7 @@ export const securitySign = async (req: AuthenticatedRequest, res: Response) => 
         securitySignature: signature,
         securityRemarks: remarks || null,
         gatePassNo: gatePassNo || null,
+        gatePassId: resolvedGatePassId,
         closedAt: new Date(),
       },
       include: fullInclude,

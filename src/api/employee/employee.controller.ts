@@ -109,16 +109,36 @@ export const getEmployeeAssets = async (req: Request, res: Response) => {
       return;
     }
 
+    // Show assets where the employee is either the allottee OR the supervisor.
+    // Supervisor-only inclusion matters when an asset has no end-user (allottedToId is null)
+    // — the supervisor still needs visibility for revenue logging, handover, status updates, etc.
     const assets = await prisma.asset.findMany({
-      where: { allottedToId: empId, status: { notIn: ["DISPOSED", "CONDEMNED"] } },
+      where: {
+        AND: [
+          { status: { notIn: ["DISPOSED", "CONDEMNED"] } },
+          { OR: [{ allottedToId: empId }, { supervisorId: empId }] },
+        ],
+      },
       include: {
         assetCategory: { select: { id: true, name: true } },
-        department: { select: { id: true, name: true } },
+        department:    { select: { id: true, name: true } },
+        allottedTo:    { select: { id: true, name: true, employeeID: true } },
+        supervisor:    { select: { id: true, name: true, employeeID: true } },
       },
       orderBy: { assetName: "asc" },
     });
 
-    res.json({ employee, totalAssets: assets.length, assets });
+    // Tag each row with the employee's relationship to the asset so the UI can show it.
+    const tagged = assets.map(a => ({
+      ...a,
+      myRole: a.allottedToId === empId
+        ? "ALLOTTEE"
+        : a.supervisorId === empId
+          ? "SUPERVISOR"
+          : "OTHER",
+    }));
+
+    res.json({ employee, totalAssets: tagged.length, assets: tagged });
   } catch (e: any) {
     res.status(500).json({ message: e.message || "Failed to fetch employee assets" });
   }

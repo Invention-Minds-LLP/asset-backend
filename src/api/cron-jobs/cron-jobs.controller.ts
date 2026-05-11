@@ -300,6 +300,106 @@ export const checkAssetActivation = async (_req: Request, res: Response) => {
   }
 };
 
+// ─── Check Gate Pass Overdue ─────────────────────────────────────────────────
+// Finds RETURNABLE passes that are ISSUED but past their expectedReturnDate, and
+// notifies the requester + their HOD + the security team. Uses a per-day dedupeKey
+// so the same pass can re-alert daily until it's returned (without spamming).
+export const checkGatePassOverdue = async (_req: Request, res: Response) => {
+  try {
+    const result = await runGatePassOverdueCheck();
+    res.json({ message: `${result.alerted} overdue gate pass alert(s) sent`, ...result });
+  } catch (error) {
+    console.error("checkGatePassOverdue error:", error);
+    res.status(500).json({ message: "Failed to check overdue gate passes" });
+  }
+};
+
+async function runGatePassOverdueCheck() {
+  const now = new Date();
+  const today = now.toISOString().split("T")[0]; // per-day dedupe
+
+  const overdue = await prisma.gatePass.findMany({
+    where: {
+      type: "RETURNABLE",
+      status: "ISSUED",
+      expectedReturnDate: { lt: now },
+    },
+    include: {
+      requestedBy: { select: { id: true, name: true, departmentId: true, email: true } },
+      items: { include: { asset: { select: { assetId: true, assetName: true } } } },
+    },
+  });
+
+  // Resolve security team once for this run
+  const securityUsers = await prisma.user.findMany({
+    where: { role: "SECURITY" },
+    select: { employee: { select: { id: true, email: true } } },
+  });
+  const securityIds = securityUsers.map(u => u.employee?.id).filter(Boolean) as number[];
+
+  let alerted = 0;
+
+  for (const gp of overdue) {
+    const daysOverdue = Math.ceil((now.getTime() - new Date(gp.expectedReturnDate!).getTime()) / (1000 * 60 * 60 * 24));
+    const priority = daysOverdue > 7 ? "HIGH" : "MEDIUM";
+
+    // Build recipient list: requester + their HOD + security team
+    const recipients = new Set<number>();
+    if (gp.requestedById) recipients.add(gp.requestedById);
+    if (gp.requestedBy?.departmentId) {
+      const hods = await prisma.employee.findMany({
+        where: { departmentId: gp.requestedBy.departmentId, role: "HOD", isActive: true },
+        select: { id: true },
+      });
+      hods.forEach(h => recipients.add(h.id));
+    }
+    securityIds.forEach(id => recipients.add(id));
+    if (recipients.size === 0) continue;
+
+    const itemSummary = gp.items.length
+      ? `${gp.items[0].asset?.assetName || "asset"}${gp.items.length > 1 ? ` +${gp.items.length - 1} more` : ""}`
+      : "asset(s)";
+
+    // dedupeKey changes daily so the alert reposts each day until the pass is returned
+    try {
+      const notif = await prisma.notification.create({
+        data: {
+          type: "GATEPASS_OVERDUE",
+          title: `Gate Pass Overdue · ${daysOverdue} day${daysOverdue > 1 ? "s" : ""}`,
+          message: `${gp.gatePassNo} (${itemSummary}) was due on ${new Date(gp.expectedReturnDate!).toLocaleDateString("en-IN")} — issued to ${gp.issuedTo}.`,
+          priority,
+          gatePassId: gp.id,
+          dedupeKey: `gatepass-overdue-${gp.id}-${today}`,
+          recipients: { create: Array.from(recipients).map(id => ({ employeeId: id })) },
+        },
+      });
+      // Email security team for high-priority breaches
+      if (priority === "HIGH") {
+        const secEmails = securityUsers.map(u => u.employee?.email).filter(Boolean) as string[];
+        for (const email of secEmails) {
+          await sendAlertEmail(
+            email,
+            `Gate Pass Overdue: ${gp.gatePassNo}`,
+            `<p>Gate pass <strong>${gp.gatePassNo}</strong> is <strong>${daysOverdue} days overdue</strong>.</p>
+             <p>Issued to: ${gp.issuedTo}<br>Expected return: ${new Date(gp.expectedReturnDate!).toLocaleDateString("en-IN")}<br>Items: ${itemSummary}</p>`
+          );
+        }
+      }
+      void notif;
+      alerted++;
+    } catch (err: any) {
+      // Unique-violation on dedupeKey just means we already alerted today — skip silently
+      if (err?.code !== "P2002") console.error("checkGatePassOverdue insert failed:", err);
+    }
+  }
+
+  return { type: "gate-pass-overdue", overdueCount: overdue.length, alerted };
+}
+
+async function checkGatePassOverdueInternal() {
+  return runGatePassOverdueCheck();
+}
+
 // ─── Run All Checks (single endpoint for cron) ──────────────────────────────
 export const runAllChecks = async (req: Request, res: Response) => {
   try {
@@ -312,6 +412,7 @@ export const runAllChecks = async (req: Request, res: Response) => {
     try { results.maintenanceSla = await checkMaintenanceSLABreachInternal(); } catch (e) { results.maintenanceSla = { error: true }; }
     try { results.contract = await checkContractExpiryInternal(); } catch (e) { results.contract = { error: true }; }
     try { results.assetActivation = await checkAssetActivationInternal(); } catch (e) { results.assetActivation = { error: true }; }
+    try { results.gatePassOverdue = await checkGatePassOverdueInternal(); } catch (e) { results.gatePassOverdue = { error: true }; }
 
     res.json({ message: "All checks completed", results });
   } catch (error) {

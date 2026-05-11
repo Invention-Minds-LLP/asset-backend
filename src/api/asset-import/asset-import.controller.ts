@@ -177,6 +177,31 @@ export async function importAssetsExcel(req: Request, res: Response) {
     try {
         const workbook = XLSX.readFile(file.path);
 
+        // Required sheet — fail fast with a clear message if absent
+        if (!workbook.Sheets['Assets']) {
+            try { fs.unlinkSync(file.path); } catch {}
+            res.status(400).json({
+                message: 'Workbook is missing the required "Assets" sheet. Download the template and try again.',
+                foundSheets: workbook.SheetNames,
+            });
+            return;
+        }
+
+        // Validate Assets sheet has at least the required columns
+        const requiredAssetCols = ['assetName', 'assetType', 'assetCategory'];
+        const headerRow = XLSX.utils.sheet_to_json<any[]>(workbook.Sheets['Assets'], { header: 1, defval: '' })[0] ?? [];
+        const presentCols = headerRow.map((h: any) => String(h ?? '').trim().toLowerCase());
+        const missingCols = requiredAssetCols.filter(r => !presentCols.includes(r.toLowerCase()));
+        if (missingCols.length > 0) {
+            try { fs.unlinkSync(file.path); } catch {}
+            res.status(400).json({
+                message: `"Assets" sheet is missing required column(s): ${missingCols.join(', ')}. Download the template to see the expected layout.`,
+                missingColumns: missingCols,
+                foundColumns: headerRow,
+            });
+            return;
+        }
+
         const readSheet = (name: string) =>
             workbook.Sheets[name]
                 ? XLSX.utils.sheet_to_json<any>(workbook.Sheets[name], { defval: '' })
@@ -1369,6 +1394,24 @@ export async function importChecklistWorkbook(req: Request, res: Response) {
     try {
         const workbook = XLSX.readFile(file.path);
 
+        // Need at least one of the recognised sheets
+        const expectedSheets = [
+            'AssetAcknowledgementTemplates',
+            'PMChecklistTemplates',
+            'CalibrationChecklistTemplates',
+            'AssetSupportMatrix',
+        ];
+        const presentExpected = expectedSheets.filter(s => !!workbook.Sheets[s]);
+        if (presentExpected.length === 0) {
+            try { fs.unlinkSync(file.path); } catch {}
+            res.status(400).json({
+                message: 'Workbook does not contain any recognised checklist sheets. Download the template to see the expected sheet names.',
+                expectedAnyOf: expectedSheets,
+                foundSheets: workbook.SheetNames,
+            });
+            return;
+        }
+
         const readSheet = (name: string) =>
             workbook.Sheets[name]
                 ? XLSX.utils.sheet_to_json<any>(workbook.Sheets[name], { defval: '' })
@@ -1874,5 +1917,116 @@ export const downloadLegacyTemplate = (req: Request, res: Response) => {
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=legacy-asset-import-template.xlsx');
+    res.send(buffer);
+};
+
+// ─── Download Checklist Workbook Template ────────────────────────────────────
+export const downloadChecklistTemplate = (_req: Request, res: Response) => {
+    const wb = XLSX.utils.book_new();
+
+    // Sheet 1: AssetAcknowledgementTemplates
+    const ackHeaders = [
+        'templateName', 'description', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'sortOrder', 'isRequired',
+    ];
+    const ackExample = [{
+        templateName: 'IT Asset Handover',
+        description: 'Acknowledgement form for IT assets handed to employees',
+        assetCategory: 'Computer',
+        referenceCode: '',
+        isActive: 'true',
+        itemTitle: 'Asset received in working condition',
+        itemDescription: 'Confirm that the asset powers on and all peripherals are intact',
+        sortOrder: 1,
+        isRequired: 'true',
+    }];
+    const ackWs = XLSX.utils.json_to_sheet(ackExample, { header: ackHeaders });
+    ackWs['!cols'] = ackHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, ackWs, 'AssetAcknowledgementTemplates');
+
+    // Sheet 2: PMChecklistTemplates
+    const pmHeaders = [
+        'templateName', 'description', 'pmFormatCode', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'itemType', 'expectedValue', 'unit', 'sortOrder', 'isRequired',
+    ];
+    const pmExample = [{
+        templateName: 'Quarterly PM - HVAC',
+        description: 'Standard preventive maintenance for HVAC units',
+        pmFormatCode: 'PM-HVAC-Q1',
+        assetCategory: 'HVAC',
+        referenceCode: '',
+        isActive: 'true',
+        itemTitle: 'Filter inspection',
+        itemDescription: 'Check air filter for dust/clog and replace if needed',
+        itemType: 'CHECKBOX',
+        expectedValue: 'Clean',
+        unit: '',
+        sortOrder: 1,
+        isRequired: 'true',
+    }];
+    const pmWs = XLSX.utils.json_to_sheet(pmExample, { header: pmHeaders });
+    pmWs['!cols'] = pmHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, pmWs, 'PMChecklistTemplates');
+
+    // Sheet 3: CalibrationChecklistTemplates
+    const calHeaders = [
+        'templateName', 'description', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'expectedValue', 'unit', 'sortOrder', 'isRequired',
+    ];
+    const calExample = [{
+        templateName: 'Annual Calibration - Pressure Gauges',
+        description: 'Yearly accuracy check for all pressure gauges',
+        assetCategory: 'Medical Equipment',
+        referenceCode: '',
+        isActive: 'true',
+        itemTitle: 'Zero point reading',
+        itemDescription: 'Verify gauge reads zero with no applied pressure',
+        expectedValue: '0',
+        unit: 'PSI',
+        sortOrder: 1,
+        isRequired: 'true',
+    }];
+    const calWs = XLSX.utils.json_to_sheet(calExample, { header: calHeaders });
+    calWs['!cols'] = calHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, calWs, 'CalibrationChecklistTemplates');
+
+    // Sheet 4: AssetSupportMatrix
+    const supHeaders = [
+        'assetCategory', 'referenceCode', 'levelNo', 'roleName', 'personName',
+        'employeeCode', 'contactNumber', 'email', 'escalationTime', 'escalationUnit', 'notes',
+    ];
+    const supExample = [{
+        assetCategory: 'Computer',
+        referenceCode: '',
+        levelNo: 1,
+        roleName: 'IT Support L1',
+        personName: 'Ravi Kumar',
+        employeeCode: 'EMP-101',
+        contactNumber: '9876543210',
+        email: 'ravi@hospital.org',
+        escalationTime: 4,
+        escalationUnit: 'HOURS',
+        notes: 'First responder for all desktop/laptop issues',
+    }];
+    const supWs = XLSX.utils.json_to_sheet(supExample, { header: supHeaders });
+    supWs['!cols'] = supHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    XLSX.utils.book_append_sheet(wb, supWs, 'AssetSupportMatrix');
+
+    // Sheet 5: Instructions
+    const instructions = [
+        { Sheet: 'AssetAcknowledgementTemplates', Required: 'templateName, itemTitle', Notes: 'One row per checklist item. Same templateName groups items into one template.' },
+        { Sheet: 'PMChecklistTemplates',          Required: 'templateName, itemTitle', Notes: 'Preventive maintenance checklist items. itemType: CHECKBOX / NUMERIC / TEXT.' },
+        { Sheet: 'CalibrationChecklistTemplates', Required: 'templateName, itemTitle', Notes: 'Calibration checklist items. expectedValue + unit are recommended.' },
+        { Sheet: 'AssetSupportMatrix',            Required: 'levelNo',                 Notes: 'Escalation matrix. levelNo 1 = first responder, 2 = next escalation, etc. escalationUnit: MINUTES / HOURS / DAYS.' },
+        { Sheet: '— Common —', Required: 'assetCategory OR referenceCode', Notes: 'Templates apply to a category (assetCategory) OR a single asset (referenceCode). At least one is required for context.' },
+        { Sheet: '— Common —', Required: 'isActive / isRequired', Notes: 'Boolean fields accept: true / false / 1 / 0 / yes / no. Default = true.' },
+    ];
+    const instrWs = XLSX.utils.json_to_sheet(instructions);
+    instrWs['!cols'] = [{ wch: 32 }, { wch: 28 }, { wch: 80 }];
+    XLSX.utils.book_append_sheet(wb, instrWs, 'Instructions');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=checklist-workbook-template.xlsx');
     res.send(buffer);
 };

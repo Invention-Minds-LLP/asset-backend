@@ -102,12 +102,24 @@ export const getDepartmentAssets = async (req: Request, res: Response) => {
       orderBy: { assetName: "asc" },
     });
 
+    // Summary always reflects ALL department assets (ignores status/category filter)
+    // so the status pills stay meaningful when the user filters the table.
+    const allDeptAssets = await prisma.asset.findMany({
+      where: { departmentId: deptId },
+      select: { status: true },
+    });
+    const byStatus = allDeptAssets.reduce((acc: Record<string, number>, a: any) => {
+      acc[a.status] = (acc[a.status] || 0) + 1;
+      return acc;
+    }, {});
+
     const summary = {
-      total: assets.length,
-      byStatus: assets.reduce((acc: Record<string, number>, a: any) => {
-        acc[a.status] = (acc[a.status] || 0) + 1;
-        return acc;
-      }, {}),
+      total:            allDeptAssets.length,
+      active:           byStatus['ACTIVE']           || 0,
+      underMaintenance: byStatus['IN_MAINTENANCE']   || 0,
+      inStore:          byStatus['IN_STORE']         || 0,
+      disposed:         byStatus['DISPOSED']         || 0,
+      byStatus,         // raw counts for any other status (RETIRED, SCRAPPED, etc.)
     };
 
     res.json({ summary, assets });

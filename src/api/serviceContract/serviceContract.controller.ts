@@ -513,6 +513,53 @@ export const logServiceVisit = async (req: any, res: Response) => {
       },
     });
 
+    // ── Optional auto-create RETURNABLE gate pass when the asset is going off-site ──
+    // Frontend opts in by sending { gatePass: { issuedTo, vehicleNo?, courierDetails?, expectedReturnDate?, purpose? } }
+    const gpInput = req.body.gatePass;
+    if (gpInput && gpInput.issuedTo) {
+      try {
+        const today = new Date();
+        const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
+        const gpCount = await prisma.gatePass.count({ where: { gatePassNo: { startsWith: `GP-${dateStr}` } } });
+        const gatePassNo = `GP-${dateStr}-${String(gpCount + 1).padStart(4, "0")}`;
+
+        await prisma.gatePass.create({
+          data: {
+            gatePassNo,
+            type: "RETURNABLE",
+            status: "PENDING_APPROVAL",
+            approvalStatus: "PENDING",
+            issuedTo: gpInput.issuedTo,
+            purpose: gpInput.purpose || `Service visit (${visitType}) — ${contract.asset.assetName}`,
+            expectedReturnDate: gpInput.expectedReturnDate ? new Date(gpInput.expectedReturnDate) : null,
+            vehicleNo: gpInput.vehicleNo ?? null,
+            vehicleType: gpInput.vehicleType ?? null,
+            courierDetails: gpInput.courierDetails ?? null,
+            requestedById: user.employeeDbId,
+            requestedAt: new Date(),
+            serviceVisitId: visit.id,
+            items: { create: [{ assetId, quantity: 1, remarks: `Service visit #${visit.id}` }] },
+          },
+        });
+
+        // Notify HODs of asset's department to approve
+        if (contract.asset.departmentId) {
+          const hodIds = await getDepartmentHODs(contract.asset.departmentId);
+          if (hodIds.length) {
+            notify({
+              type: "OTHER",
+              title: "Gate Pass Approval Required",
+              message: `Gate pass ${gatePassNo} (asset off-site for ${visitType}) needs your approval`,
+              recipientIds: hodIds,
+              createdById: user.employeeDbId,
+            }).catch(() => {});
+          }
+        }
+      } catch (err) {
+        console.error("Auto-create gate pass for service visit failed:", err);
+      }
+    }
+
     // Fire-and-forget: notify admins about service visit logged
     getAdminIds().then(adminIds =>
       notify({

@@ -316,6 +316,9 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
         historicalCostNote: data.historicalCostNote ?? null,
 
+        // Revenue log applicability — drives visibility of revenue tracking sections
+        isRevenueLogApplicable: data.isRevenueLogApplicable ? true : false,
+
         // ── Asset Pool linkage ────────────────────────────────────────────────
         assetPoolId: data.assetPoolId ? Number(data.assetPoolId) : null,
         financialYearAdded: data.financialYearAdded ?? null,
@@ -682,6 +685,9 @@ export const updateAsset = async (req: Request, res: Response) => {
       historicalOtherCost: data.historicalOtherCost != null ? String(data.historicalOtherCost) : null,
       historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
       historicalCostNote: data.historicalCostNote ?? null,
+
+      // Revenue log applicability
+      isRevenueLogApplicable: data.isRevenueLogApplicable ? true : false,
     };
 
     // ---------------------------
@@ -725,6 +731,19 @@ export const updateAsset = async (req: Request, res: Response) => {
       };
     }
 
+    // Voucher Details — patchable from the Depreciation tab even when the
+    // procurement-mode block below isn't triggered. Only writes if the field is
+    // present in the request body so we don't blank existing values on partial patches.
+    if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherNo")) {
+      updateData.purchaseVoucherNo = data.purchaseVoucherNo ?? null;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherDate")) {
+      updateData.purchaseVoucherDate = data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherId")) {
+      updateData.purchaseVoucherId = data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null;
+    }
+
     // ---------------------------
     // MODE-BASED FIELDS
     // ---------------------------
@@ -736,9 +755,6 @@ export const updateAsset = async (req: Request, res: Response) => {
         purchaseOrderDate: data.purchaseOrderDate ? new Date(data.purchaseOrderDate) : null,
         deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
         purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null,
-        purchaseVoucherNo: data.purchaseVoucherNo ?? null,
-        purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
-        purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
       });
     }
 

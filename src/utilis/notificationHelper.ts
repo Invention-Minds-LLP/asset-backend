@@ -94,6 +94,7 @@ export const notify = async (params: {
   channel?: string;       // IN_APP | EMAIL | BOTH (default IN_APP)
   assetId?: number;
   ticketId?: number;
+  gatePassId?: number;
   createdById?: number;
   emailSubject?: string;
   emailHtml?: string;
@@ -117,6 +118,7 @@ export const notify = async (params: {
         channel,
         assetId: params.assetId ?? null,
         ticketId: params.ticketId ?? null,
+        gatePassId: params.gatePassId ?? null,
         createdById: params.createdById ?? null,
         recipients: {
           create: params.recipientIds.map(empId => ({ employeeId: empId })),
@@ -173,6 +175,17 @@ export const getDepartmentHODs = async (departmentId: number | null | undefined)
     select: { id: true },
   });
   return hods.map(h => h.id);
+};
+
+// ── Helper to get all SECURITY-role employees ──
+// SECURITY isn't part of the EmployeeRole enum — it's stored on User.role (string).
+// Same pattern as getAdminIds() above: walk User → Employee.
+export const getSecurityTeam = async (): Promise<number[]> => {
+  const securityUsers = await prisma.user.findMany({
+    where: { role: "SECURITY" },
+    select: { employee: { select: { id: true } } },
+  });
+  return securityUsers.map(u => u.employee?.id).filter(Boolean) as number[];
 };
 
 // ── Helper to get all ADMINs ──

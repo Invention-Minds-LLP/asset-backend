@@ -7,6 +7,7 @@ import {
   checkMaintenanceSLABreach,
   checkContractExpiry,
   checkAssetActivation,
+  checkGatePassOverdue,
   runAllChecks,
 } from "./cron-jobs.controller";
 import {
@@ -23,6 +24,7 @@ router.post("/sla-breach", authenticateToken, checkSLABreach);
 router.post("/maintenance-sla-breach", authenticateToken, checkMaintenanceSLABreach);
 router.post("/contract-expiry", authenticateToken, checkContractExpiry);
 router.post("/asset-activation", authenticateToken, checkAssetActivation);
+router.post("/gate-pass-overdue", authenticateToken, checkGatePassOverdue);
 router.post("/run-all", authenticateToken, runAllChecks);
 
 // ── Depreciation cron jobs ───────────────────────────────────────────────

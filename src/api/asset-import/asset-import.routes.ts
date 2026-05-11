@@ -1,13 +1,13 @@
 import { Router } from 'express';
-import multer from 'multer';
-import { importAssetsExcel, importChecklistWorkbook, downloadLegacyTemplate } from "./asset-import.controller";
+import { importAssetsExcel, importChecklistWorkbook, downloadLegacyTemplate, downloadChecklistTemplate } from "./asset-import.controller";
 import { authenticateToken } from '../../middleware/authMiddleware';
+import { excelUpload, handleUploadError } from "../../utilis/excelImportHelpers";
 
 const router = Router();
-const upload = multer({ dest: 'uploads/' });
 
-router.post('/import-excel', upload.single('file'), importAssetsExcel);
-router.post('/checklists/import-workbook', upload.single('file'), importChecklistWorkbook);
+router.post('/import-excel', excelUpload.single('file'), handleUploadError, importAssetsExcel);
+router.post('/checklists/import-workbook', excelUpload.single('file'), handleUploadError, importChecklistWorkbook);
 router.get('/legacy-template', authenticateToken, downloadLegacyTemplate);
+router.get('/checklists/template', authenticateToken, downloadChecklistTemplate);
 
 export default router;

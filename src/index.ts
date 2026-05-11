@@ -85,7 +85,10 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 app.use(cors({
-  origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100'], // Allow your Angular app
+  origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100', 'http://localhost',          // Capacitor Android
+    'https://localhost',
+    'capacitor://localhost',     // Capacitor iOS
+  ], // Allow your Angular app
   credentials: true               // Optional: if you plan to send cookies
 }));
 
@@ -186,6 +189,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 });
 
 // Start the server
-app.listen(port, '0.0.0.0',() => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
 });

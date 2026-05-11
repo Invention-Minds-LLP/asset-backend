@@ -1,8 +1,13 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
+import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+
+// Roles that should only see vendors serving their own department.
+// ADMIN / FINANCE / CEO_COO still see all vendors.
+const DEPT_SCOPED_ROLES = new Set(["HOD", "SUPERVISOR"]);
 
 // ─── Vendor Performance Dashboard ────────────────────────────────────────────
-export const getVendorPerformance = async (req: Request, res: Response) => {
+export const getVendorPerformance = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { vendorId, dateFrom, dateTo } = req.query;
 
@@ -10,10 +15,17 @@ export const getVendorPerformance = async (req: Request, res: Response) => {
     if (dateFrom) dateFilter.gte = new Date(String(dateFrom));
     if (dateTo) dateFilter.lte = new Date(String(dateTo));
 
+    // Department scoping for HOD / SUPERVISOR — only show vendors flagged as
+    // serving their department on the Vendor record.
+    const role = req.user?.role;
+    const userDeptId = req.user?.departmentId;
+    const scopeByDept = role && DEPT_SCOPED_ROLES.has(role) && userDeptId;
+
     const vendors = await prisma.vendor.findMany({
       where: {
         isActive: true,
         ...(vendorId ? { id: Number(vendorId) } : {}),
+        ...(scopeByDept ? { departments: { some: { id: Number(userDeptId) } } } : {}),
       },
       select: {
         id: true,

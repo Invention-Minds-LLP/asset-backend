@@ -14,6 +14,7 @@ export interface AuthUserPayload {
   employeeDbId: number;    // Employee.id (int)
   role: string;
   name?: string;
+  departmentId?: number;   // present on the decoded JWT (set in authenticateToken)
 }
 
 

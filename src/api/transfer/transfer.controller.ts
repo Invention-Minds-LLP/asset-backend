@@ -6,7 +6,7 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AcknowledgementPurpose } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
-import { notify, getDepartmentHODs } from "../../utilis/notificationHelper";
+import { notify, getDepartmentHODs, getSecurityTeam } from "../../utilis/notificationHelper";
 
 
 const FTP_CONFIG = {
@@ -148,6 +148,7 @@ export const approveAssetTransfer = async (
       const currentLocation = await tx.assetLocation.findFirst({
         where: { assetId: transfer.assetId, isActive: true }
       });
+      // (See $transaction options below: maxWait/timeout bumped for remote MySQL latency)
 
       const currentBranchId = currentLocation?.branchId ?? null;
 
@@ -210,37 +211,81 @@ export const approveAssetTransfer = async (
         });
       }
 
-      // Auto-generate gate pass for external transfers (non-DEAD)
-      let gatePass = null;
-      if (transfer.transferType === "EXTERNAL" && transfer.externalType !== "DEAD") {
+      return { updatedTransfer, newLocation };
+    }, {
+      // Remote MySQL on a slower network — bump from defaults (maxWait 2s, timeout 5s)
+      // so the connection-establish + first-query round-trip can't trip the timeout.
+      maxWait: 10_000,   // wait up to 10s for a connection from the pool
+      timeout: 20_000,   // allow up to 20s of in-tx work before auto-abort
+    });
+
+    // ── Auto-generate gate pass for external transfers (non-DEAD) ──
+    // Done OUTSIDE the transaction to avoid the 5s interactive-tx timeout.
+    // The transfer is already approved at this point; if the gate pass create
+    // fails for any reason, the transfer state stays valid and we just log it.
+    let gatePass: any = null;
+    if (transfer.transferType === "EXTERNAL" && transfer.externalType !== "DEAD") {
+      try {
         const today = new Date();
         const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
-        const gpCount = await tx.gatePass.count({
+        const gpCount = await prisma.gatePass.count({
           where: { gatePassNo: { startsWith: `GP-${dateStr}` } },
         });
         const gatePassNo = `GP-${dateStr}-${String(gpCount + 1).padStart(4, "0")}`;
 
-        gatePass = await tx.gatePass.create({
+        // Map externalType → gate pass type:
+        //   BRANCH → permanent move to another branch       → NON_RETURNABLE
+        //   SERVICE / TEMP_USE / OTHER → asset comes back   → RETURNABLE
+        const isPermanent = transfer.externalType === "BRANCH";
+        const gpType = isPermanent ? "NON_RETURNABLE" : "RETURNABLE";
+
+        gatePass = await prisma.gatePass.create({
           data: {
             gatePassNo,
-            type: "OUTWARD",
-            status: "ISSUED",
-            assetId: transfer.assetId,
+            type: gpType,
+            status: "APPROVED",
+            approvalStatus: "AUTO_APPROVED",
+            approvedById: req.user?.employeeDbId ?? null,
+            approvedAt: new Date(),
+            requestedById: transfer.requestedById ?? null,
+            requestedAt: transfer.requestedAt ?? new Date(),
+            expectedReturnDate: isPermanent ? null : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
             issuedTo: transfer.destinationName ?? transfer.destinationContactPerson ?? "External",
             purpose: transfer.reason ?? `Transfer: ${transfer.externalType}`,
-            approvedBy: String(req.user?.employeeDbId ?? "HOD"),
             transferHistoryId: transfer.id,
-          } as any,
+            items: {
+              create: [{ assetId: transfer.assetId, quantity: 1, remarks: `Transfer #${transfer.id} (${transfer.externalType})` }],
+            },
+          },
         });
+      } catch (gpErr) {
+        // Don't fail the transfer approval over a downstream pass create.
+        console.error("Auto-create gate pass for transfer failed:", gpErr);
       }
-
-      return { updatedTransfer, newLocation, gatePass };
-    });
+    }
+    (result as any).gatePass = gatePass;
 
     logAction({ entityType: "TRANSFER", entityId: transferId, action: "APPROVE", description: `Transfer #${transferId} approved for asset #${transfer.assetId}`, performedById: req.user?.employeeDbId });
 
     // Notify requester that transfer is approved
     if (transfer.requestedById) notify({ type: "TRANSFER", title: "Transfer Approved", message: `Transfer for asset ${asset.assetId} — ${asset.assetName} has been approved`, recipientIds: [transfer.requestedById], assetId: transfer.assetId });
+
+    // If a gate pass was auto-generated for this transfer, tell security it's ready to issue.
+    if ((result as any).gatePass) {
+      const gp = (result as any).gatePass;
+      getSecurityTeam().then(secIds => {
+        if (secIds.length === 0) return;
+        notify({
+          type: "OTHER",
+          title: "Gate Pass Ready to Issue (Transfer)",
+          message: `${gp.gatePassNo} (${gp.type}) auto-approved from transfer #${transfer.id} — ${asset.assetName}. Ready for gate-out.`,
+          recipientIds: secIds,
+          gatePassId: gp.id,
+          assetId: transfer.assetId,
+          priority: "HIGH",
+        });
+      }).catch(() => {});
+    }
 
     res.json({
       message: "Transfer approved successfully",

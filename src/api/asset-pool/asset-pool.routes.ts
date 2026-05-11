@@ -1,6 +1,6 @@
 import { Router } from "express";
-import multer from "multer";
 import { authenticateToken } from "../../middleware/authMiddleware";
+import { excelUpload, handleUploadError } from "../../utilis/excelImportHelpers";
 import {
     listPools, createPool, getPool, updatePool,
     addAdjustment, getPoolSummary,
@@ -12,13 +12,12 @@ import {
 } from "./asset-pool.controller";
 
 const router = Router();
-const upload = multer({ dest: "uploads/" });
 
 router.get("/summary", authenticateToken, getPoolSummary);
 router.get("/fa-register-template", authenticateToken, downloadFaRegisterTemplate);
-router.post("/import-fa-register", authenticateToken, upload.single("file"), importFaRegister);
+router.post("/import-fa-register", authenticateToken, excelUpload.single("file"), handleUploadError, importFaRegister);
 router.get("/individual-assets-template", authenticateToken, downloadIndividualAssetsTemplate);
-router.post("/import-individual-assets", authenticateToken, upload.single("file"), importIndividualAssets);
+router.post("/import-individual-assets", authenticateToken, excelUpload.single("file"), handleUploadError, importIndividualAssets);
 router.delete("/reset", authenticateToken, resetAllPools);
 router.get("/", authenticateToken, listPools);
 router.post("/", authenticateToken, createPool);

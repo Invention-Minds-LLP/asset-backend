@@ -293,6 +293,7 @@ model Asset {
   serviceDocuments             Document[]
   qrScans                      QRScanLog[]
   gatePasses                   GatePass[]
+  gatePassItems                GatePassItem[]                 @relation("GatePassItemAsset")
   scanLogs                     AssetScanLog[]
   notifications                Notification[]
   assignments                  AssetAssignment[]
@@ -339,6 +340,10 @@ model Asset {
   costAllocations AssetCostAllocation[] @relation("CostAllocations")
   rateCard        AssetRateCard?        @relation("AssetRateCard")
   dailyUsageLogs  AssetDailyUsageLog[]  @relation("DailyUsageLogs")
+
+  // True when this asset is revenue-generating (e.g. revenue-share/rental device).
+  // Drives visibility of the Revenue Log section + dropdown filter.
+  isRevenueLogApplicable Boolean? @default(false)
 
   // ── Legacy Asset Onboarding ──────────────────────────────────────────────
   // Used when onboarding assets from companies with 2+ years of existing history.
@@ -531,6 +536,7 @@ model Ticket {
   workOrders                WorkOrder[]               @relation("TicketWorkOrders")
 
   serviceInvoices      ServiceInvoice[]
+  gatePasses           GatePass[]
   @@index([assetId, createdAt])
   @@index([departmentId, status])
   @@map("ticket")
@@ -698,6 +704,9 @@ model Department {
   capexBudgets       CapexBudget[]           @relation("CapexBudgetDept")
   assetPools         AssetPool[]             @relation("AssetPoolDepartment")
 
+  // Vendors that serve this department (M2M inverse).
+  vendors            Vendor[]                @relation("VendorDepartments")
+
   @@map("department")
 }
 
@@ -769,6 +778,9 @@ model Employee {
 
   collectedTickets            Ticket[]              @relation("TicketCollectedBy")
   gatePassesApproved          GatePass[]            @relation("GatePassApprover")
+  gatePassesRequested         GatePass[]            @relation("GatePassRequester")
+  gatePassesGatedOut          GatePass[]            @relation("GatePassSecurityOut")
+  gatePassesGatedIn           GatePass[]            @relation("GatePassSecurityIn")
   assetIndents                AssetIndent[]         @relation("IndentRaisedBy")
   assetIndentApprovals        AssetIndent[]         @relation("IndentApprovedBy")
   employeeExits               EmployeeExit[]        @relation("ExitEmployee")
@@ -849,6 +861,9 @@ model Vendor {
   purchaseVouchers        PurchaseVoucher[] @relation("VendorPurchaseVouchers")
   paymentVouchers         PaymentVoucher[]  @relation("VendorPaymentVouchers")
   serviceInvoices         ServiceInvoice[]  @relation("ServiceInvoiceVendor")
+
+  // Departments this vendor serves. Drives department-scoped vendor performance.
+  departments Department[] @relation("VendorDepartments")
 
   @@map("vendor")
 }
@@ -1173,6 +1188,7 @@ model AssetTransferHistory {
 
   createdAt                DateTime                  @default(now())
   assetAcknowledgementRuns AssetAcknowledgementRun[] @relation("TransferAcknowledgementRuns")
+  gatePasses               GatePass[]
 
   @@map("assettransferhistory")
 }
@@ -1298,6 +1314,8 @@ model ServiceVisit {
   createdBy   Employee? @relation("ServiceVisitCreatedBy", fields: [createdById], references: [id])
   createdAt   DateTime  @default(now())
 
+  gatePass GatePass? @relation("ServiceVisitGatePass")
+
   @@map("servicevisit")
 }
 
@@ -1311,13 +1329,19 @@ model GatePass {
   gatePassNo String @unique
 
   type   String // RETURNABLE | NON_RETURNABLE
-  status String // ISSUED | RETURNED | CLOSED | CANCELLED
+  // Lifecycle:
+  // DRAFT → PENDING_APPROVAL → APPROVED → ISSUED → (RETURNED) → CLOSED
+  //                          ↘ REJECTED                ↘ CANCELLED
+  status String @default("DRAFT")
 
-  assetId Int?
-  asset   Asset? @relation(fields: [assetId], references: [id])
-
+  // Multi-asset items now live in GatePassItem (junction table).
+  // Legacy single-asset fields kept for backfill, dropped in a follow-up push.
+  assetId     Int?
+  asset       Asset?  @relation(fields: [assetId], references: [id])
   description String?
   quantity    Int?
+
+  items GatePassItem[]
 
   issuedTo           String
   purpose            String
@@ -1327,27 +1351,77 @@ model GatePass {
   vehicleNo      String?
   vehicleType    String? // HOSPITAL_VEHICLE | OUTSIDE_VEHICLE
 
-  approvedBy         String?
-  issuedBy           String?
-  approvedById       Int?
+  // ── Approval workflow (mandatory for both RETURNABLE & NON_RETURNABLE) ─────
+  approvalStatus  String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPROVED
+  requestedById   Int?
+  requestedBy     Employee? @relation("GatePassRequester", fields: [requestedById], references: [id])
+  requestedAt     DateTime?
+  approvedById    Int?
   approvedByEmployee Employee? @relation("GatePassApprover", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  approvalRemarks String?
+  rejectionReason String?
 
-  // Return tracking
+  // Free-text fallbacks (kept for backwards compat with existing rows)
+  approvedBy String?
+  issuedBy   String?
+
+  // ── Security verification (gate-out / gate-in) ───────────────────────────
+  gatedOutAt   DateTime?
+  gatedOutById Int?
+  gatedOutBy   Employee? @relation("GatePassSecurityOut", fields: [gatedOutById], references: [id])
+  gatedInAt    DateTime?
+  gatedInById  Int?
+  gatedInBy    Employee? @relation("GatePassSecurityIn", fields: [gatedInById], references: [id])
+
+  // Return tracking (whole pass — per-item return is on GatePassItem)
   returnedAt      DateTime?
   returnedBy      String?
   returnCondition String? // GOOD | DAMAGED | PARTIAL
 
   reason String?
 
-  // Auto-generated from transfer
+  // Source linkage
+  ticketId          Int?
+  ticket            Ticket?               @relation(fields: [ticketId], references: [id])
+  serviceVisitId    Int?                  @unique
+  serviceVisit      ServiceVisit?         @relation("ServiceVisitGatePass", fields: [serviceVisitId], references: [id])
   transferHistoryId Int?
+  transferHistory   AssetTransferHistory? @relation(fields: [transferHistoryId], references: [id])
+
+  // Reverse relations
+  ewasteRecords EWasteRecord[]
 
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @default(now()) @updatedAt
   notifications Notification[]
 
   @@index([assetId, createdAt])
+  @@index([approvalStatus, status])
   @@map("gatepass")
+}
+
+model GatePassItem {
+  id         Int      @id @default(autoincrement())
+  gatePassId Int
+  gatePass   GatePass @relation(fields: [gatePassId], references: [id], onDelete: Cascade)
+
+  assetId Int
+  asset   Asset @relation("GatePassItemAsset", fields: [assetId], references: [id])
+
+  quantity Int     @default(1)
+  remarks  String?
+
+  // Per-item return tracking (relevant when type=RETURNABLE)
+  returnedAt      DateTime?
+  returnCondition String? // GOOD | DAMAGED | PARTIAL
+  returnRemarks   String?
+
+  createdAt DateTime @default(now())
+
+  @@index([gatePassId])
+  @@index([assetId])
+  @@map("gatepassitem")
 }
 
 /**
@@ -2527,7 +2601,9 @@ model EWasteRecord {
   securitySignedAt   DateTime?
   securitySignature  String?   @db.LongText
   securityRemarks    String?   @db.Text
-  gatePassNo         String?
+  gatePassNo         String?   // legacy free-text reference (kept for backfill)
+  gatePassId         Int?
+  gatePass           GatePass? @relation(fields: [gatePassId], references: [id])
 
   closedAt    DateTime?
   createdById Int?
