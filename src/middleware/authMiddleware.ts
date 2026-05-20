@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret"; // make sure to store in .env
+// Validated at startup by src/config/validateEnv.ts — no insecure fallback.
+const JWT_SECRET = process.env.JWT_SECRET as string;
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthUserPayload; // you can type this properly if you like

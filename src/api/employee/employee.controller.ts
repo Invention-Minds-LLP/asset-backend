@@ -56,9 +56,60 @@ export const getAllEmployees = async (req: Request, res: Response) => {
   }
 };
 
+// Coerce + null-safe the subset of fields the create/edit form sends.
+// Stops random body keys (e.g. departmentId === "") from blowing up Prisma.
+function pickEmployeeFields(body: any) {
+  const trim = (v: any) => {
+    const s = String(v ?? '').trim();
+    return s ? s : null;
+  };
+  return {
+    name:          body.name ? String(body.name).trim() : undefined,
+    employeeID:    body.employeeID ? String(body.employeeID).trim() : undefined,
+    departmentId:  body.departmentId != null && body.departmentId !== '' ? Number(body.departmentId) : null,
+    reportingToId: body.reportingToId != null && body.reportingToId !== '' ? Number(body.reportingToId) : null,
+    role:          body.role || undefined,
+    designation:   trim(body.designation),
+    email:         trim(body.email),
+    phone:         trim(body.phone),
+    isActive:      typeof body.isActive === 'boolean' ? body.isActive : undefined,
+  };
+}
+
 export const createEmployee = async (req: Request, res: Response) => {
-  const employee = await prisma.employee.create({ data: req.body });
-   res.status(201).json(employee);
+  try {
+    const data = pickEmployeeFields(req.body);
+    if (!data.name || !data.employeeID) {
+      res.status(400).json({ message: 'name and employeeID are required' });
+      return;
+    }
+    const employee = await prisma.employee.create({ data: data as any });
+    res.status(201).json(employee);
+  } catch (err: any) {
+    console.error('createEmployee error:', err);
+    res.status(500).json({ message: err.message || 'Failed to create employee' });
+  }
+};
+
+export const updateEmployee = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    // Only update keys that were sent — partial-patch friendly
+    const raw = pickEmployeeFields(req.body);
+    const data: any = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (v !== undefined) data[k] = v;
+    }
+    const employee = await prisma.employee.update({
+      where: { id },
+      data,
+      include: { department: true, reportingTo: { select: { name: true, employeeID: true } } },
+    });
+    res.json(employee);
+  } catch (err: any) {
+    console.error('updateEmployee error:', err);
+    res.status(500).json({ message: err.message || 'Failed to update employee' });
+  }
 };
 
 export const deleteEmployee = async (req: Request, res: Response) => {

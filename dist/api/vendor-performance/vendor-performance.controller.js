@@ -14,8 +14,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.updateVendorRating = exports.getVendorPerformance = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
+// Roles that should only see vendors serving their own department.
+// ADMIN / FINANCE / CEO_COO still see all vendors.
+const DEPT_SCOPED_ROLES = new Set(["HOD", "SUPERVISOR"]);
 // ─── Vendor Performance Dashboard ────────────────────────────────────────────
 const getVendorPerformance = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
     try {
         const { vendorId, dateFrom, dateTo } = req.query;
         const dateFilter = {};
@@ -23,8 +27,13 @@ const getVendorPerformance = (req, res) => __awaiter(void 0, void 0, void 0, fun
             dateFilter.gte = new Date(String(dateFrom));
         if (dateTo)
             dateFilter.lte = new Date(String(dateTo));
+        // Department scoping for HOD / SUPERVISOR — only show vendors flagged as
+        // serving their department on the Vendor record.
+        const role = (_a = req.user) === null || _a === void 0 ? void 0 : _a.role;
+        const userDeptId = (_b = req.user) === null || _b === void 0 ? void 0 : _b.departmentId;
+        const scopeByDept = role && DEPT_SCOPED_ROLES.has(role) && userDeptId;
         const vendors = yield prismaClient_1.default.vendor.findMany({
-            where: Object.assign({ isActive: true }, (vendorId ? { id: Number(vendorId) } : {})),
+            where: Object.assign(Object.assign({ isActive: true }, (vendorId ? { id: Number(vendorId) } : {})), (scopeByDept ? { departments: { some: { id: Number(userDeptId) } } } : {})),
             select: {
                 id: true,
                 name: true,

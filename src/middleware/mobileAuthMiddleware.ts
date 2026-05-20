@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
+// Validated at startup by src/config/validateEnv.ts — no insecure fallback.
+const JWT_SECRET = process.env.JWT_SECRET as string;
 
 export interface MobileAuthRequest extends Request {
   user?: {

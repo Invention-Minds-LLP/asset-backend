@@ -6,6 +6,9 @@ import {
   checkSLABreach,
   checkMaintenanceSLABreach,
   checkContractExpiry,
+  checkCalibrationDue,
+  checkMaintenanceDue,
+  checkLowStock,
   checkAssetActivation,
   checkGatePassOverdue,
   runAllChecks,
@@ -23,6 +26,9 @@ router.post("/insurance-expiry", authenticateToken, checkInsuranceExpiry);
 router.post("/sla-breach", authenticateToken, checkSLABreach);
 router.post("/maintenance-sla-breach", authenticateToken, checkMaintenanceSLABreach);
 router.post("/contract-expiry", authenticateToken, checkContractExpiry);
+router.post("/calibration-due", authenticateToken, checkCalibrationDue);
+router.post("/maintenance-due", authenticateToken, checkMaintenanceDue);
+router.post("/low-stock", authenticateToken, checkLowStock);
 router.post("/asset-activation", authenticateToken, checkAssetActivation);
 router.post("/gate-pass-overdue", authenticateToken, checkGatePassOverdue);
 router.post("/run-all", authenticateToken, runAllChecks);

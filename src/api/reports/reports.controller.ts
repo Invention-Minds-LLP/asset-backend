@@ -1638,6 +1638,51 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
 
     Object.keys(totals).forEach(k => { (totals as any)[k] = +(totals as any)[k].toFixed(2); });
 
+    // ── Excel export ──────────────────────────────────────────────────────────
+    const exportFormat = req.query.export as string;
+    if (exportFormat === "excel" || exportFormat === "csv") {
+      const exportRows = rows.map((r, i) => ({
+        "#": i + 1,
+        "Asset ID": r.assetId,
+        "Asset Name": r.assetName,
+        "Serial Number": r.serialNumber || "",
+        "Opening Gross": r.openingGross,
+        "Additions 1H (Apr-Sep)": r.additions1H,
+        "Additions 2H (Oct-Mar)": r.additions2H,
+        "Deletions": r.deletions,
+        "Closing Gross": r.closingGross,
+        "Rate %": r.rate,
+        "Dep. On Opening": r.depOnOpening,
+        "Dep. On Additions": r.depOnAdditions,
+        "Closing Acc. Dep.": r.closingDep,
+        "Net Block (Current)": r.netCurrent,
+        "Net Block (Prev.)": r.netPrevious,
+      }));
+      // Append a subtotal row
+      exportRows.push({
+        "#": "" as any,
+        "Asset ID": "",
+        "Asset Name": `SUBTOTAL (${rows.length} assets)`,
+        "Serial Number": "",
+        "Opening Gross": totals.openingGross,
+        "Additions 1H (Apr-Sep)": totals.additions1H,
+        "Additions 2H (Oct-Mar)": totals.additions2H,
+        "Deletions": totals.deletions,
+        "Closing Gross": totals.closingGross,
+        "Rate %": "" as any,
+        "Dep. On Opening": totals.depOnOpening,
+        "Dep. On Additions": totals.depOnAdditions,
+        "Closing Acc. Dep.": totals.closingDep,
+        "Net Block (Current)": totals.netCurrent,
+        "Net Block (Prev.)": totals.netPrevious,
+      });
+
+      const safeCat = categoryName.replace(/[^A-Za-z0-9]+/g, "-").toLowerCase();
+      const fname = `asset-breakdown-${safeCat}-${fiscalYear}-${String(fiscalYear + 1).slice(2)}`;
+      if (exportFormat === "csv") return sendCsv(res, exportRows, fname);
+      return sendExcel(res, exportRows, fname, "Asset Breakdown");
+    }
+
     res.json({
       category: categoryName,
       fiscalYear,

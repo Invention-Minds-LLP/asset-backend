@@ -201,10 +201,11 @@ const operationsSign = (req, res) => __awaiter(void 0, void 0, void 0, function*
 exports.operationsSign = operationsSign;
 // ── PUT /e-waste/:id/security-sign ───────────────────────────────────────────
 const securitySign = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const user = req.user;
         const id = Number(req.params.id);
-        const { signature, remarks, gatePassNo } = req.body;
+        const { signature, remarks, gatePassNo, gatePassId } = req.body;
         if (!signature) {
             res.status(400).json({ message: "Signature is required" });
             return;
@@ -218,6 +219,12 @@ const securitySign = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             res.status(400).json({ message: `Cannot sign at Security stage — current status is ${record.status}` });
             return;
         }
+        // Resolve gate pass FK: explicit id wins; otherwise look up by number.
+        let resolvedGatePassId = gatePassId ? Number(gatePassId) : null;
+        if (!resolvedGatePassId && gatePassNo) {
+            const gp = yield prismaClient_1.default.gatePass.findUnique({ where: { gatePassNo: String(gatePassNo) }, select: { id: true } });
+            resolvedGatePassId = (_a = gp === null || gp === void 0 ? void 0 : gp.id) !== null && _a !== void 0 ? _a : null;
+        }
         const updated = yield prismaClient_1.default.eWasteRecord.update({
             where: { id },
             data: {
@@ -227,6 +234,7 @@ const securitySign = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 securitySignature: signature,
                 securityRemarks: remarks || null,
                 gatePassNo: gatePassNo || null,
+                gatePassId: resolvedGatePassId,
                 closedAt: new Date(),
             },
             include: fullInclude,

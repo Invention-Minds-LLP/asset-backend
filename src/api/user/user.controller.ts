@@ -3,7 +3,8 @@ import prisma from "../../prismaClient";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
+// Validated at startup by src/config/validateEnv.ts — no insecure fallback.
+const JWT_SECRET = process.env.JWT_SECRET as string;
 
 export const loginUser = async (req: Request, res: Response) => {
   const { employeeId, password } = req.body;
@@ -134,4 +135,44 @@ export const deleteUser = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   await prisma.user.delete({ where: { id } });
   res.status(204).send();
+};
+
+// Partial-patch user fields (username, role). Password changes go via /reset-password.
+export const updateUser = async (req: Request, res: Response) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    const { username, role } = req.body ?? {};
+    const data: any = {};
+    if (username !== undefined) {
+      const u = String(username).trim();
+      if (!u) {
+        res.status(400).json({ message: "username cannot be empty" });
+        return;
+      }
+      data.username = u;
+    }
+    if (role !== undefined) {
+      const r = String(role).trim();
+      if (!r) {
+        res.status(400).json({ message: "role cannot be empty" });
+        return;
+      }
+      data.role = r;
+    }
+    if (Object.keys(data).length === 0) {
+      res.status(400).json({ message: "No editable fields provided" });
+      return;
+    }
+    const user = await prisma.user.update({
+      where: { id },
+      data,
+      include: { employee: true },
+    });
+    // Strip password hash from response
+    const { passwordHash, ...safe } = user as any;
+    res.json(safe);
+  } catch (err: any) {
+    console.error("updateUser error:", err);
+    res.status(500).json({ message: err.message || "Failed to update user" });
+  }
 };

@@ -1,19 +1,15 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
-const multer_1 = __importDefault(require("multer"));
 const authMiddleware_1 = require("../../middleware/authMiddleware");
+const excelImportHelpers_1 = require("../../utilis/excelImportHelpers");
 const asset_pool_controller_1 = require("./asset-pool.controller");
 const router = (0, express_1.Router)();
-const upload = (0, multer_1.default)({ dest: "uploads/" });
 router.get("/summary", authMiddleware_1.authenticateToken, asset_pool_controller_1.getPoolSummary);
 router.get("/fa-register-template", authMiddleware_1.authenticateToken, asset_pool_controller_1.downloadFaRegisterTemplate);
-router.post("/import-fa-register", authMiddleware_1.authenticateToken, upload.single("file"), asset_pool_controller_1.importFaRegister);
+router.post("/import-fa-register", authMiddleware_1.authenticateToken, excelImportHelpers_1.excelUpload.single("file"), excelImportHelpers_1.handleUploadError, asset_pool_controller_1.importFaRegister);
 router.get("/individual-assets-template", authMiddleware_1.authenticateToken, asset_pool_controller_1.downloadIndividualAssetsTemplate);
-router.post("/import-individual-assets", authMiddleware_1.authenticateToken, upload.single("file"), asset_pool_controller_1.importIndividualAssets);
+router.post("/import-individual-assets", authMiddleware_1.authenticateToken, excelImportHelpers_1.excelUpload.single("file"), excelImportHelpers_1.handleUploadError, asset_pool_controller_1.importIndividualAssets);
 router.delete("/reset", authMiddleware_1.authenticateToken, asset_pool_controller_1.resetAllPools);
 router.get("/", authMiddleware_1.authenticateToken, asset_pool_controller_1.listPools);
 router.post("/", authMiddleware_1.authenticateToken, asset_pool_controller_1.createPool);

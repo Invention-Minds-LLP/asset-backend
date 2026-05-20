@@ -3,6 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+require("dotenv/config"); // load .env before anything else evaluates
+require("./config/validateEnv"); // fail fast if a critical secret is missing
 const express_1 = __importDefault(require("express"));
 const assets_routes_1 = __importDefault(require("./api/assets/assets.routes"));
 const warranty_routes_1 = __importDefault(require("./api/warranty/warranty.routes"));
@@ -78,16 +80,38 @@ const legacy_migration_routes_1 = __importDefault(require("./api/legacy-migratio
 const reconciliation_routes_1 = __importDefault(require("./api/reconciliation/reconciliation.routes"));
 const cors_1 = __importDefault(require("cors"));
 const path_1 = __importDefault(require("path"));
+const helmet_1 = __importDefault(require("helmet"));
+const express_rate_limit_1 = __importDefault(require("express-rate-limit"));
+const scheduler_1 = require("./scheduler");
+const moduleAccessMiddleware_1 = require("./middleware/moduleAccessMiddleware");
 const app = (0, express_1.default)();
 const port = 3001;
+// Security headers (HSTS, X-Content-Type-Options, frameguard, etc.).
+// crossOriginResourcePolicy is relaxed so the separate-origin SPA can still
+// load image/document assets served from /uploads.
+app.use((0, helmet_1.default)({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 // Middleware to parse JSON bodies
 app.use(express_1.default.json());
 // Serve uploaded files
 app.use('/uploads', express_1.default.static(path_1.default.join(process.cwd(), 'uploads')));
 app.use((0, cors_1.default)({
-    origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100'], // Allow your Angular app
+    origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100', 'http://localhost', // Capacitor Android
+        'https://localhost',
+        'capacitor://localhost', // Capacitor iOS
+    ], // Allow your Angular app
     credentials: true // Optional: if you plan to send cookies
 }));
+// Throttle login attempts to slow brute-force / credential-stuffing.
+const loginLimiter = (0, express_rate_limit_1.default)({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 10, // 10 attempts per IP per window
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: "Too many login attempts from this IP. Please try again in 15 minutes." },
+});
+app.use("/api/users/login", loginLimiter);
+// Server-side module-access enforcement (runs before the feature routers).
+app.use(moduleAccessMiddleware_1.moduleAccessGuard);
 // Mount routers
 app.use("/api/assets", assets_routes_1.default);
 app.use("/api/warranties", warranty_routes_1.default);
@@ -178,4 +202,6 @@ app.use((err, req, res, next) => {
 // Start the server
 app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
+    // Kick off the in-process daily alert scheduler.
+    (0, scheduler_1.startScheduler)();
 });

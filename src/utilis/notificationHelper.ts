@@ -83,8 +83,25 @@ export const sendEmail = async (options: {
   }
 };
 
+// ── Map notification type → NotificationPreference category toggle ──
+// Types not listed here have no per-category toggle and are always delivered.
+const PREF_FIELD_BY_TYPE: Record<string, string> = {
+  WARRANTY_EXPIRY: "warrantyExpiry",
+  INSURANCE_EXPIRY: "insuranceExpiry",
+  AMC_CMC_EXPIRY: "amcCmcExpiry",
+  MAINTENANCE_DUE: "maintenanceDue",
+  CALIBRATION: "maintenanceDue",
+  SLA_BREACH: "slaBreach",
+  LOW_STOCK: "lowStock",
+  GATEPASS_OVERDUE: "gatepassOverdue",
+  TICKET_UPDATE: "ticketUpdates",
+  TRANSFER: "assetTransfer",
+};
+
 // ── Main notify function ──
-// Call this from any controller to create notification + broadcast + optionally email
+// Call this from any controller to create notification + broadcast + optionally email.
+// Honours each recipient's NotificationPreference (category + email channel) and,
+// when a dedupeKey is supplied, silently skips if the same alert was already sent.
 export const notify = async (params: {
   type: string;
   title: string;
@@ -95,7 +112,9 @@ export const notify = async (params: {
   assetId?: number;
   ticketId?: number;
   gatePassId?: number;
+  insuranceId?: number;
   createdById?: number;
+  dedupeKey?: string;     // when set, a repeat call with the same key is skipped
   emailSubject?: string;
   emailHtml?: string;
   templateCode?: string;
@@ -107,27 +126,56 @@ export const notify = async (params: {
     if (!params.recipientIds || params.recipientIds.length === 0) return;
 
     const channel = params.channel || "IN_APP";
+    const uniqueIds = [...new Set(params.recipientIds)];
 
-    // Create notification record
-    const notification = await prisma.notification.create({
-      data: {
-        type: params.type,
-        title: params.title,
-        message: params.message,
-        priority: params.priority || "MEDIUM",
-        channel,
-        assetId: params.assetId ?? null,
-        ticketId: params.ticketId ?? null,
-        gatePassId: params.gatePassId ?? null,
-        createdById: params.createdById ?? null,
-        recipients: {
-          create: params.recipientIds.map(empId => ({ employeeId: empId })),
-        },
-      },
+    // ── Apply per-employee notification preferences ──
+    const prefs = await prisma.notificationPreference.findMany({
+      where: { employeeId: { in: uniqueIds } },
+    });
+    const prefByEmp = new Map(prefs.map(p => [p.employeeId, p]));
+
+    const prefField = PREF_FIELD_BY_TYPE[params.type];
+
+    // Category filter: drop employees who switched this category off.
+    // No preference row → deliver (sensible default for alerts).
+    const allowedIds = uniqueIds.filter(id => {
+      if (!prefField) return true;
+      const pref = prefByEmp.get(id) as any;
+      if (!pref) return true;
+      return pref[prefField] !== false;
     });
 
-    // Broadcast via SSE to each recipient
-    for (const empId of params.recipientIds) {
+    if (allowedIds.length === 0) return;
+
+    // Create notification record (+ recipient rows for category-allowed employees)
+    let notification;
+    try {
+      notification = await prisma.notification.create({
+        data: {
+          type: params.type,
+          title: params.title,
+          message: params.message,
+          priority: params.priority || "MEDIUM",
+          channel,
+          assetId: params.assetId ?? null,
+          ticketId: params.ticketId ?? null,
+          gatePassId: params.gatePassId ?? null,
+          insuranceId: params.insuranceId ?? null,
+          createdById: params.createdById ?? null,
+          dedupeKey: params.dedupeKey ?? null,
+          recipients: {
+            create: allowedIds.map(empId => ({ employeeId: empId })),
+          },
+        },
+      });
+    } catch (err: any) {
+      // P2002 = dedupeKey already used → this alert was already sent. Skip silently.
+      if (err?.code === "P2002") return;
+      throw err;
+    }
+
+    // Broadcast via SSE to each category-allowed recipient
+    for (const empId of allowedIds) {
       broadcastToEmployee(empId, {
         id: notification.id,
         type: params.type,
@@ -138,27 +186,30 @@ export const notify = async (params: {
       });
     }
 
-    // Send email if channel is EMAIL or BOTH
+    // Send email if channel is EMAIL or BOTH — only to recipients who allow email
     if (channel === "EMAIL" || channel === "BOTH") {
-      // Get employee emails
       const employees = await prisma.employee.findMany({
-        where: { id: { in: params.recipientIds } },
+        where: { id: { in: allowedIds } },
         select: { id: true, email: true, name: true },
       });
 
       for (const emp of employees) {
-        if (emp.email) {
-          const tplData = { name: emp.name || '', ...(params.templateData || {}) };
-          sendEmail({
-            to: emp.email,
-            subject: params.emailSubject || params.title,
-            html: params.emailHtml || `<p>Hi ${emp.name},</p><p>${params.message}</p><p>— Smart Assets</p>`,
-            cc: params.cc,
-            bcc: params.bcc,
-            templateCode: params.templateCode,
-            templateData: tplData,
-          });
-        }
+        if (!emp.email) continue;
+        const pref = prefByEmp.get(emp.id);
+        // No preference row → email allowed (matches existing alert behaviour).
+        const emailAllowed = !pref || pref.channelEmail;
+        if (!emailAllowed) continue;
+
+        const tplData = { name: emp.name || '', ...(params.templateData || {}) };
+        sendEmail({
+          to: emp.email,
+          subject: params.emailSubject || params.title,
+          html: params.emailHtml || `<p>Hi ${emp.name},</p><p>${params.message}</p><p>— Smart Assets</p>`,
+          cc: params.cc,
+          bcc: params.bcc,
+          templateCode: params.templateCode,
+          templateData: tplData,
+        });
       }
     }
   } catch (err) {

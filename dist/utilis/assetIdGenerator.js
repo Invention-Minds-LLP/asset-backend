@@ -16,6 +16,7 @@ exports.generateAssetId = generateAssetId;
 exports.generateSubAssetId = generateSubAssetId;
 exports.getFYStringFromDate = getFYStringFromDate;
 exports.generateLegacyAssetId = generateLegacyAssetId;
+exports.generateStoreAssetId = generateStoreAssetId;
 exports.getFYString = getFYString;
 exports.getHospitalCode = getHospitalCode;
 exports.getOrgCode = getOrgCode;
@@ -176,5 +177,40 @@ function generateLegacyAssetId(purchaseDate, tx, categoryId, modeOfProcurement) 
             categoryId: categoryId !== null && categoryId !== void 0 ? categoryId : null,
             purchaseDate: refDate,
         });
+    });
+}
+/**
+ * Generate a permanent stores reference ID, assigned when a stores user
+ * fills the asset's basic details. Lives alongside the regular `assetId`
+ * (which still flows TEMP- → AST- via the HOD acknowledgement workflow).
+ *
+ * Format: STR-{ORG}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
+ * Example: STR-JMRH-MED-FY2026-27-00001
+ *
+ * Sequence is per-FY across all categories (pool of stores drafts in that FY).
+ */
+function generateStoreAssetId(categoryId, tx) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const db = tx || prismaClient_1.default;
+        const org = getOrgCode();
+        const catCode = yield resolveCategoryCode(categoryId !== null && categoryId !== void 0 ? categoryId : null, db);
+        const fyStr = getFYString();
+        const prefix = catCode
+            ? `STR-${org}-${catCode}-${fyStr}-`
+            : `STR-${org}-${fyStr}-`;
+        const existing = yield db.asset.findMany({
+            where: { storeAssetId: { startsWith: prefix } },
+            select: { storeAssetId: true },
+        });
+        let maxSeq = 0;
+        for (const row of existing) {
+            if (!row.storeAssetId)
+                continue;
+            const seqStr = row.storeAssetId.slice(prefix.length);
+            const seq = parseInt(seqStr, 10);
+            if (!isNaN(seq) && seq > maxSeq)
+                maxSeq = seq;
+        }
+        return `${prefix}${(maxSeq + 1).toString().padStart(5, "0")}`;
     });
 }

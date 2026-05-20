@@ -95,7 +95,8 @@ const seedDefaultModules = (req, res) => __awaiter(void 0, void 0, void 0, funct
             { name: "operations", label: "Operations", icon: "pi pi-cog", path: "/operations", sortOrder: 11,
                 items: [
                     { name: "gate-pass", label: "Gate Pass", path: "/gate-pass", icon: "pi pi-id-card", sortOrder: 1 },
-                    { name: "acknowledgement", label: "Acknowledgement", path: "/acknowledgement", icon: "pi pi-check-square", sortOrder: 2 },
+                    { name: "gate-pass-security", label: "Gate Pass — Security", path: "/gate-pass/security", icon: "pi pi-shield", sortOrder: 2 },
+                    { name: "acknowledgement", label: "Acknowledgement", path: "/acknowledgement", icon: "pi pi-check-square", sortOrder: 3 },
                     { name: "physical-audit", label: "Physical Audit", path: "/asset-audit", icon: "pi pi-clipboard", sortOrder: 3 },
                     { name: "employee-exit", label: "Employee Exit", path: "/employee-exit", icon: "pi pi-sign-out", sortOrder: 4 },
                     { name: "document-vault", label: "Document Vault", path: "/document-vault", icon: "pi pi-folder-open", sortOrder: 5 },

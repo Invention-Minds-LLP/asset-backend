@@ -5,7 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.mobileAuth = void 0;
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
+// Validated at startup by src/config/validateEnv.ts — no insecure fallback.
+const JWT_SECRET = process.env.JWT_SECRET;
 const mobileAuth = (req, res, next) => {
     const authHeader = req.headers.authorization;
     const token = (authHeader === null || authHeader === void 0 ? void 0 : authHeader.startsWith('Bearer '))

@@ -8,11 +8,22 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.importVendors = exports.updateVendor = exports.deleteVendor = exports.createVendor = exports.getAllVendors = exports.vendorUpload = void 0;
+exports.downloadVendorTemplate = exports.importVendors = exports.updateVendor = exports.deleteVendor = exports.createVendor = exports.getAllVendors = exports.vendorUpload = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const xlsx_1 = __importDefault(require("xlsx"));
 const multer_1 = __importDefault(require("multer"));
@@ -21,7 +32,22 @@ const path_1 = __importDefault(require("path"));
 const uploadDir = path_1.default.join(process.cwd(), "uploads", "vendor-import");
 if (!fs_1.default.existsSync(uploadDir))
     fs_1.default.mkdirSync(uploadDir, { recursive: true });
-exports.vendorUpload = (0, multer_1.default)({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
+const ALLOWED_EXTS = [".xlsx", ".xls"];
+const ALLOWED_MIMES = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "application/octet-stream",
+];
+exports.vendorUpload = (0, multer_1.default)({
+    dest: uploadDir,
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        const ext = path_1.default.extname(file.originalname).toLowerCase();
+        if (ALLOWED_EXTS.includes(ext) && ALLOWED_MIMES.includes(file.mimetype))
+            return cb(null, true);
+        cb(new Error(`Invalid file type. Only Excel (${ALLOWED_EXTS.join(", ")}) is allowed.`));
+    },
+});
 const getAllVendors = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { includeInactive, search, page, limit: lim, exportCsv } = req.query;
@@ -41,12 +67,16 @@ const getAllVendors = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             const take = parseInt(String(lim));
             const [total, vendors] = yield Promise.all([
                 prismaClient_1.default.vendor.count({ where }),
-                prismaClient_1.default.vendor.findMany({ where, orderBy: { name: "asc" }, skip, take }),
+                prismaClient_1.default.vendor.findMany({
+                    where, orderBy: { name: "asc" }, skip, take,
+                    include: { departments: { select: { id: true, name: true } } },
+                }),
             ]);
             if (exportCsv === "true") {
                 const csvRows = vendors.map((v) => ({
                     Name: v.name, Contact: v.contact, Email: v.email || "", VendorType: v.vendorType || "",
                     GST: v.gstNumber || "", PAN: v.panNumber || "", Rating: v.rating || "", Active: v.isActive ? "Yes" : "No",
+                    Departments: (v.departments || []).map((d) => d.name).join(" / "),
                 }));
                 const headers = Object.keys(csvRows[0] || {}).join(",");
                 const rows = csvRows.map((r) => Object.values(r).join(",")).join("\n");
@@ -58,7 +88,10 @@ const getAllVendors = (req, res) => __awaiter(void 0, void 0, void 0, function* 
             res.json({ data: vendors, total, page: parseInt(String(page)), limit: take });
             return;
         }
-        const vendors = yield prismaClient_1.default.vendor.findMany({ where, orderBy: { name: "asc" } });
+        const vendors = yield prismaClient_1.default.vendor.findMany({
+            where, orderBy: { name: "asc" },
+            include: { departments: { select: { id: true, name: true } } },
+        });
         res.json(vendors);
     }
     catch (error) {
@@ -68,8 +101,23 @@ const getAllVendors = (req, res) => __awaiter(void 0, void 0, void 0, function* 
 });
 exports.getAllVendors = getAllVendors;
 const createVendor = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const vendor = yield prismaClient_1.default.vendor.create({ data: req.body });
-    res.status(201).json(vendor);
+    var _a;
+    try {
+        // Split out the M2M departments list from the scalar vendor fields
+        const _b = (_a = req.body) !== null && _a !== void 0 ? _a : {}, { departmentIds } = _b, vendorData = __rest(_b, ["departmentIds"]);
+        const ids = Array.isArray(departmentIds)
+            ? departmentIds.map((n) => Number(n)).filter((n) => Number.isFinite(n))
+            : [];
+        const vendor = yield prismaClient_1.default.vendor.create({
+            data: Object.assign(Object.assign({}, vendorData), (ids.length ? { departments: { connect: ids.map(id => ({ id })) } } : {})),
+            include: { departments: { select: { id: true, name: true } } },
+        });
+        res.status(201).json(vendor);
+    }
+    catch (error) {
+        console.error("createVendor error:", error);
+        res.status(500).json({ message: error.message || "Failed to create vendor" });
+    }
 });
 exports.createVendor = createVendor;
 const deleteVendor = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
@@ -86,17 +134,32 @@ const deleteVendor = (req, res) => __awaiter(void 0, void 0, void 0, function* (
 });
 exports.deleteVendor = deleteVendor;
 const updateVendor = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
     try {
         const id = parseInt(req.params.id, 10);
+        const _b = (_a = req.body) !== null && _a !== void 0 ? _a : {}, { departmentIds } = _b, vendorData = __rest(_b, ["departmentIds"]);
+        // Only touch the M2M when the client explicitly sent the field — avoids
+        // wiping departments on partial patches that omit it.
+        const departmentsUpdate = Array.isArray(departmentIds)
+            ? {
+                departments: {
+                    set: departmentIds
+                        .map((n) => Number(n))
+                        .filter((n) => Number.isFinite(n))
+                        .map((deptId) => ({ id: deptId })),
+                },
+            }
+            : {};
         const updatedVendor = yield prismaClient_1.default.vendor.update({
             where: { id },
-            data: req.body, // update only the fields sent in request body
+            data: Object.assign(Object.assign({}, vendorData), departmentsUpdate),
+            include: { departments: { select: { id: true, name: true } } },
         });
         res.json(updatedVendor);
     }
     catch (error) {
         console.error('Error updating vendor:', error);
-        res.status(500).json({ error: 'Failed to update vendor.' });
+        res.status(500).json({ error: error.message || 'Failed to update vendor.' });
     }
 });
 exports.updateVendor = updateVendor;
@@ -232,3 +295,48 @@ const importVendors = (req, res) => __awaiter(void 0, void 0, void 0, function* 
     }
 });
 exports.importVendors = importVendors;
+// ─── Download Vendor Import Template ────────────────────────────────────────
+const downloadVendorTemplate = (_req, res) => {
+    const headers = ["VENDOR NAME", "CODE", "ADDRESS", "PHONE", "PAN", "GST REGN", "ACTIVE"];
+    const example = [
+        {
+            "VENDOR NAME": "GE Healthcare India Pvt Ltd",
+            "CODE": "VND-001",
+            "ADDRESS": "Plot 12, Whitefield, Bengaluru 560066",
+            "PHONE": "9876543210",
+            "PAN": "AAACG1234F",
+            "GST REGN": "29AAACG1234F1Z5",
+            "ACTIVE": "Yes",
+        },
+        {
+            "VENDOR NAME": "Medtronic India",
+            "CODE": "VND-002",
+            "ADDRESS": "Tower B, Cyber City, Gurugram 122002",
+            "PHONE": "9123456780",
+            "PAN": "AAACM5678K",
+            "GST REGN": "06AAACM5678K1Z2",
+            "ACTIVE": "Yes",
+        },
+    ];
+    const instructions = [
+        { Field: "VENDOR NAME", Required: "YES", Notes: "Used to detect duplicates on re-import. Must be unique." },
+        { Field: "CODE", Required: "NO", Notes: "Internal vendor code (optional)." },
+        { Field: "ADDRESS", Required: "NO", Notes: "Full postal address. Skip rows with placeholder values like '.' or ',,,'." },
+        { Field: "PHONE", Required: "NO", Notes: "Primary contact number. Multiple numbers? Separate with '/' — only the first is kept." },
+        { Field: "PAN", Required: "NO", Notes: "Indian Permanent Account Number." },
+        { Field: "GST REGN", Required: "NO", Notes: "GST registration number." },
+        { Field: "ACTIVE", Required: "NO", Notes: "Yes / No (default: Yes)." },
+    ];
+    const wb = xlsx_1.default.utils.book_new();
+    const ws = xlsx_1.default.utils.json_to_sheet(example, { header: headers });
+    ws["!cols"] = headers.map(h => ({ wch: Math.max(h.length + 4, 22) }));
+    xlsx_1.default.utils.book_append_sheet(wb, ws, "Vendors");
+    const instrWs = xlsx_1.default.utils.json_to_sheet(instructions);
+    instrWs["!cols"] = [{ wch: 18 }, { wch: 12 }, { wch: 70 }];
+    xlsx_1.default.utils.book_append_sheet(wb, instrWs, "Instructions");
+    const buffer = xlsx_1.default.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename=vendor-import-template.xlsx");
+    res.send(buffer);
+};
+exports.downloadVendorTemplate = downloadVendorTemplate;

@@ -403,6 +403,7 @@ exports.uploadContractDocument = uploadContractDocument;
 //   - Amount ≤ 1000 → direct approval (auto-approved)
 //   - Amount > 1000 → needs manager approval (chargeApprovalStatus = PENDING)
 const logServiceVisit = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c;
     try {
         const user = mustUser(req);
         const contractId = Number(req.params.contractId);
@@ -462,6 +463,51 @@ const logServiceVisit = (req, res) => __awaiter(void 0, void 0, void 0, function
                 createdById: user.employeeDbId,
             },
         });
+        // ── Optional auto-create RETURNABLE gate pass when the asset is going off-site ──
+        // Frontend opts in by sending { gatePass: { issuedTo, vehicleNo?, courierDetails?, expectedReturnDate?, purpose? } }
+        const gpInput = req.body.gatePass;
+        if (gpInput && gpInput.issuedTo) {
+            try {
+                const today = new Date();
+                const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
+                const gpCount = yield prismaClient_1.default.gatePass.count({ where: { gatePassNo: { startsWith: `GP-${dateStr}` } } });
+                const gatePassNo = `GP-${dateStr}-${String(gpCount + 1).padStart(4, "0")}`;
+                yield prismaClient_1.default.gatePass.create({
+                    data: {
+                        gatePassNo,
+                        type: "RETURNABLE",
+                        status: "PENDING_APPROVAL",
+                        approvalStatus: "PENDING",
+                        issuedTo: gpInput.issuedTo,
+                        purpose: gpInput.purpose || `Service visit (${visitType}) — ${contract.asset.assetName}`,
+                        expectedReturnDate: gpInput.expectedReturnDate ? new Date(gpInput.expectedReturnDate) : null,
+                        vehicleNo: (_a = gpInput.vehicleNo) !== null && _a !== void 0 ? _a : null,
+                        vehicleType: (_b = gpInput.vehicleType) !== null && _b !== void 0 ? _b : null,
+                        courierDetails: (_c = gpInput.courierDetails) !== null && _c !== void 0 ? _c : null,
+                        requestedById: user.employeeDbId,
+                        requestedAt: new Date(),
+                        serviceVisitId: visit.id,
+                        items: { create: [{ assetId, quantity: 1, remarks: `Service visit #${visit.id}` }] },
+                    },
+                });
+                // Notify HODs of asset's department to approve
+                if (contract.asset.departmentId) {
+                    const hodIds = yield (0, notificationHelper_1.getDepartmentHODs)(contract.asset.departmentId);
+                    if (hodIds.length) {
+                        (0, notificationHelper_1.notify)({
+                            type: "OTHER",
+                            title: "Gate Pass Approval Required",
+                            message: `Gate pass ${gatePassNo} (asset off-site for ${visitType}) needs your approval`,
+                            recipientIds: hodIds,
+                            createdById: user.employeeDbId,
+                        }).catch(() => { });
+                    }
+                }
+            }
+            catch (err) {
+                console.error("Auto-create gate pass for service visit failed:", err);
+            }
+        }
         // Fire-and-forget: notify admins about service visit logged
         (0, notificationHelper_1.getAdminIds)().then(adminIds => (0, notificationHelper_1.notify)({
             type: "AMC_CMC_EXPIRY",

@@ -16,7 +16,8 @@ exports.deleteUser = exports.createUser = exports.getAllUsers = exports.resetPas
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
+// Validated at startup by src/config/validateEnv.ts — no insecure fallback.
+const JWT_SECRET = process.env.JWT_SECRET;
 const loginUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c, _d, _e;
     const { employeeId, password } = req.body;

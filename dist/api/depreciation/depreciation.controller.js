@@ -781,7 +781,6 @@ const runBatchDepreciation = (req, res) => __awaiter(void 0, void 0, void 0, fun
         }
         // Create draft run + log entries (no AssetDepreciation updated yet)
         const batchRun = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-            var _a, _b, _c, _d;
             const run = yield tx.batchDepreciationRun.create({
                 data: {
                     runNumber,
@@ -793,32 +792,36 @@ const runBatchDepreciation = (req, res) => __awaiter(void 0, void 0, void 0, fun
                     runById: employeeId,
                 },
             });
-            // Create draft log entries linked to this batch run — with split breakdown
-            for (const e of eligible) {
-                yield tx.depreciationLog.create({
-                    data: {
-                        assetId: e.assetDbId,
-                        periodStart: e.periodStart,
-                        periodEnd: e.periodEnd,
-                        depreciationAmount: String(e.depreciationAmount.toFixed(2)),
-                        bookValueAfter: String(e.newBookValue.toFixed(2)),
-                        fyLabel: (_a = e.fyLabel) !== null && _a !== void 0 ? _a : null,
-                        openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
-                        depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
-                        depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
-                        additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
-                        effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
-                        halfYearApplied: (_b = e.halfYearApplied) !== null && _b !== void 0 ? _b : false,
-                        isFirstFY: (_c = e.isFirstFY) !== null && _c !== void 0 ? _c : false,
-                        openingWdvSource: (_d = e.openingWdvSource) !== null && _d !== void 0 ? _d : null,
-                        doneById: employeeId,
-                        reason: "BATCH_DRAFT",
-                        batchRunId: run.id,
-                    },
+            // Bulk-insert all draft log entries in one round-trip
+            const logRows = eligible.map(e => {
+                var _a, _b, _c, _d;
+                return ({
+                    assetId: e.assetDbId,
+                    periodStart: e.periodStart,
+                    periodEnd: e.periodEnd,
+                    depreciationAmount: String(e.depreciationAmount.toFixed(2)),
+                    bookValueAfter: String(e.newBookValue.toFixed(2)),
+                    fyLabel: (_a = e.fyLabel) !== null && _a !== void 0 ? _a : null,
+                    openingWdv: e.previousBookValue != null ? String(e.previousBookValue) : null,
+                    depOnOpening: e.depOnOpening != null ? String(e.depOnOpening) : null,
+                    depOnAdditions: e.depOnAdditions != null ? String(e.depOnAdditions) : null,
+                    additionsAmount: e.additionsAmount != null ? String(e.additionsAmount) : null,
+                    effectiveRate: e.effectiveRate != null ? String(e.effectiveRate) : null,
+                    halfYearApplied: (_b = e.halfYearApplied) !== null && _b !== void 0 ? _b : false,
+                    isFirstFY: (_c = e.isFirstFY) !== null && _c !== void 0 ? _c : false,
+                    openingWdvSource: (_d = e.openingWdvSource) !== null && _d !== void 0 ? _d : null,
+                    doneById: employeeId,
+                    reason: "BATCH_DRAFT",
+                    batchRunId: run.id,
                 });
+            });
+            // Chunk to keep the single SQL packet under MySQL's max_allowed_packet
+            const CHUNK = 500;
+            for (let i = 0; i < logRows.length; i += CHUNK) {
+                yield tx.depreciationLog.createMany({ data: logRows.slice(i, i + CHUNK) });
             }
             return run;
-        }));
+        }), { timeout: 60000, maxWait: 10000 });
         res.json({
             message: `Draft batch run created: ${runNumber}. Pending FINANCE approval to commit values.`,
             runId: batchRun.id,
@@ -1080,12 +1083,12 @@ const approveBatchRun = (req, res) => __awaiter(void 0, void 0, void 0, function
                         updatedById: employeeId,
                     },
                 });
-                // Update log reason from DRAFT to BATCH_RUN
-                yield tx.depreciationLog.update({
-                    where: { id: log.id },
-                    data: { reason: "BATCH_RUN" },
-                });
             }
+            // Bulk-flip log status DRAFT → BATCH_RUN in one query
+            yield tx.depreciationLog.updateMany({
+                where: { batchRunId: runId },
+                data: { reason: "BATCH_RUN" },
+            });
             yield tx.batchDepreciationRun.update({
                 where: { id: runId },
                 data: {
@@ -1094,7 +1097,7 @@ const approveBatchRun = (req, res) => __awaiter(void 0, void 0, void 0, function
                     approvedAt: new Date(),
                 },
             });
-        }));
+        }), { timeout: 120000, maxWait: 10000 });
         // Auto-voucher: DR Depreciation Expense / CR Accumulated Depreciation (per GL mappings)
         // We fire-and-forget — a missing GL mapping just skips the voucher gracefully
         try {

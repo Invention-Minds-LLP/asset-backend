@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.downloadLegacyTemplate = void 0;
+exports.downloadChecklistTemplate = exports.downloadLegacyTemplate = void 0;
 exports.importAssetsExcel = importAssetsExcel;
 exports.importChecklistWorkbook = importChecklistWorkbook;
 const fs_1 = __importDefault(require("fs"));
@@ -64,9 +64,19 @@ function getFinancialYearParts(date = new Date()) {
 }
 function createAssetWithGeneratedId(assetData) {
     return __awaiter(this, void 0, void 0, function* () {
+        // Asset ID's FY segment is driven by the most "real" date available, in this order:
+        //   1. installedAt   — when the asset actually went into service (most accurate)
+        //   2. deliveryDate  — when it physically arrived (next best)
+        //   3. purchaseDate  — when it was bought (fallback)
+        // This keeps the FY in the asset ID consistent with when the asset truly
+        // belongs in the books (e.g. an asset bought late FY and installed early
+        // next FY should carry the install-FY in its ID).
+        const idDate = assetData.installedAt ||
+            assetData.deliveryDate ||
+            assetData.purchaseDate;
         const assetId = assetData.isLegacyAsset
-            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)(assetData.purchaseDate, undefined, assetData.assetCategoryId)
-            : yield (0, assetIdGenerator_1.generateAssetId)(assetData.modeOfProcurement || "PURCHASE", undefined, { categoryId: assetData.assetCategoryId, purchaseDate: assetData.purchaseDate });
+            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)(idDate, undefined, assetData.assetCategoryId)
+            : yield (0, assetIdGenerator_1.generateAssetId)(assetData.modeOfProcurement || "PURCHASE", undefined, { categoryId: assetData.assetCategoryId, purchaseDate: idDate });
         return yield prismaClient_1.default.asset.create({ data: Object.assign({ assetId }, assetData) });
     });
 }
@@ -157,7 +167,7 @@ function findAssetByReferenceOrSerial(referenceCode, serialNumber) {
 }
 function importAssetsExcel(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7;
         const file = req.file;
         if (!file) {
             res.status(400).json({ message: 'Excel file is required' });
@@ -184,6 +194,35 @@ function importAssetsExcel(req, res) {
         };
         try {
             const workbook = xlsx_1.default.readFile(file.path);
+            // Required sheet — fail fast with a clear message if absent
+            if (!workbook.Sheets['Assets']) {
+                try {
+                    fs_1.default.unlinkSync(file.path);
+                }
+                catch (_8) { }
+                res.status(400).json({
+                    message: 'Workbook is missing the required "Assets" sheet. Download the template and try again.',
+                    foundSheets: workbook.SheetNames,
+                });
+                return;
+            }
+            // Validate Assets sheet has at least the required columns
+            const requiredAssetCols = ['assetName', 'assetType', 'assetCategory'];
+            const headerRow = (_a = xlsx_1.default.utils.sheet_to_json(workbook.Sheets['Assets'], { header: 1, defval: '' })[0]) !== null && _a !== void 0 ? _a : [];
+            const presentCols = headerRow.map((h) => String(h !== null && h !== void 0 ? h : '').trim().toLowerCase());
+            const missingCols = requiredAssetCols.filter(r => !presentCols.includes(r.toLowerCase()));
+            if (missingCols.length > 0) {
+                try {
+                    fs_1.default.unlinkSync(file.path);
+                }
+                catch (_9) { }
+                res.status(400).json({
+                    message: `"Assets" sheet is missing required column(s): ${missingCols.join(', ')}. Download the template to see the expected layout.`,
+                    missingColumns: missingCols,
+                    foundColumns: headerRow,
+                });
+                return;
+            }
             const readSheet = (name) => workbook.Sheets[name]
                 ? xlsx_1.default.utils.sheet_to_json(workbook.Sheets[name], { defval: '' })
                 : [];
@@ -537,11 +576,11 @@ function importAssetsExcel(req, res) {
                         referenceCode: cleanRefCode,
                         purchaseDate: parseDate(row.purchaseDate),
                         modeOfProcurement,
-                        isBranded: (_a = toBool(row.isBranded)) !== null && _a !== void 0 ? _a : false,
-                        isAssembled: (_b = toBool(row.isAssembled)) !== null && _b !== void 0 ? _b : false,
-                        isCustomized: (_c = toBool(row.isCustomized)) !== null && _c !== void 0 ? _c : false,
+                        isBranded: (_b = toBool(row.isBranded)) !== null && _b !== void 0 ? _b : false,
+                        isAssembled: (_c = toBool(row.isAssembled)) !== null && _c !== void 0 ? _c : false,
+                        isCustomized: (_d = toBool(row.isCustomized)) !== null && _d !== void 0 ? _d : false,
                         customDetails: toStringOrNull(row.customDetails),
-                        hasSpecifications: (_d = toBool(row.hasSpecifications)) !== null && _d !== void 0 ? _d : false,
+                        hasSpecifications: (_e = toBool(row.hasSpecifications)) !== null && _e !== void 0 ? _e : false,
                         installedAt: parseDate(row.installedAt),
                         // PURCHASE
                         invoiceNumber: modeOfProcurement === 'PURCHASE' ? toStringOrNull(row.invoiceNumber) : null,
@@ -645,7 +684,7 @@ function importAssetsExcel(req, res) {
                     // ── Auto-create depreciation with category fallback ─────────────
                     // Priority for each field: row → category default → safe fallback
                     // depreciationStart priority: row → installedAt → purchaseDate
-                    const rawDepMethod = (_e = toStringOrNull(row.depreciationMethod)) === null || _e === void 0 ? void 0 : _e.toUpperCase();
+                    const rawDepMethod = (_f = toStringOrNull(row.depreciationMethod)) === null || _f === void 0 ? void 0 : _f.toUpperCase();
                     let depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod !== null && rawDepMethod !== void 0 ? rawDepMethod : null);
                     let depRate = toNumber(row.depreciationRate);
                     let depLife = toNumber(row.expectedLifeYears);
@@ -682,8 +721,8 @@ function importAssetsExcel(req, res) {
                         const existingDep = yield prismaClient_1.default.assetDepreciation.findUnique({ where: { assetId: savedAssetId } });
                         if (!existingDep) {
                             const asset = yield prismaClient_1.default.asset.findUnique({ where: { id: savedAssetId } });
-                            const cost = Number((_g = (_f = asset === null || asset === void 0 ? void 0 : asset.purchaseCost) !== null && _f !== void 0 ? _f : asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _g !== void 0 ? _g : 0);
-                            const openingDep = (_h = toNumber(row.openingAccumulatedDepreciation)) !== null && _h !== void 0 ? _h : 0;
+                            const cost = Number((_h = (_g = asset === null || asset === void 0 ? void 0 : asset.purchaseCost) !== null && _g !== void 0 ? _g : asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _h !== void 0 ? _h : 0);
+                            const openingDep = (_j = toNumber(row.openingAccumulatedDepreciation)) !== null && _j !== void 0 ? _j : 0;
                             const newDep = yield prismaClient_1.default.assetDepreciation.create({
                                 data: {
                                     assetId: savedAssetId,
@@ -708,20 +747,20 @@ function importAssetsExcel(req, res) {
                             try {
                                 const assetForBackfill = {
                                     id: savedAssetId,
-                                    assetId: (_j = asset === null || asset === void 0 ? void 0 : asset.assetId) !== null && _j !== void 0 ? _j : '',
+                                    assetId: (_k = asset === null || asset === void 0 ? void 0 : asset.assetId) !== null && _k !== void 0 ? _k : '',
                                     purchaseCost: cost,
-                                    estimatedValue: Number((_k = asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _k !== void 0 ? _k : 0),
-                                    purchaseDate: (_l = asset === null || asset === void 0 ? void 0 : asset.purchaseDate) !== null && _l !== void 0 ? _l : null,
-                                    installedAt: (_m = asset === null || asset === void 0 ? void 0 : asset.installedAt) !== null && _m !== void 0 ? _m : null,
-                                    isLegacyAsset: (_o = asset === null || asset === void 0 ? void 0 : asset.isLegacyAsset) !== null && _o !== void 0 ? _o : false,
-                                    migrationMode: (_p = asset === null || asset === void 0 ? void 0 : asset.migrationMode) !== null && _p !== void 0 ? _p : null,
-                                    migrationDate: (_q = asset === null || asset === void 0 ? void 0 : asset.migrationDate) !== null && _q !== void 0 ? _q : null,
-                                    originalPurchaseDate: (_r = asset === null || asset === void 0 ? void 0 : asset.originalPurchaseDate) !== null && _r !== void 0 ? _r : null,
-                                    originalCost: (_s = asset === null || asset === void 0 ? void 0 : asset.originalCost) !== null && _s !== void 0 ? _s : null,
-                                    accDepAtMigration: (_t = asset === null || asset === void 0 ? void 0 : asset.accDepAtMigration) !== null && _t !== void 0 ? _t : null,
-                                    openingWdvAtMigration: (_u = asset === null || asset === void 0 ? void 0 : asset.openingWdvAtMigration) !== null && _u !== void 0 ? _u : null,
-                                    financialYearAdded: (_v = asset === null || asset === void 0 ? void 0 : asset.financialYearAdded) !== null && _v !== void 0 ? _v : null,
-                                    assetPoolId: (_w = asset === null || asset === void 0 ? void 0 : asset.assetPoolId) !== null && _w !== void 0 ? _w : null,
+                                    estimatedValue: Number((_l = asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _l !== void 0 ? _l : 0),
+                                    purchaseDate: (_m = asset === null || asset === void 0 ? void 0 : asset.purchaseDate) !== null && _m !== void 0 ? _m : null,
+                                    installedAt: (_o = asset === null || asset === void 0 ? void 0 : asset.installedAt) !== null && _o !== void 0 ? _o : null,
+                                    isLegacyAsset: (_p = asset === null || asset === void 0 ? void 0 : asset.isLegacyAsset) !== null && _p !== void 0 ? _p : false,
+                                    migrationMode: (_q = asset === null || asset === void 0 ? void 0 : asset.migrationMode) !== null && _q !== void 0 ? _q : null,
+                                    migrationDate: (_r = asset === null || asset === void 0 ? void 0 : asset.migrationDate) !== null && _r !== void 0 ? _r : null,
+                                    originalPurchaseDate: (_s = asset === null || asset === void 0 ? void 0 : asset.originalPurchaseDate) !== null && _s !== void 0 ? _s : null,
+                                    originalCost: (_t = asset === null || asset === void 0 ? void 0 : asset.originalCost) !== null && _t !== void 0 ? _t : null,
+                                    accDepAtMigration: (_u = asset === null || asset === void 0 ? void 0 : asset.accDepAtMigration) !== null && _u !== void 0 ? _u : null,
+                                    openingWdvAtMigration: (_v = asset === null || asset === void 0 ? void 0 : asset.openingWdvAtMigration) !== null && _v !== void 0 ? _v : null,
+                                    financialYearAdded: (_w = asset === null || asset === void 0 ? void 0 : asset.financialYearAdded) !== null && _w !== void 0 ? _w : null,
+                                    assetPoolId: (_x = asset === null || asset === void 0 ? void 0 : asset.assetPoolId) !== null && _x !== void 0 ? _x : null,
                                 };
                                 const cfgForBackfill = {
                                     method: depMethod,
@@ -786,8 +825,8 @@ function importAssetsExcel(req, res) {
                         specificationGroup: toStringOrNull(row.specificationGroup),
                         valueType: toStringOrNull(row.valueType),
                         unit: toStringOrNull(row.unit),
-                        sortOrder: (_x = toNumber(row.sortOrder)) !== null && _x !== void 0 ? _x : 0,
-                        isMandatory: (_y = toBool(row.isMandatory)) !== null && _y !== void 0 ? _y : false,
+                        sortOrder: (_y = toNumber(row.sortOrder)) !== null && _y !== void 0 ? _y : 0,
+                        isMandatory: (_z = toBool(row.isMandatory)) !== null && _z !== void 0 ? _z : false,
                         source: toStringOrNull(row.source),
                         remarks: toStringOrNull(row.remarks),
                     };
@@ -831,7 +870,7 @@ function importAssetsExcel(req, res) {
                         continue;
                     }
                     const vendorId = yield getOrCreateVendor(row);
-                    const isUnderWarranty = (_z = toBool(row.isUnderWarranty)) !== null && _z !== void 0 ? _z : false;
+                    const isUnderWarranty = (_0 = toBool(row.isUnderWarranty)) !== null && _0 !== void 0 ? _0 : false;
                     const warrantyStart = parseDate(row.warrantyStart);
                     const warrantyEnd = parseDate(row.warrantyEnd);
                     if (isUnderWarranty && (!warrantyStart || !warrantyEnd)) {
@@ -1012,7 +1051,7 @@ function importAssetsExcel(req, res) {
                             room: toStringOrNull(row.room),
                             departmentSnapshot: toStringOrNull(row.departmentSnapshot),
                             employeeResponsibleId,
-                            isActive: (_0 = toBool(row.isActive)) !== null && _0 !== void 0 ? _0 : true,
+                            isActive: (_1 = toBool(row.isActive)) !== null && _1 !== void 0 ? _1 : true,
                         }
                     });
                     summary.locationsCreated++;
@@ -1073,11 +1112,11 @@ function importAssetsExcel(req, res) {
                         referenceCode: toStringOrNull(row.referenceCode),
                         status: String(row.status || 'ACTIVE'),
                         parentAssetId: parent.id,
-                        isBranded: (_1 = toBool(row.isBranded)) !== null && _1 !== void 0 ? _1 : false,
-                        isAssembled: (_2 = toBool(row.isAssembled)) !== null && _2 !== void 0 ? _2 : false,
-                        isCustomized: (_3 = toBool(row.isCustomized)) !== null && _3 !== void 0 ? _3 : false,
+                        isBranded: (_2 = toBool(row.isBranded)) !== null && _2 !== void 0 ? _2 : false,
+                        isAssembled: (_3 = toBool(row.isAssembled)) !== null && _3 !== void 0 ? _3 : false,
+                        isCustomized: (_4 = toBool(row.isCustomized)) !== null && _4 !== void 0 ? _4 : false,
                         customDetails: toStringOrNull(row.customDetails),
-                        hasSpecifications: (_4 = toBool(row.hasSpecifications)) !== null && _4 !== void 0 ? _4 : false,
+                        hasSpecifications: (_5 = toBool(row.hasSpecifications)) !== null && _5 !== void 0 ? _5 : false,
                         specificationSummary: toStringOrNull(row.specificationSummary),
                     };
                     if (existingSubAsset) {
@@ -1127,7 +1166,7 @@ function importAssetsExcel(req, res) {
                             frequencyValue: Number(row.frequencyValue),
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
-                            isActive: (_5 = toBool(row.isActive)) !== null && _5 !== void 0 ? _5 : true,
+                            isActive: (_6 = toBool(row.isActive)) !== null && _6 !== void 0 ? _6 : true,
                             reminderDays: toNumber(row.reminderDays),
                             createdBy: toStringOrNull(row.createdBy),
                             reason: toStringOrNull(row.reason),
@@ -1169,7 +1208,7 @@ function importAssetsExcel(req, res) {
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
                             lastCalibratedAt: parseDate(row.lastCalibratedAt),
-                            isActive: (_6 = toBool(row.isActive)) !== null && _6 !== void 0 ? _6 : true,
+                            isActive: (_7 = toBool(row.isActive)) !== null && _7 !== void 0 ? _7 : true,
                             standardProcedure: toStringOrNull(row.standardProcedure),
                             vendorId,
                             reminderDays: toNumber(row.reminderDays),
@@ -1249,6 +1288,26 @@ function importChecklistWorkbook(req, res) {
         };
         try {
             const workbook = xlsx_1.default.readFile(file.path);
+            // Need at least one of the recognised sheets
+            const expectedSheets = [
+                'AssetAcknowledgementTemplates',
+                'PMChecklistTemplates',
+                'CalibrationChecklistTemplates',
+                'AssetSupportMatrix',
+            ];
+            const presentExpected = expectedSheets.filter(s => !!workbook.Sheets[s]);
+            if (presentExpected.length === 0) {
+                try {
+                    fs_1.default.unlinkSync(file.path);
+                }
+                catch (_k) { }
+                res.status(400).json({
+                    message: 'Workbook does not contain any recognised checklist sheets. Download the template to see the expected sheet names.',
+                    expectedAnyOf: expectedSheets,
+                    foundSheets: workbook.SheetNames,
+                });
+                return;
+            }
             const readSheet = (name) => workbook.Sheets[name]
                 ? xlsx_1.default.utils.sheet_to_json(workbook.Sheets[name], { defval: '' })
                 : [];
@@ -1719,3 +1778,108 @@ const downloadLegacyTemplate = (req, res) => {
     res.send(buffer);
 };
 exports.downloadLegacyTemplate = downloadLegacyTemplate;
+// ─── Download Checklist Workbook Template ────────────────────────────────────
+const downloadChecklistTemplate = (_req, res) => {
+    const wb = xlsx_1.default.utils.book_new();
+    // Sheet 1: AssetAcknowledgementTemplates
+    const ackHeaders = [
+        'templateName', 'description', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'sortOrder', 'isRequired',
+    ];
+    const ackExample = [{
+            templateName: 'IT Asset Handover',
+            description: 'Acknowledgement form for IT assets handed to employees',
+            assetCategory: 'Computer',
+            referenceCode: '',
+            isActive: 'true',
+            itemTitle: 'Asset received in working condition',
+            itemDescription: 'Confirm that the asset powers on and all peripherals are intact',
+            sortOrder: 1,
+            isRequired: 'true',
+        }];
+    const ackWs = xlsx_1.default.utils.json_to_sheet(ackExample, { header: ackHeaders });
+    ackWs['!cols'] = ackHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    xlsx_1.default.utils.book_append_sheet(wb, ackWs, 'AssetAcknowledgementTemplates');
+    // Sheet 2: PMChecklistTemplates
+    const pmHeaders = [
+        'templateName', 'description', 'pmFormatCode', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'itemType', 'expectedValue', 'unit', 'sortOrder', 'isRequired',
+    ];
+    const pmExample = [{
+            templateName: 'Quarterly PM - HVAC',
+            description: 'Standard preventive maintenance for HVAC units',
+            pmFormatCode: 'PM-HVAC-Q1',
+            assetCategory: 'HVAC',
+            referenceCode: '',
+            isActive: 'true',
+            itemTitle: 'Filter inspection',
+            itemDescription: 'Check air filter for dust/clog and replace if needed',
+            itemType: 'CHECKBOX',
+            expectedValue: 'Clean',
+            unit: '',
+            sortOrder: 1,
+            isRequired: 'true',
+        }];
+    const pmWs = xlsx_1.default.utils.json_to_sheet(pmExample, { header: pmHeaders });
+    pmWs['!cols'] = pmHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    xlsx_1.default.utils.book_append_sheet(wb, pmWs, 'PMChecklistTemplates');
+    // Sheet 3: CalibrationChecklistTemplates
+    const calHeaders = [
+        'templateName', 'description', 'assetCategory', 'referenceCode', 'isActive',
+        'itemTitle', 'itemDescription', 'expectedValue', 'unit', 'sortOrder', 'isRequired',
+    ];
+    const calExample = [{
+            templateName: 'Annual Calibration - Pressure Gauges',
+            description: 'Yearly accuracy check for all pressure gauges',
+            assetCategory: 'Medical Equipment',
+            referenceCode: '',
+            isActive: 'true',
+            itemTitle: 'Zero point reading',
+            itemDescription: 'Verify gauge reads zero with no applied pressure',
+            expectedValue: '0',
+            unit: 'PSI',
+            sortOrder: 1,
+            isRequired: 'true',
+        }];
+    const calWs = xlsx_1.default.utils.json_to_sheet(calExample, { header: calHeaders });
+    calWs['!cols'] = calHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    xlsx_1.default.utils.book_append_sheet(wb, calWs, 'CalibrationChecklistTemplates');
+    // Sheet 4: AssetSupportMatrix
+    const supHeaders = [
+        'assetCategory', 'referenceCode', 'levelNo', 'roleName', 'personName',
+        'employeeCode', 'contactNumber', 'email', 'escalationTime', 'escalationUnit', 'notes',
+    ];
+    const supExample = [{
+            assetCategory: 'Computer',
+            referenceCode: '',
+            levelNo: 1,
+            roleName: 'IT Support L1',
+            personName: 'Ravi Kumar',
+            employeeCode: 'EMP-101',
+            contactNumber: '9876543210',
+            email: 'ravi@hospital.org',
+            escalationTime: 4,
+            escalationUnit: 'HOURS',
+            notes: 'First responder for all desktop/laptop issues',
+        }];
+    const supWs = xlsx_1.default.utils.json_to_sheet(supExample, { header: supHeaders });
+    supWs['!cols'] = supHeaders.map(h => ({ wch: Math.max(h.length + 4, 18) }));
+    xlsx_1.default.utils.book_append_sheet(wb, supWs, 'AssetSupportMatrix');
+    // Sheet 5: Instructions
+    const instructions = [
+        { Sheet: 'AssetAcknowledgementTemplates', Required: 'templateName, itemTitle', Notes: 'One row per checklist item. Same templateName groups items into one template.' },
+        { Sheet: 'PMChecklistTemplates', Required: 'templateName, itemTitle', Notes: 'Preventive maintenance checklist items. itemType: CHECKBOX / NUMERIC / TEXT.' },
+        { Sheet: 'CalibrationChecklistTemplates', Required: 'templateName, itemTitle', Notes: 'Calibration checklist items. expectedValue + unit are recommended.' },
+        { Sheet: 'AssetSupportMatrix', Required: 'levelNo', Notes: 'Escalation matrix. levelNo 1 = first responder, 2 = next escalation, etc. escalationUnit: MINUTES / HOURS / DAYS.' },
+        { Sheet: '— Common —', Required: 'assetCategory OR referenceCode', Notes: 'Templates apply to a category (assetCategory) OR a single asset (referenceCode). At least one is required for context.' },
+        { Sheet: '— Common —', Required: 'isActive / isRequired', Notes: 'Boolean fields accept: true / false / 1 / 0 / yes / no. Default = true.' },
+    ];
+    const instrWs = xlsx_1.default.utils.json_to_sheet(instructions);
+    instrWs['!cols'] = [{ wch: 32 }, { wch: 28 }, { wch: 80 }];
+    xlsx_1.default.utils.book_append_sheet(wb, instrWs, 'Instructions');
+    const buffer = xlsx_1.default.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=checklist-workbook-template.xlsx');
+    res.send(buffer);
+};
+exports.downloadChecklistTemplate = downloadChecklistTemplate;

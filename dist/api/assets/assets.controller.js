@@ -188,10 +188,29 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 return;
             }
         }
+        // ── Serial-number requirement (driven by category.serialRequired) ────────
+        const categoryIdNum = data.assetCategoryId ? Number(data.assetCategoryId) : null;
+        let categoryRecord = null;
+        if (categoryIdNum) {
+            categoryRecord = yield prismaClient_1.default.assetCategory.findUnique({
+                where: { id: categoryIdNum },
+                select: { serialRequired: true, name: true },
+            });
+        }
+        const serialProvided = data.serialNumber && String(data.serialNumber).trim() !== "";
+        const isLegacy = data.isLegacyAsset === true || data.isLegacyAsset === 'true';
+        if ((categoryRecord === null || categoryRecord === void 0 ? void 0 : categoryRecord.serialRequired) && !serialProvided && !isLegacy) {
+            res.status(400).json({
+                message: `Serial Number is required for category "${categoryRecord.name}".`,
+            });
+            return;
+        }
         // ── Asset ID — legacy assets get a legacy ID immediately; others get TEMP ──
-        const newAssetId = data.isLegacyAsset === true || data.isLegacyAsset === 'true'
-            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)((_a = data.purchaseDate) !== null && _a !== void 0 ? _a : null, undefined, data.assetCategoryId ? Number(data.assetCategoryId) : null)
+        const newAssetId = isLegacy
+            ? yield (0, assetIdGenerator_1.generateLegacyAssetId)((_a = data.purchaseDate) !== null && _a !== void 0 ? _a : null, undefined, categoryIdNum)
             : `TEMP-${Date.now()}`;
+        // Permanent stores reference (always generated on create, separate from assetId)
+        const newStoreAssetId = yield (0, assetIdGenerator_1.generateStoreAssetId)(categoryIdNum);
         // Auto-assign supervisor for department
         // let supervisorId: number | null = null;
         // if (data.departmentId) {
@@ -215,6 +234,7 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
         const asset = yield prismaClient_1.default.asset.create({
             data: {
                 assetId: newAssetId,
+                storeAssetId: newStoreAssetId,
                 assetName: data.assetName,
                 assetType: data.assetType,
                 assetNature: (_b = data.assetNature) !== null && _b !== void 0 ? _b : "TANGIBLE",
@@ -226,7 +246,7 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 assetCategoryId: data.assetCategoryId,
                 rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
                 referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
-                serialNumber: data.serialNumber,
+                serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
                 assetPhoto: (_e = data.assetPhoto) !== null && _e !== void 0 ? _e : null,
                 modeOfProcurement: (_f = data.modeOfProcurement) !== null && _f !== void 0 ? _f : "PURCHASE",
                 serviceCoverageType: (_g = data.serviceCoverageType) !== null && _g !== void 0 ? _g : null,
@@ -284,6 +304,8 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 historicalOtherCost: data.historicalOtherCost ? String(data.historicalOtherCost) : null,
                 historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
                 historicalCostNote: (_r = data.historicalCostNote) !== null && _r !== void 0 ? _r : null,
+                // Revenue log applicability — drives visibility of revenue tracking sections
+                isRevenueLogApplicable: data.isRevenueLogApplicable ? true : false,
                 // ── Asset Pool linkage ────────────────────────────────────────────────
                 assetPoolId: data.assetPoolId ? Number(data.assetPoolId) : null,
                 financialYearAdded: (_s = data.financialYearAdded) !== null && _s !== void 0 ? _s : null,
@@ -548,22 +570,50 @@ exports.hodApproveAsset = hodApproveAsset;
 //   res.json(asset);
 // };
 const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g;
     try {
         const id = Number(req.params.id);
         const data = req.body;
+        // ── Serial-number requirement (driven by category.serialRequired) ────────
+        // Resolve the effective category: payload value if provided, otherwise the asset's existing category.
+        let effectiveCategoryId = data.assetCategoryId ? Number(data.assetCategoryId) : null;
+        if (!effectiveCategoryId) {
+            const existing = yield prismaClient_1.default.asset.findUnique({
+                where: { id },
+                select: { assetCategoryId: true, isLegacyAsset: true },
+            });
+            effectiveCategoryId = (_a = existing === null || existing === void 0 ? void 0 : existing.assetCategoryId) !== null && _a !== void 0 ? _a : null;
+        }
+        let serialRequiredCategory = null;
+        if (effectiveCategoryId) {
+            serialRequiredCategory = yield prismaClient_1.default.assetCategory.findUnique({
+                where: { id: effectiveCategoryId },
+                select: { serialRequired: true, name: true },
+            });
+        }
+        const serialProvided = data.serialNumber !== undefined && data.serialNumber !== null && String(data.serialNumber).trim() !== "";
+        const isLegacy = data.isLegacyAsset === true || data.isLegacyAsset === 'true';
+        if ((serialRequiredCategory === null || serialRequiredCategory === void 0 ? void 0 : serialRequiredCategory.serialRequired) &&
+            data.serialNumber !== undefined &&
+            !serialProvided &&
+            !isLegacy) {
+            res.status(400).json({
+                message: `Serial Number is required for category "${serialRequiredCategory.name}".`,
+            });
+            return;
+        }
         const updateData = {
             assetName: data.assetName,
             assetType: data.assetType,
-            assetNature: (_a = data.assetNature) !== null && _a !== void 0 ? _a : "TANGIBLE",
+            assetNature: (_b = data.assetNature) !== null && _b !== void 0 ? _b : "TANGIBLE",
             // Intangible-specific
-            intangibleSubType: (_b = data.intangibleSubType) !== null && _b !== void 0 ? _b : null,
+            intangibleSubType: (_c = data.intangibleSubType) !== null && _c !== void 0 ? _c : null,
             usefulLifeYears: data.usefulLifeYears ? Number(data.usefulLifeYears) : null,
-            amortizationMethod: (_c = data.amortizationMethod) !== null && _c !== void 0 ? _c : null,
+            amortizationMethod: (_d = data.amortizationMethod) !== null && _d !== void 0 ? _d : null,
             amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
             residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
             referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
-            serialNumber: data.serialNumber,
+            serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
             assetPhoto: data.assetPhoto,
             rfidCode: data.rfidCode,
             modeOfProcurement: data.modeOfProcurement,
@@ -591,7 +641,9 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             historicalSparePartsCost: data.historicalSparePartsCost != null ? String(data.historicalSparePartsCost) : null,
             historicalOtherCost: data.historicalOtherCost != null ? String(data.historicalOtherCost) : null,
             historicalCostAsOf: data.historicalCostAsOf ? new Date(data.historicalCostAsOf) : null,
-            historicalCostNote: (_d = data.historicalCostNote) !== null && _d !== void 0 ? _d : null,
+            historicalCostNote: (_e = data.historicalCostNote) !== null && _e !== void 0 ? _e : null,
+            // Revenue log applicability
+            isRevenueLogApplicable: data.isRevenueLogApplicable ? true : false,
         };
         // ---------------------------
         // CATEGORY (SAFE CONNECT)
@@ -630,6 +682,18 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 connect: { id: Number(data.supervisorId) }
             };
         }
+        // Voucher Details — patchable from the Depreciation tab even when the
+        // procurement-mode block below isn't triggered. Only writes if the field is
+        // present in the request body so we don't blank existing values on partial patches.
+        if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherNo")) {
+            updateData.purchaseVoucherNo = (_f = data.purchaseVoucherNo) !== null && _f !== void 0 ? _f : null;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherDate")) {
+            updateData.purchaseVoucherDate = data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null;
+        }
+        if (Object.prototype.hasOwnProperty.call(data, "purchaseVoucherId")) {
+            updateData.purchaseVoucherId = data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null;
+        }
         // ---------------------------
         // MODE-BASED FIELDS
         // ---------------------------
@@ -641,9 +705,6 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 purchaseOrderDate: data.purchaseOrderDate ? new Date(data.purchaseOrderDate) : null,
                 deliveryDate: data.deliveryDate ? new Date(data.deliveryDate) : null,
                 purchaseCost: data.purchaseCost ? Number(data.purchaseCost) : null,
-                purchaseVoucherNo: (_e = data.purchaseVoucherNo) !== null && _e !== void 0 ? _e : null,
-                purchaseVoucherDate: data.purchaseVoucherDate ? new Date(data.purchaseVoucherDate) : null,
-                purchaseVoucherId: data.purchaseVoucherId ? Number(data.purchaseVoucherId) : null,
             });
         }
         if (data.modeOfProcurement === "DONATION") {
@@ -682,7 +743,7 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 allottedTo: true,
             },
         });
-        (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: id, action: "UPDATE", description: `Asset updated`, performedById: (_f = req.user) === null || _f === void 0 ? void 0 : _f.employeeDbId });
+        (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: id, action: "UPDATE", description: `Asset updated`, performedById: (_g = req.user) === null || _g === void 0 ? void 0 : _g.employeeDbId });
         res.json(updated);
     }
     catch (err) {

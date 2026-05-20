@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.formatCurrency = exports.getAdminIds = exports.getDepartmentHODs = exports.notify = exports.sendEmail = exports.removeSSEClient = exports.addSSEClient = void 0;
+exports.formatCurrency = exports.getAdminIds = exports.getSecurityTeam = exports.getDepartmentHODs = exports.notify = exports.sendEmail = exports.removeSSEClient = exports.addSSEClient = void 0;
 const prismaClient_1 = __importDefault(require("../prismaClient"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
 const formatCurrency = (n) => '₹' + n.toLocaleString('en-IN');
@@ -76,32 +76,79 @@ const sendEmail = (options) => __awaiter(void 0, void 0, void 0, function* () {
     }
 });
 exports.sendEmail = sendEmail;
+// ── Map notification type → NotificationPreference category toggle ──
+// Types not listed here have no per-category toggle and are always delivered.
+const PREF_FIELD_BY_TYPE = {
+    WARRANTY_EXPIRY: "warrantyExpiry",
+    INSURANCE_EXPIRY: "insuranceExpiry",
+    AMC_CMC_EXPIRY: "amcCmcExpiry",
+    MAINTENANCE_DUE: "maintenanceDue",
+    CALIBRATION: "maintenanceDue",
+    SLA_BREACH: "slaBreach",
+    LOW_STOCK: "lowStock",
+    GATEPASS_OVERDUE: "gatepassOverdue",
+    TICKET_UPDATE: "ticketUpdates",
+    TRANSFER: "assetTransfer",
+};
 // ── Main notify function ──
-// Call this from any controller to create notification + broadcast + optionally email
+// Call this from any controller to create notification + broadcast + optionally email.
+// Honours each recipient's NotificationPreference (category + email channel) and,
+// when a dedupeKey is supplied, silently skips if the same alert was already sent.
 const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c;
+    var _a, _b, _c, _d, _e, _f;
     try {
         if (!params.recipientIds || params.recipientIds.length === 0)
             return;
         const channel = params.channel || "IN_APP";
-        // Create notification record
-        const notification = yield prismaClient_1.default.notification.create({
-            data: {
-                type: params.type,
-                title: params.title,
-                message: params.message,
-                priority: params.priority || "MEDIUM",
-                channel,
-                assetId: (_a = params.assetId) !== null && _a !== void 0 ? _a : null,
-                ticketId: (_b = params.ticketId) !== null && _b !== void 0 ? _b : null,
-                createdById: (_c = params.createdById) !== null && _c !== void 0 ? _c : null,
-                recipients: {
-                    create: params.recipientIds.map(empId => ({ employeeId: empId })),
-                },
-            },
+        const uniqueIds = [...new Set(params.recipientIds)];
+        // ── Apply per-employee notification preferences ──
+        const prefs = yield prismaClient_1.default.notificationPreference.findMany({
+            where: { employeeId: { in: uniqueIds } },
         });
-        // Broadcast via SSE to each recipient
-        for (const empId of params.recipientIds) {
+        const prefByEmp = new Map(prefs.map(p => [p.employeeId, p]));
+        const prefField = PREF_FIELD_BY_TYPE[params.type];
+        // Category filter: drop employees who switched this category off.
+        // No preference row → deliver (sensible default for alerts).
+        const allowedIds = uniqueIds.filter(id => {
+            if (!prefField)
+                return true;
+            const pref = prefByEmp.get(id);
+            if (!pref)
+                return true;
+            return pref[prefField] !== false;
+        });
+        if (allowedIds.length === 0)
+            return;
+        // Create notification record (+ recipient rows for category-allowed employees)
+        let notification;
+        try {
+            notification = yield prismaClient_1.default.notification.create({
+                data: {
+                    type: params.type,
+                    title: params.title,
+                    message: params.message,
+                    priority: params.priority || "MEDIUM",
+                    channel,
+                    assetId: (_a = params.assetId) !== null && _a !== void 0 ? _a : null,
+                    ticketId: (_b = params.ticketId) !== null && _b !== void 0 ? _b : null,
+                    gatePassId: (_c = params.gatePassId) !== null && _c !== void 0 ? _c : null,
+                    insuranceId: (_d = params.insuranceId) !== null && _d !== void 0 ? _d : null,
+                    createdById: (_e = params.createdById) !== null && _e !== void 0 ? _e : null,
+                    dedupeKey: (_f = params.dedupeKey) !== null && _f !== void 0 ? _f : null,
+                    recipients: {
+                        create: allowedIds.map(empId => ({ employeeId: empId })),
+                    },
+                },
+            });
+        }
+        catch (err) {
+            // P2002 = dedupeKey already used → this alert was already sent. Skip silently.
+            if ((err === null || err === void 0 ? void 0 : err.code) === "P2002")
+                return;
+            throw err;
+        }
+        // Broadcast via SSE to each category-allowed recipient
+        for (const empId of allowedIds) {
             broadcastToEmployee(empId, {
                 id: notification.id,
                 type: params.type,
@@ -111,26 +158,30 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
                 createdAt: notification.createdAt,
             });
         }
-        // Send email if channel is EMAIL or BOTH
+        // Send email if channel is EMAIL or BOTH — only to recipients who allow email
         if (channel === "EMAIL" || channel === "BOTH") {
-            // Get employee emails
             const employees = yield prismaClient_1.default.employee.findMany({
-                where: { id: { in: params.recipientIds } },
+                where: { id: { in: allowedIds } },
                 select: { id: true, email: true, name: true },
             });
             for (const emp of employees) {
-                if (emp.email) {
-                    const tplData = Object.assign({ name: emp.name || '' }, (params.templateData || {}));
-                    (0, exports.sendEmail)({
-                        to: emp.email,
-                        subject: params.emailSubject || params.title,
-                        html: params.emailHtml || `<p>Hi ${emp.name},</p><p>${params.message}</p><p>— Smart Assets</p>`,
-                        cc: params.cc,
-                        bcc: params.bcc,
-                        templateCode: params.templateCode,
-                        templateData: tplData,
-                    });
-                }
+                if (!emp.email)
+                    continue;
+                const pref = prefByEmp.get(emp.id);
+                // No preference row → email allowed (matches existing alert behaviour).
+                const emailAllowed = !pref || pref.channelEmail;
+                if (!emailAllowed)
+                    continue;
+                const tplData = Object.assign({ name: emp.name || '' }, (params.templateData || {}));
+                (0, exports.sendEmail)({
+                    to: emp.email,
+                    subject: params.emailSubject || params.title,
+                    html: params.emailHtml || `<p>Hi ${emp.name},</p><p>${params.message}</p><p>— Smart Assets</p>`,
+                    cc: params.cc,
+                    bcc: params.bcc,
+                    templateCode: params.templateCode,
+                    templateData: tplData,
+                });
             }
         }
     }
@@ -151,6 +202,17 @@ const getDepartmentHODs = (departmentId) => __awaiter(void 0, void 0, void 0, fu
     return hods.map(h => h.id);
 });
 exports.getDepartmentHODs = getDepartmentHODs;
+// ── Helper to get all SECURITY-role employees ──
+// SECURITY isn't part of the EmployeeRole enum — it's stored on User.role (string).
+// Same pattern as getAdminIds() above: walk User → Employee.
+const getSecurityTeam = () => __awaiter(void 0, void 0, void 0, function* () {
+    const securityUsers = yield prismaClient_1.default.user.findMany({
+        where: { role: "SECURITY" },
+        select: { employee: { select: { id: true } } },
+    });
+    return securityUsers.map(u => { var _a; return (_a = u.employee) === null || _a === void 0 ? void 0 : _a.id; }).filter(Boolean);
+});
+exports.getSecurityTeam = getSecurityTeam;
 // ── Helper to get all ADMINs ──
 const getAdminIds = () => __awaiter(void 0, void 0, void 0, function* () {
     // Admins are users with ADMIN role

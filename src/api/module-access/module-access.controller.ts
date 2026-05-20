@@ -71,6 +71,7 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "fixed-assets-schedule", label: "Fixed Assets Schedule", path: "/fixed-assets-schedule", icon: "pi pi-table",           sortOrder: 7 },
           { name: "finance-centre",        label: "Finance Centre",        path: "/finance-centre",        icon: "pi pi-building-columns", sortOrder: 8 },
           { name: "reports",               label: "Reports",               path: "/reports",               icon: "pi pi-file",             sortOrder: 9 },
+          { name: "data-export",           label: "Data Export",           path: "/data-export",           icon: "pi pi-download",         sortOrder: 10 },
         ]
       },
 

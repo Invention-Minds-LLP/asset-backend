@@ -61,6 +61,7 @@ function pickCategoryFields(body) {
         name: (_a = body.name) === null || _a === void 0 ? void 0 : _a.trim(),
         code: ((_b = body.code) === null || _b === void 0 ? void 0 : _b.trim()) || null,
         description: (_c = body.description) !== null && _c !== void 0 ? _c : null,
+        serialRequired: body.serialRequired === undefined ? true : Boolean(body.serialRequired),
         defaultDepreciationMethod: body.defaultDepreciationMethod || null,
         defaultDepreciationRate: body.defaultDepreciationRate != null && body.defaultDepreciationRate !== ''
             ? Number(body.defaultDepreciationRate) : null,

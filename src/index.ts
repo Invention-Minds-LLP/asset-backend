@@ -1,3 +1,5 @@
+import "dotenv/config";          // load .env before anything else evaluates
+import "./config/validateEnv";   // fail fast if a critical secret is missing
 import express from "express";
 import assetRoutes from "./api/assets/assets.routes";
 import warrantyRoutes from "./api/warranty/warranty.routes";
@@ -71,12 +73,22 @@ import financeRoutes from "./api/finance/finance.routes";
 import serviceInvoiceRoutes from "./api/service-invoices/service-invoices.routes";
 import legacyMigrationRoutes from "./api/legacy-migration/legacy-migration.routes";
 import reconciliationRoutes from "./api/reconciliation/reconciliation.routes";
+import exportRoutes from "./api/export/export.routes";
 
 import cors from "cors";
 import path from "path";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { startScheduler } from "./scheduler";
+import { moduleAccessGuard } from "./middleware/moduleAccessMiddleware";
 
 const app = express();
 const port = 3001;
+
+// Security headers (HSTS, X-Content-Type-Options, frameguard, etc.).
+// crossOriginResourcePolicy is relaxed so the separate-origin SPA can still
+// load image/document assets served from /uploads.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
 // Middleware to parse JSON bodies
 app.use(express.json());
@@ -91,6 +103,19 @@ app.use(cors({
   ], // Allow your Angular app
   credentials: true               // Optional: if you plan to send cookies
 }));
+
+// Throttle login attempts to slow brute-force / credential-stuffing.
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                  // 10 attempts per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: "Too many login attempts from this IP. Please try again in 15 minutes." },
+});
+app.use("/api/users/login", loginLimiter);
+
+// Server-side module-access enforcement (runs before the feature routers).
+app.use(moduleAccessGuard);
 
 // Mount routers
 app.use("/api/assets", assetRoutes);
@@ -177,6 +202,9 @@ app.use("/api/legacy-migration", legacyMigrationRoutes);
 // ── Reconciliation (Books vs Audit vs System) ────────────────────────────────
 app.use("/api/reconciliation", reconciliationRoutes);
 
+// ── Data Export Centre (Excel) ───────────────────────────────────────────────
+app.use("/api/export", exportRoutes);
+
 // Default route
 app.get("/", (req, res) => {
   res.send("Asset Management API is running!");
@@ -191,4 +219,6 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
 // Start the server
 app.listen(port, '0.0.0.0', () => {
   console.log(`🚀 Server running at http://127.0.0.1:${port}/`);
+  // Kick off the in-process daily alert scheduler.
+  startScheduler();
 });

@@ -50,12 +50,24 @@ function getFinancialYearParts(date = new Date()) {
 }
 
 async function createAssetWithGeneratedId(assetData: any) {
+    // Asset ID's FY segment is driven by the most "real" date available, in this order:
+    //   1. installedAt   — when the asset actually went into service (most accurate)
+    //   2. deliveryDate  — when it physically arrived (next best)
+    //   3. purchaseDate  — when it was bought (fallback)
+    // This keeps the FY in the asset ID consistent with when the asset truly
+    // belongs in the books (e.g. an asset bought late FY and installed early
+    // next FY should carry the install-FY in its ID).
+    const idDate =
+        assetData.installedAt   ||
+        assetData.deliveryDate  ||
+        assetData.purchaseDate;
+
     const assetId = assetData.isLegacyAsset
-        ? await generateLegacyAssetId(assetData.purchaseDate, undefined, assetData.assetCategoryId)
+        ? await generateLegacyAssetId(idDate, undefined, assetData.assetCategoryId)
         : await generateAssetId(
             assetData.modeOfProcurement || "PURCHASE",
             undefined,
-            { categoryId: assetData.assetCategoryId, purchaseDate: assetData.purchaseDate },
+            { categoryId: assetData.assetCategoryId, purchaseDate: idDate },
           );
     return await prisma.asset.create({ data: { assetId, ...assetData } });
 }

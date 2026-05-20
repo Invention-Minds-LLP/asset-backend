@@ -13,7 +13,11 @@ router.post("/insurance-expiry", authMiddleware_1.authenticateToken, cron_jobs_c
 router.post("/sla-breach", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkSLABreach);
 router.post("/maintenance-sla-breach", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkMaintenanceSLABreach);
 router.post("/contract-expiry", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkContractExpiry);
+router.post("/calibration-due", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkCalibrationDue);
+router.post("/maintenance-due", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkMaintenanceDue);
+router.post("/low-stock", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkLowStock);
 router.post("/asset-activation", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkAssetActivation);
+router.post("/gate-pass-overdue", authMiddleware_1.authenticateToken, cron_jobs_controller_1.checkGatePassOverdue);
 router.post("/run-all", authMiddleware_1.authenticateToken, cron_jobs_controller_1.runAllChecks);
 // ── Depreciation cron jobs ───────────────────────────────────────────────
 router.post("/year-end-depreciation", authMiddleware_1.authenticateToken, depreciation_cron_controller_1.runYearEndDepreciation);
