@@ -268,6 +268,7 @@ export const getMyPreferences = async (req: AuthenticatedRequest, res: Response)
         channelEmail: false,
         channelSms: false,
         channelWhatsapp: false,
+        channelPush: true,
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -523,5 +524,49 @@ export const sendManualEmail = async (req: AuthenticatedRequest, res: Response) 
   } catch (error: any) {
     console.error("sendManualEmail error:", error);
     res.status(500).json({ message: "Failed to send email", error: error.message });
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FIREBASE DEVICE TOKENS — Mobile push notification registration
+// ═════════════════════════════════════════════════════════════════════════════
+
+// POST /api/notifications/device-token
+// The mobile client upserts its FCM token on every successful login.
+// Body: { employeeId, token, platform }   platform = ANDROID | IOS | WEB
+export const saveDeviceToken = async (req: Request, res: Response) => {
+  try {
+    const { employeeId, token, platform } = req.body || {};
+    if (!employeeId || !token) {
+      res.status(400).json({ error: "employeeId and token are required" });
+      return;
+    }
+    await (prisma as any).deviceToken.upsert({
+      where:  { token },
+      update: { employeeId: Number(employeeId), platform: platform || "UNKNOWN" },
+      create: { employeeId: Number(employeeId), token, platform: platform || "UNKNOWN" },
+    });
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("saveDeviceToken error:", error);
+    res.status(500).json({ message: "Failed to save device token", error: error.message });
+  }
+};
+
+// POST /api/notifications/remove-device-token
+// Called by the mobile client on logout.
+// Body: { token }
+export const removeDeviceToken = async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body || {};
+    if (!token) {
+      res.status(400).json({ error: "token is required" });
+      return;
+    }
+    await (prisma as any).deviceToken.deleteMany({ where: { token } });
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error("removeDeviceToken error:", error);
+    res.status(500).json({ message: "Failed to remove device token", error: error.message });
   }
 };

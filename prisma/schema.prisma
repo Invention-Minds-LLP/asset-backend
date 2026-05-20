@@ -818,6 +818,7 @@ model Employee {
   serviceInvoicesApproved    ServiceInvoice[]                   @relation("ServiceInvoiceApprovedBy")
   reconciliationsCreated     ReconciliationSnapshot[]           @relation("ReconCreatedBy")
   reconciliationsResolved    ReconciliationSnapshot[]           @relation("ReconResolvedBy")
+  deviceTokens               DeviceToken[]
 
   @@map("employee")
 }
@@ -1749,11 +1750,31 @@ model NotificationPreference {
   channelEmail    Boolean @default(false)
   channelSms      Boolean @default(false)
   channelWhatsapp Boolean @default(false)
+  channelPush     Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@map("notificationpreference")
+}
+
+// ── Firebase Cloud Messaging device tokens ─────────────────────────────────
+// One row per device. The mobile client upserts on login and removes on logout.
+// Tokens that return INVALID / NOT_REGISTERED on send are cleaned up by the
+// push helper so the table self-prunes over time.
+model DeviceToken {
+  id         Int      @id @default(autoincrement())
+  employeeId Int
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  token    String @unique
+  platform String // ANDROID | IOS | WEB
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([employeeId])
+  @@map("devicetoken")
 }
 
 model EmailTemplate {

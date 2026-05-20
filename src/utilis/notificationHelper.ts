@@ -1,6 +1,7 @@
 import prisma from "../prismaClient";
 import nodemailer from "nodemailer";
 import { Response } from "express";
+import { getFirebaseApp } from "../lib/firebase";
 
 const formatCurrency = (n: number) => '₹' + n.toLocaleString('en-IN');
 
@@ -80,6 +81,55 @@ export const sendEmail = async (options: {
     await transporter.sendMail(mailOptions);
   } catch (err) {
     console.error("Email send failed (non-blocking):", err);
+  }
+};
+
+// ── Firebase push (FCM) ──
+// Sends a multicast push to every active device registered for `employeeId`.
+// No-op when Firebase isn't configured (FIREBASE_SERVICE_ACCOUNT_PATH unset),
+// so the rest of the notification flow keeps working in dev / demo envs.
+// Tokens that come back as INVALID / NOT_REGISTERED are pruned automatically.
+export const sendPushNotification = async (
+  employeeId: number,
+  title: string,
+  message: string,
+  data?: Record<string, string>,
+): Promise<void> => {
+  const app = getFirebaseApp();
+  if (!app) return;
+
+  try {
+    const tokens: { token: string }[] = await (prisma as any).deviceToken.findMany({
+      where: { employeeId },
+      select: { token: true },
+    });
+    if (!tokens.length) return;
+
+    const response = await app.messaging().sendEachForMulticast({
+      tokens: tokens.map(t => t.token),
+      notification: { title, body: message },
+      data: data ?? { route: "/notifications" },
+    });
+
+    // Cleanup tokens FCM tells us are dead. Codes that mean "remove this token":
+    //   messaging/registration-token-not-registered
+    //   messaging/invalid-registration-token
+    response.responses.forEach(async (r, i) => {
+      if (r.success) return;
+      const code = (r.error as any)?.code || "";
+      if (
+        code.includes("registration-token-not-registered") ||
+        code.includes("invalid-registration-token") ||
+        code.includes("invalid-argument")
+      ) {
+        await (prisma as any).deviceToken.deleteMany({
+          where: { token: tokens[i].token },
+        });
+      }
+    });
+  } catch (err) {
+    // Push failure must never break the in-app / email flow.
+    console.error("Push send failed (non-blocking):", err);
   }
 };
 
@@ -211,6 +261,20 @@ export const notify = async (params: {
           templateData: tplData,
         });
       }
+    }
+
+    // Send Firebase push to recipients who allow push (channelPush on by default).
+    // Fan-out happens in parallel; each call is fault-isolated and a no-op when
+    // Firebase isn't configured, so this is safe on any environment.
+    for (const empId of allowedIds) {
+      const pref = prefByEmp.get(empId) as any;
+      const pushAllowed = !pref || pref.channelPush !== false;
+      if (!pushAllowed) continue;
+      void sendPushNotification(empId, params.title, params.message, {
+        notificationId: String(notification.id),
+        type: params.type,
+        route: "/notifications",
+      });
     }
   } catch (err) {
     // Never break the main flow

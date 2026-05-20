@@ -16,6 +16,8 @@ import {
   getSmtpConfig,
   upsertSmtpConfig,
   sendManualEmail,
+  saveDeviceToken,
+  removeDeviceToken,
 } from "./notifications.controller";
 import { addSSEClient, removeSSEClient } from "../../utilis/notificationHelper";
 
@@ -63,6 +65,13 @@ router.put("/smtp-config", authenticateToken, upsertSmtpConfig);
 
 // Send manual email (with CC/BCC + template)
 router.post("/send-email", authenticateToken, sendManualEmail);
+
+// ── Firebase device tokens (mobile push) ──────────────────────────────────
+// device-token is intentionally unauthenticated so the mobile client can
+// register its FCM token during the login flow itself, before holding a JWT.
+// The body must include employeeId — verify identity at the call site.
+router.post("/device-token", saveDeviceToken);
+router.post("/remove-device-token", authenticateToken, removeDeviceToken);
 
 // Admin / system
 router.get("/", authenticateToken, getAllNotifications);
