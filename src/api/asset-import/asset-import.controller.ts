@@ -158,6 +158,60 @@ async function findAssetByReferenceOrSerial(referenceCode: any, serialNumber: an
     return asset;
 }
 
+/**
+ * Translate Prisma errors into a sentence a non-developer can act on.
+ * Falls back to the raw message if the error shape is unfamiliar.
+ */
+function friendlyPrismaError(err: any): string {
+    if (!err) return 'Unknown error';
+    // P2002 = unique-constraint violation; meta.target = [columnName, …]
+    if (err.code === 'P2002') {
+        const fields = Array.isArray(err.meta?.target) ? err.meta.target.join(', ') : (err.meta?.target ?? 'unknown field');
+        return `Duplicate value — another asset already has the same ${fields}. Either remove this row from the file, or change the conflicting value before re-importing.`;
+    }
+    // P2003 = FK constraint
+    if (err.code === 'P2003') {
+        return `Referenced record not found (${err.meta?.field_name ?? 'foreign key'}). Check department/vendor/employee codes in this row.`;
+    }
+    // P2025 = update target not found
+    if (err.code === 'P2025') {
+        return `Record to update was not found. It may have been deleted between read and write.`;
+    }
+    return err.message ?? String(err);
+}
+
+/**
+ * Scan all asset rows BEFORE writing anything, return a Set of row indices
+ * that are in-file duplicates (same serial OR referenceCode appears twice
+ * inside the uploaded sheet). Only the FIRST occurrence is processed; later
+ * occurrences are surfaced as SKIPPED_DUPLICATE_IN_FILE.
+ */
+function detectInFileDuplicates(rows: any[]): Map<number, string> {
+    const seenSerial = new Map<string, number>();
+    const seenRef = new Map<string, number>();
+    const dups = new Map<number, string>(); // rowIndex (0-based) -> reason
+
+    for (let i = 0; i < rows.length; i++) {
+        const serial = String(rows[i].serialNumber ?? '').trim();
+        const ref = String(rows[i].referenceCode ?? '').trim();
+        if (serial) {
+            if (seenSerial.has(serial)) {
+                dups.set(i, `In-file duplicate: serialNumber "${serial}" first appeared in row ${seenSerial.get(serial)! + 2}`);
+                continue;
+            }
+            seenSerial.set(serial, i);
+        }
+        if (ref) {
+            if (seenRef.has(ref)) {
+                dups.set(i, `In-file duplicate: referenceCode "${ref}" first appeared in row ${seenRef.get(ref)! + 2}`);
+                continue;
+            }
+            seenRef.set(ref, i);
+        }
+    }
+    return dups;
+}
+
 export async function importAssetsExcel(req: Request, res: Response) {
     const file = req.file;
 
@@ -167,13 +221,11 @@ export async function importAssetsExcel(req: Request, res: Response) {
     }
 
     const summary = {
-        // assetCategoriesUpserted: 0,
-        // vendorsUpserted: 0,
-        // departmentsUpserted: 0,
-        // branchesUpserted: 0,
         employeesUpserted: 0,
         assetsCreated: 0,
         assetsUpdated: 0,
+        assetsSkippedDuplicate: 0,
+        assetsFailed: 0,
         specificationsCreated: 0,
         specificationsUpdated: 0,
         warrantiesUpserted: 0,
@@ -184,6 +236,18 @@ export async function importAssetsExcel(req: Request, res: Response) {
         maintenanceSchedulesCreated: 0,
         calibrationSchedulesCreated: 0,
         errors: [] as any[],
+        // Per-row visibility: every Assets sheet row produces one entry here.
+        // status = CREATED | UPDATED | SKIPPED_DUPLICATE | ERROR
+        assetOutcomes: [] as Array<{
+            row: number;
+            assetName?: string;
+            referenceCode?: string;
+            serialNumber?: string;
+            status: 'CREATED' | 'UPDATED' | 'SKIPPED_DUPLICATE' | 'ERROR';
+            message: string;
+            matchedBy?: 'referenceCode' | 'serialNumber' | null;
+            existingAssetId?: string;
+        }>,
     };
 
     try {
@@ -534,17 +598,39 @@ export async function importAssetsExcel(req: Request, res: Response) {
         // ---------------------------
         // 1. ASSETS
         // ---------------------------
+        // Pre-scan: catch in-file duplicates (same serial/ref appearing twice in this upload)
+        // BEFORE any DB write, so user sees them as skipped rows rather than confusing updates.
+        const inFileDups = detectInFileDuplicates(assetsRows);
+
         for (let i = 0; i < assetsRows.length; i++) {
             const row = assetsRows[i];
+            const rowNum = i + 2; // +1 header, +1 because user-facing rows are 1-indexed
+            const rowSerial = String(row.serialNumber ?? '').trim() || undefined;
+            const rowRef    = String(row.referenceCode ?? '').trim() || undefined;
+            const rowAssetName = String(row.assetName ?? '').trim() || undefined;
+
+            // In-file duplicate — surface and skip
+            if (inFileDups.has(i)) {
+                const reason = inFileDups.get(i)!;
+                summary.errors.push({ sheet: 'Assets', row: rowNum, message: reason });
+                summary.assetOutcomes.push({
+                    row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                    status: 'SKIPPED_DUPLICATE', message: reason,
+                });
+                summary.assetsSkippedDuplicate++;
+                continue;
+            }
 
             try {
                 // referenceCode is OPTIONAL — auto-generated serial used if both serial+ref are blank
                 if (!row.assetName || !row.assetType || !row.assetCategory) {
-                    summary.errors.push({
-                        sheet: 'Assets',
-                        row: i + 2,
-                        message: 'assetName, assetType, assetCategory are required'
+                    const msg = 'assetName, assetType, assetCategory are required';
+                    summary.errors.push({ sheet: 'Assets', row: rowNum, message: msg });
+                    summary.assetOutcomes.push({
+                        row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                        status: 'ERROR', message: msg,
                     });
+                    summary.assetsFailed++;
                     continue;
                 }
 
@@ -554,12 +640,18 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     .trim()
                     .toUpperCase();
 
-                if (!['PURCHASE', 'DONATION', 'LEASE', 'RENTAL'].includes(modeOfProcurement)) {
-                    summary.errors.push({
-                        sheet: 'Assets',
-                        row: i + 2,
-                        message: `Invalid modeOfProcurement: ${row.modeOfProcurement}. Allowed values: PURCHASE, DONATION, LEASE, RENTAL`
+                // Helper to push validation error to both errors[] and outcomes[]
+                const pushValidationError = (msg: string) => {
+                    summary.errors.push({ sheet: 'Assets', row: rowNum, message: msg });
+                    summary.assetOutcomes.push({
+                        row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                        status: 'ERROR', message: msg,
                     });
+                    summary.assetsFailed++;
+                };
+
+                if (!['PURCHASE', 'DONATION', 'LEASE', 'RENTAL'].includes(modeOfProcurement)) {
+                    pushValidationError(`Invalid modeOfProcurement: ${row.modeOfProcurement}. Allowed values: PURCHASE, DONATION, LEASE, RENTAL`);
                     continue;
                 }
 
@@ -567,25 +659,25 @@ export async function importAssetsExcel(req: Request, res: Response) {
                 if (!isLegacy) {
                     if (modeOfProcurement === 'PURCHASE') {
                         if (!row.vendorName || !row.purchaseCost) {
-                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For PURCHASE, vendorName and purchaseCost are required' });
+                            pushValidationError('For PURCHASE, vendorName and purchaseCost are required');
                             continue;
                         }
                     }
                     if (modeOfProcurement === 'DONATION') {
                         if (!row.donorName || !row.donationDate) {
-                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For DONATION, donorName and donationDate are required' });
+                            pushValidationError('For DONATION, donorName and donationDate are required');
                             continue;
                         }
                     }
                     if (modeOfProcurement === 'LEASE') {
                         if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
-                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required' });
+                            pushValidationError('For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required');
                             continue;
                         }
                     }
                     if (modeOfProcurement === 'RENTAL') {
                         if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
-                            summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required' });
+                            pushValidationError('For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required');
                             continue;
                         }
                     }
@@ -713,16 +805,54 @@ export async function importAssetsExcel(req: Request, res: Response) {
 
                 let savedAssetId: number;
                 if (existing) {
-                    await prisma.asset.update({
-                        where: { id: existing.id },
-                        data: assetData
-                    });
-                    savedAssetId = existing.id;
-                    summary.assetsUpdated++;
+                    // Determine which field matched so the user knows why we're updating
+                    const matchedBy: 'referenceCode' | 'serialNumber' | null =
+                        (rowRef && existing.referenceCode === rowRef) ? 'referenceCode'
+                      : (rowSerial && existing.serialNumber === rowSerial) ? 'serialNumber'
+                      : null;
+                    try {
+                        await prisma.asset.update({ where: { id: existing.id }, data: assetData });
+                        savedAssetId = existing.id;
+                        summary.assetsUpdated++;
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'UPDATED',
+                            matchedBy,
+                            existingAssetId: existing.assetId,
+                            message: `Existing asset matched by ${matchedBy ?? 'lookup'} — fields updated in place. (Existing Asset ID: ${existing.assetId})`,
+                        });
+                    } catch (updateErr: any) {
+                        const friendly = friendlyPrismaError(updateErr);
+                        summary.errors.push({ sheet: 'Assets', row: rowNum, message: `Update failed: ${friendly}` });
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'ERROR', message: `Update failed: ${friendly}`,
+                            matchedBy, existingAssetId: existing.assetId,
+                        });
+                        summary.assetsFailed++;
+                        continue;
+                    }
                 } else {
-                    const created = await createAssetWithGeneratedId(assetData);
-                    savedAssetId = created.id;
-                    summary.assetsCreated++;
+                    try {
+                        const created = await createAssetWithGeneratedId(assetData);
+                        savedAssetId = created.id;
+                        summary.assetsCreated++;
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'CREATED',
+                            existingAssetId: created.assetId,
+                            message: `New asset created with ID ${created.assetId}.`,
+                        });
+                    } catch (createErr: any) {
+                        const friendly = friendlyPrismaError(createErr);
+                        summary.errors.push({ sheet: 'Assets', row: rowNum, message: `Create failed: ${friendly}` });
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'ERROR', message: `Create failed: ${friendly}`,
+                        });
+                        summary.assetsFailed++;
+                        continue;
+                    }
                 }
 
                 // Update pool status/remainingQuantity after linking an asset
@@ -845,11 +975,19 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     }
                 }
             } catch (err: any) {
-                summary.errors.push({
-                    sheet: 'Assets',
-                    row: i + 2,
-                    message: err.message
-                });
+                // Outer catch — anything not caught by the inner create/update blocks
+                // (category upsert, vendor/employee lookups, pool linkage, depreciation, etc.)
+                const friendly = friendlyPrismaError(err);
+                summary.errors.push({ sheet: 'Assets', row: rowNum, message: friendly });
+                // Only push an outcome if we haven't already pushed one for this row
+                const alreadyTracked = summary.assetOutcomes.some(o => o.row === rowNum);
+                if (!alreadyTracked) {
+                    summary.assetOutcomes.push({
+                        row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                        status: 'ERROR', message: friendly,
+                    });
+                    summary.assetsFailed++;
+                }
             }
         }
 
