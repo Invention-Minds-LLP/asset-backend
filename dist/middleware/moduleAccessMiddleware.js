@@ -43,6 +43,7 @@ const MODULE_BY_PREFIX = [
     ["/api/cost-analysis", "finance-analytics"],
     ["/api/decision-engine", "finance-analytics"],
     ["/api/reports", "finance-analytics"],
+    ["/api/export", "finance-analytics"],
     ["/api/gate-pass", "operations"],
     ["/api/acknowledgement", "operations"],
     ["/api/asset-audit", "operations"],

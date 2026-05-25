@@ -1,0 +1,14 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const authMiddleware_1 = require("../../middleware/authMiddleware");
+const floor_plan_controller_1 = require("./floor-plan.controller");
+const router = (0, express_1.Router)();
+router.get("/", authMiddleware_1.authenticateToken, floor_plan_controller_1.listFloorPlans);
+router.post("/", authMiddleware_1.authenticateToken, floor_plan_controller_1.floorPlanUpload.single("file"), floor_plan_controller_1.uploadFloorPlan);
+router.get("/:id", authMiddleware_1.authenticateToken, floor_plan_controller_1.getFloorPlanWithPins);
+router.get("/:id/pinnable", authMiddleware_1.authenticateToken, floor_plan_controller_1.getPinnableAssets);
+router.post("/:id/pin", authMiddleware_1.authenticateToken, floor_plan_controller_1.savePin);
+router.delete("/:id/pin/:assetId", authMiddleware_1.authenticateToken, floor_plan_controller_1.removePin);
+router.delete("/:id", authMiddleware_1.authenticateToken, floor_plan_controller_1.deleteFloorPlan);
+exports.default = router;

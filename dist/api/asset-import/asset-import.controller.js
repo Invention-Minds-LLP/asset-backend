@@ -165,22 +165,74 @@ function findAssetByReferenceOrSerial(referenceCode, serialNumber) {
         return asset;
     });
 }
+/**
+ * Translate Prisma errors into a sentence a non-developer can act on.
+ * Falls back to the raw message if the error shape is unfamiliar.
+ */
+function friendlyPrismaError(err) {
+    var _a, _b, _c, _d, _e, _f;
+    if (!err)
+        return 'Unknown error';
+    // P2002 = unique-constraint violation; meta.target = [columnName, …]
+    if (err.code === 'P2002') {
+        const fields = Array.isArray((_a = err.meta) === null || _a === void 0 ? void 0 : _a.target) ? err.meta.target.join(', ') : ((_c = (_b = err.meta) === null || _b === void 0 ? void 0 : _b.target) !== null && _c !== void 0 ? _c : 'unknown field');
+        return `Duplicate value — another asset already has the same ${fields}. Either remove this row from the file, or change the conflicting value before re-importing.`;
+    }
+    // P2003 = FK constraint
+    if (err.code === 'P2003') {
+        return `Referenced record not found (${(_e = (_d = err.meta) === null || _d === void 0 ? void 0 : _d.field_name) !== null && _e !== void 0 ? _e : 'foreign key'}). Check department/vendor/employee codes in this row.`;
+    }
+    // P2025 = update target not found
+    if (err.code === 'P2025') {
+        return `Record to update was not found. It may have been deleted between read and write.`;
+    }
+    return (_f = err.message) !== null && _f !== void 0 ? _f : String(err);
+}
+/**
+ * Scan all asset rows BEFORE writing anything, return a Set of row indices
+ * that are in-file duplicates (same serial OR referenceCode appears twice
+ * inside the uploaded sheet). Only the FIRST occurrence is processed; later
+ * occurrences are surfaced as SKIPPED_DUPLICATE_IN_FILE.
+ */
+function detectInFileDuplicates(rows) {
+    var _a, _b;
+    const seenSerial = new Map();
+    const seenRef = new Map();
+    const dups = new Map(); // rowIndex (0-based) -> reason
+    for (let i = 0; i < rows.length; i++) {
+        const serial = String((_a = rows[i].serialNumber) !== null && _a !== void 0 ? _a : '').trim();
+        const ref = String((_b = rows[i].referenceCode) !== null && _b !== void 0 ? _b : '').trim();
+        if (serial) {
+            if (seenSerial.has(serial)) {
+                dups.set(i, `In-file duplicate: serialNumber "${serial}" first appeared in row ${seenSerial.get(serial) + 2}`);
+                continue;
+            }
+            seenSerial.set(serial, i);
+        }
+        if (ref) {
+            if (seenRef.has(ref)) {
+                dups.set(i, `In-file duplicate: referenceCode "${ref}" first appeared in row ${seenRef.get(ref) + 2}`);
+                continue;
+            }
+            seenRef.set(ref, i);
+        }
+    }
+    return dups;
+}
 function importAssetsExcel(req, res) {
     return __awaiter(this, void 0, void 0, function* () {
-        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7;
+        var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10;
         const file = req.file;
         if (!file) {
             res.status(400).json({ message: 'Excel file is required' });
             return;
         }
         const summary = {
-            // assetCategoriesUpserted: 0,
-            // vendorsUpserted: 0,
-            // departmentsUpserted: 0,
-            // branchesUpserted: 0,
             employeesUpserted: 0,
             assetsCreated: 0,
             assetsUpdated: 0,
+            assetsSkippedDuplicate: 0,
+            assetsFailed: 0,
             specificationsCreated: 0,
             specificationsUpdated: 0,
             warrantiesUpserted: 0,
@@ -191,6 +243,9 @@ function importAssetsExcel(req, res) {
             maintenanceSchedulesCreated: 0,
             calibrationSchedulesCreated: 0,
             errors: [],
+            // Per-row visibility: every Assets sheet row produces one entry here.
+            // status = CREATED | UPDATED | SKIPPED_DUPLICATE | ERROR
+            assetOutcomes: [],
         };
         try {
             const workbook = xlsx_1.default.readFile(file.path);
@@ -199,7 +254,7 @@ function importAssetsExcel(req, res) {
                 try {
                     fs_1.default.unlinkSync(file.path);
                 }
-                catch (_8) { }
+                catch (_11) { }
                 res.status(400).json({
                     message: 'Workbook is missing the required "Assets" sheet. Download the template and try again.',
                     foundSheets: workbook.SheetNames,
@@ -215,7 +270,7 @@ function importAssetsExcel(req, res) {
                 try {
                     fs_1.default.unlinkSync(file.path);
                 }
-                catch (_9) { }
+                catch (_12) { }
                 res.status(400).json({
                     message: `"Assets" sheet is missing required column(s): ${missingCols.join(', ')}. Download the template to see the expected layout.`,
                     missingColumns: missingCols,
@@ -502,53 +557,78 @@ function importAssetsExcel(req, res) {
             // ---------------------------
             // 1. ASSETS
             // ---------------------------
+            // Pre-scan: catch in-file duplicates (same serial/ref appearing twice in this upload)
+            // BEFORE any DB write, so user sees them as skipped rows rather than confusing updates.
+            const inFileDups = detectInFileDuplicates(assetsRows);
             for (let i = 0; i < assetsRows.length; i++) {
                 const row = assetsRows[i];
+                const rowNum = i + 2; // +1 header, +1 because user-facing rows are 1-indexed
+                const rowSerial = String((_b = row.serialNumber) !== null && _b !== void 0 ? _b : '').trim() || undefined;
+                const rowRef = String((_c = row.referenceCode) !== null && _c !== void 0 ? _c : '').trim() || undefined;
+                const rowAssetName = String((_d = row.assetName) !== null && _d !== void 0 ? _d : '').trim() || undefined;
+                // In-file duplicate — surface and skip
+                if (inFileDups.has(i)) {
+                    const reason = inFileDups.get(i);
+                    summary.errors.push({ sheet: 'Assets', row: rowNum, message: reason });
+                    summary.assetOutcomes.push({
+                        row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                        status: 'SKIPPED_DUPLICATE', message: reason,
+                    });
+                    summary.assetsSkippedDuplicate++;
+                    continue;
+                }
                 try {
                     // referenceCode is OPTIONAL — auto-generated serial used if both serial+ref are blank
                     if (!row.assetName || !row.assetType || !row.assetCategory) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: 'assetName, assetType, assetCategory are required'
+                        const msg = 'assetName, assetType, assetCategory are required';
+                        summary.errors.push({ sheet: 'Assets', row: rowNum, message: msg });
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'ERROR', message: msg,
                         });
+                        summary.assetsFailed++;
                         continue;
                     }
                     const isLegacy = String(row.isLegacyAsset || '').trim().toLowerCase() === 'true' || String(row.isLegacyAsset || '') === '1';
                     const modeOfProcurement = String(row.modeOfProcurement || 'PURCHASE')
                         .trim()
                         .toUpperCase();
-                    if (!['PURCHASE', 'DONATION', 'LEASE', 'RENTAL'].includes(modeOfProcurement)) {
-                        summary.errors.push({
-                            sheet: 'Assets',
-                            row: i + 2,
-                            message: `Invalid modeOfProcurement: ${row.modeOfProcurement}. Allowed values: PURCHASE, DONATION, LEASE, RENTAL`
+                    // Helper to push validation error to both errors[] and outcomes[]
+                    const pushValidationError = (msg) => {
+                        summary.errors.push({ sheet: 'Assets', row: rowNum, message: msg });
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'ERROR', message: msg,
                         });
+                        summary.assetsFailed++;
+                    };
+                    if (!['PURCHASE', 'DONATION', 'LEASE', 'RENTAL'].includes(modeOfProcurement)) {
+                        pushValidationError(`Invalid modeOfProcurement: ${row.modeOfProcurement}. Allowed values: PURCHASE, DONATION, LEASE, RENTAL`);
                         continue;
                     }
                     // Mode-based validation — relaxed for legacy assets
                     if (!isLegacy) {
                         if (modeOfProcurement === 'PURCHASE') {
                             if (!row.vendorName || !row.purchaseCost) {
-                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For PURCHASE, vendorName and purchaseCost are required' });
+                                pushValidationError('For PURCHASE, vendorName and purchaseCost are required');
                                 continue;
                             }
                         }
                         if (modeOfProcurement === 'DONATION') {
                             if (!row.donorName || !row.donationDate) {
-                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For DONATION, donorName and donationDate are required' });
+                                pushValidationError('For DONATION, donorName and donationDate are required');
                                 continue;
                             }
                         }
                         if (modeOfProcurement === 'LEASE') {
                             if (!row.vendorName || !row.leaseStartDate || !row.leaseEndDate || !row.leaseAmount) {
-                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required' });
+                                pushValidationError('For LEASE, vendorName, leaseStartDate, leaseEndDate, and leaseAmount are required');
                                 continue;
                             }
                         }
                         if (modeOfProcurement === 'RENTAL') {
                             if (!row.vendorName || !row.rentalStartDate || !row.rentalEndDate || !row.rentalAmount) {
-                                summary.errors.push({ sheet: 'Assets', row: i + 2, message: 'For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required' });
+                                pushValidationError('For RENTAL, vendorName, rentalStartDate, rentalEndDate, and rentalAmount are required');
                                 continue;
                             }
                         }
@@ -576,11 +656,11 @@ function importAssetsExcel(req, res) {
                         referenceCode: cleanRefCode,
                         purchaseDate: parseDate(row.purchaseDate),
                         modeOfProcurement,
-                        isBranded: (_b = toBool(row.isBranded)) !== null && _b !== void 0 ? _b : false,
-                        isAssembled: (_c = toBool(row.isAssembled)) !== null && _c !== void 0 ? _c : false,
-                        isCustomized: (_d = toBool(row.isCustomized)) !== null && _d !== void 0 ? _d : false,
+                        isBranded: (_e = toBool(row.isBranded)) !== null && _e !== void 0 ? _e : false,
+                        isAssembled: (_f = toBool(row.isAssembled)) !== null && _f !== void 0 ? _f : false,
+                        isCustomized: (_g = toBool(row.isCustomized)) !== null && _g !== void 0 ? _g : false,
                         customDetails: toStringOrNull(row.customDetails),
-                        hasSpecifications: (_e = toBool(row.hasSpecifications)) !== null && _e !== void 0 ? _e : false,
+                        hasSpecifications: (_h = toBool(row.hasSpecifications)) !== null && _h !== void 0 ? _h : false,
                         installedAt: parseDate(row.installedAt),
                         // PURCHASE
                         invoiceNumber: modeOfProcurement === 'PURCHASE' ? toStringOrNull(row.invoiceNumber) : null,
@@ -655,17 +735,56 @@ function importAssetsExcel(req, res) {
                     }
                     let savedAssetId;
                     if (existing) {
-                        yield prismaClient_1.default.asset.update({
-                            where: { id: existing.id },
-                            data: assetData
-                        });
-                        savedAssetId = existing.id;
-                        summary.assetsUpdated++;
+                        // Determine which field matched so the user knows why we're updating
+                        const matchedBy = (rowRef && existing.referenceCode === rowRef) ? 'referenceCode'
+                            : (rowSerial && existing.serialNumber === rowSerial) ? 'serialNumber'
+                                : null;
+                        try {
+                            yield prismaClient_1.default.asset.update({ where: { id: existing.id }, data: assetData });
+                            savedAssetId = existing.id;
+                            summary.assetsUpdated++;
+                            summary.assetOutcomes.push({
+                                row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                                status: 'UPDATED',
+                                matchedBy,
+                                existingAssetId: existing.assetId,
+                                message: `Existing asset matched by ${matchedBy !== null && matchedBy !== void 0 ? matchedBy : 'lookup'} — fields updated in place. (Existing Asset ID: ${existing.assetId})`,
+                            });
+                        }
+                        catch (updateErr) {
+                            const friendly = friendlyPrismaError(updateErr);
+                            summary.errors.push({ sheet: 'Assets', row: rowNum, message: `Update failed: ${friendly}` });
+                            summary.assetOutcomes.push({
+                                row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                                status: 'ERROR', message: `Update failed: ${friendly}`,
+                                matchedBy, existingAssetId: existing.assetId,
+                            });
+                            summary.assetsFailed++;
+                            continue;
+                        }
                     }
                     else {
-                        const created = yield createAssetWithGeneratedId(assetData);
-                        savedAssetId = created.id;
-                        summary.assetsCreated++;
+                        try {
+                            const created = yield createAssetWithGeneratedId(assetData);
+                            savedAssetId = created.id;
+                            summary.assetsCreated++;
+                            summary.assetOutcomes.push({
+                                row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                                status: 'CREATED',
+                                existingAssetId: created.assetId,
+                                message: `New asset created with ID ${created.assetId}.`,
+                            });
+                        }
+                        catch (createErr) {
+                            const friendly = friendlyPrismaError(createErr);
+                            summary.errors.push({ sheet: 'Assets', row: rowNum, message: `Create failed: ${friendly}` });
+                            summary.assetOutcomes.push({
+                                row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                                status: 'ERROR', message: `Create failed: ${friendly}`,
+                            });
+                            summary.assetsFailed++;
+                            continue;
+                        }
                     }
                     // Update pool status/remainingQuantity after linking an asset
                     if (resolvedPoolId) {
@@ -684,7 +803,7 @@ function importAssetsExcel(req, res) {
                     // ── Auto-create depreciation with category fallback ─────────────
                     // Priority for each field: row → category default → safe fallback
                     // depreciationStart priority: row → installedAt → purchaseDate
-                    const rawDepMethod = (_f = toStringOrNull(row.depreciationMethod)) === null || _f === void 0 ? void 0 : _f.toUpperCase();
+                    const rawDepMethod = (_j = toStringOrNull(row.depreciationMethod)) === null || _j === void 0 ? void 0 : _j.toUpperCase();
                     let depMethod = rawDepMethod === 'SLM' ? 'SL' : rawDepMethod === 'WDV' ? 'DB' : (rawDepMethod !== null && rawDepMethod !== void 0 ? rawDepMethod : null);
                     let depRate = toNumber(row.depreciationRate);
                     let depLife = toNumber(row.expectedLifeYears);
@@ -721,8 +840,8 @@ function importAssetsExcel(req, res) {
                         const existingDep = yield prismaClient_1.default.assetDepreciation.findUnique({ where: { assetId: savedAssetId } });
                         if (!existingDep) {
                             const asset = yield prismaClient_1.default.asset.findUnique({ where: { id: savedAssetId } });
-                            const cost = Number((_h = (_g = asset === null || asset === void 0 ? void 0 : asset.purchaseCost) !== null && _g !== void 0 ? _g : asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _h !== void 0 ? _h : 0);
-                            const openingDep = (_j = toNumber(row.openingAccumulatedDepreciation)) !== null && _j !== void 0 ? _j : 0;
+                            const cost = Number((_l = (_k = asset === null || asset === void 0 ? void 0 : asset.purchaseCost) !== null && _k !== void 0 ? _k : asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _l !== void 0 ? _l : 0);
+                            const openingDep = (_m = toNumber(row.openingAccumulatedDepreciation)) !== null && _m !== void 0 ? _m : 0;
                             const newDep = yield prismaClient_1.default.assetDepreciation.create({
                                 data: {
                                     assetId: savedAssetId,
@@ -747,20 +866,20 @@ function importAssetsExcel(req, res) {
                             try {
                                 const assetForBackfill = {
                                     id: savedAssetId,
-                                    assetId: (_k = asset === null || asset === void 0 ? void 0 : asset.assetId) !== null && _k !== void 0 ? _k : '',
+                                    assetId: (_o = asset === null || asset === void 0 ? void 0 : asset.assetId) !== null && _o !== void 0 ? _o : '',
                                     purchaseCost: cost,
-                                    estimatedValue: Number((_l = asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _l !== void 0 ? _l : 0),
-                                    purchaseDate: (_m = asset === null || asset === void 0 ? void 0 : asset.purchaseDate) !== null && _m !== void 0 ? _m : null,
-                                    installedAt: (_o = asset === null || asset === void 0 ? void 0 : asset.installedAt) !== null && _o !== void 0 ? _o : null,
-                                    isLegacyAsset: (_p = asset === null || asset === void 0 ? void 0 : asset.isLegacyAsset) !== null && _p !== void 0 ? _p : false,
-                                    migrationMode: (_q = asset === null || asset === void 0 ? void 0 : asset.migrationMode) !== null && _q !== void 0 ? _q : null,
-                                    migrationDate: (_r = asset === null || asset === void 0 ? void 0 : asset.migrationDate) !== null && _r !== void 0 ? _r : null,
-                                    originalPurchaseDate: (_s = asset === null || asset === void 0 ? void 0 : asset.originalPurchaseDate) !== null && _s !== void 0 ? _s : null,
-                                    originalCost: (_t = asset === null || asset === void 0 ? void 0 : asset.originalCost) !== null && _t !== void 0 ? _t : null,
-                                    accDepAtMigration: (_u = asset === null || asset === void 0 ? void 0 : asset.accDepAtMigration) !== null && _u !== void 0 ? _u : null,
-                                    openingWdvAtMigration: (_v = asset === null || asset === void 0 ? void 0 : asset.openingWdvAtMigration) !== null && _v !== void 0 ? _v : null,
-                                    financialYearAdded: (_w = asset === null || asset === void 0 ? void 0 : asset.financialYearAdded) !== null && _w !== void 0 ? _w : null,
-                                    assetPoolId: (_x = asset === null || asset === void 0 ? void 0 : asset.assetPoolId) !== null && _x !== void 0 ? _x : null,
+                                    estimatedValue: Number((_p = asset === null || asset === void 0 ? void 0 : asset.estimatedValue) !== null && _p !== void 0 ? _p : 0),
+                                    purchaseDate: (_q = asset === null || asset === void 0 ? void 0 : asset.purchaseDate) !== null && _q !== void 0 ? _q : null,
+                                    installedAt: (_r = asset === null || asset === void 0 ? void 0 : asset.installedAt) !== null && _r !== void 0 ? _r : null,
+                                    isLegacyAsset: (_s = asset === null || asset === void 0 ? void 0 : asset.isLegacyAsset) !== null && _s !== void 0 ? _s : false,
+                                    migrationMode: (_t = asset === null || asset === void 0 ? void 0 : asset.migrationMode) !== null && _t !== void 0 ? _t : null,
+                                    migrationDate: (_u = asset === null || asset === void 0 ? void 0 : asset.migrationDate) !== null && _u !== void 0 ? _u : null,
+                                    originalPurchaseDate: (_v = asset === null || asset === void 0 ? void 0 : asset.originalPurchaseDate) !== null && _v !== void 0 ? _v : null,
+                                    originalCost: (_w = asset === null || asset === void 0 ? void 0 : asset.originalCost) !== null && _w !== void 0 ? _w : null,
+                                    accDepAtMigration: (_x = asset === null || asset === void 0 ? void 0 : asset.accDepAtMigration) !== null && _x !== void 0 ? _x : null,
+                                    openingWdvAtMigration: (_y = asset === null || asset === void 0 ? void 0 : asset.openingWdvAtMigration) !== null && _y !== void 0 ? _y : null,
+                                    financialYearAdded: (_z = asset === null || asset === void 0 ? void 0 : asset.financialYearAdded) !== null && _z !== void 0 ? _z : null,
+                                    assetPoolId: (_0 = asset === null || asset === void 0 ? void 0 : asset.assetPoolId) !== null && _0 !== void 0 ? _0 : null,
                                 };
                                 const cfgForBackfill = {
                                     method: depMethod,
@@ -781,11 +900,19 @@ function importAssetsExcel(req, res) {
                     }
                 }
                 catch (err) {
-                    summary.errors.push({
-                        sheet: 'Assets',
-                        row: i + 2,
-                        message: err.message
-                    });
+                    // Outer catch — anything not caught by the inner create/update blocks
+                    // (category upsert, vendor/employee lookups, pool linkage, depreciation, etc.)
+                    const friendly = friendlyPrismaError(err);
+                    summary.errors.push({ sheet: 'Assets', row: rowNum, message: friendly });
+                    // Only push an outcome if we haven't already pushed one for this row
+                    const alreadyTracked = summary.assetOutcomes.some(o => o.row === rowNum);
+                    if (!alreadyTracked) {
+                        summary.assetOutcomes.push({
+                            row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
+                            status: 'ERROR', message: friendly,
+                        });
+                        summary.assetsFailed++;
+                    }
                 }
             }
             // ---------------------------
@@ -825,8 +952,8 @@ function importAssetsExcel(req, res) {
                         specificationGroup: toStringOrNull(row.specificationGroup),
                         valueType: toStringOrNull(row.valueType),
                         unit: toStringOrNull(row.unit),
-                        sortOrder: (_y = toNumber(row.sortOrder)) !== null && _y !== void 0 ? _y : 0,
-                        isMandatory: (_z = toBool(row.isMandatory)) !== null && _z !== void 0 ? _z : false,
+                        sortOrder: (_1 = toNumber(row.sortOrder)) !== null && _1 !== void 0 ? _1 : 0,
+                        isMandatory: (_2 = toBool(row.isMandatory)) !== null && _2 !== void 0 ? _2 : false,
                         source: toStringOrNull(row.source),
                         remarks: toStringOrNull(row.remarks),
                     };
@@ -870,7 +997,7 @@ function importAssetsExcel(req, res) {
                         continue;
                     }
                     const vendorId = yield getOrCreateVendor(row);
-                    const isUnderWarranty = (_0 = toBool(row.isUnderWarranty)) !== null && _0 !== void 0 ? _0 : false;
+                    const isUnderWarranty = (_3 = toBool(row.isUnderWarranty)) !== null && _3 !== void 0 ? _3 : false;
                     const warrantyStart = parseDate(row.warrantyStart);
                     const warrantyEnd = parseDate(row.warrantyEnd);
                     if (isUnderWarranty && (!warrantyStart || !warrantyEnd)) {
@@ -1051,7 +1178,7 @@ function importAssetsExcel(req, res) {
                             room: toStringOrNull(row.room),
                             departmentSnapshot: toStringOrNull(row.departmentSnapshot),
                             employeeResponsibleId,
-                            isActive: (_1 = toBool(row.isActive)) !== null && _1 !== void 0 ? _1 : true,
+                            isActive: (_4 = toBool(row.isActive)) !== null && _4 !== void 0 ? _4 : true,
                         }
                     });
                     summary.locationsCreated++;
@@ -1112,11 +1239,11 @@ function importAssetsExcel(req, res) {
                         referenceCode: toStringOrNull(row.referenceCode),
                         status: String(row.status || 'ACTIVE'),
                         parentAssetId: parent.id,
-                        isBranded: (_2 = toBool(row.isBranded)) !== null && _2 !== void 0 ? _2 : false,
-                        isAssembled: (_3 = toBool(row.isAssembled)) !== null && _3 !== void 0 ? _3 : false,
-                        isCustomized: (_4 = toBool(row.isCustomized)) !== null && _4 !== void 0 ? _4 : false,
+                        isBranded: (_5 = toBool(row.isBranded)) !== null && _5 !== void 0 ? _5 : false,
+                        isAssembled: (_6 = toBool(row.isAssembled)) !== null && _6 !== void 0 ? _6 : false,
+                        isCustomized: (_7 = toBool(row.isCustomized)) !== null && _7 !== void 0 ? _7 : false,
                         customDetails: toStringOrNull(row.customDetails),
-                        hasSpecifications: (_5 = toBool(row.hasSpecifications)) !== null && _5 !== void 0 ? _5 : false,
+                        hasSpecifications: (_8 = toBool(row.hasSpecifications)) !== null && _8 !== void 0 ? _8 : false,
                         specificationSummary: toStringOrNull(row.specificationSummary),
                     };
                     if (existingSubAsset) {
@@ -1166,7 +1293,7 @@ function importAssetsExcel(req, res) {
                             frequencyValue: Number(row.frequencyValue),
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
-                            isActive: (_6 = toBool(row.isActive)) !== null && _6 !== void 0 ? _6 : true,
+                            isActive: (_9 = toBool(row.isActive)) !== null && _9 !== void 0 ? _9 : true,
                             reminderDays: toNumber(row.reminderDays),
                             createdBy: toStringOrNull(row.createdBy),
                             reason: toStringOrNull(row.reason),
@@ -1208,7 +1335,7 @@ function importAssetsExcel(req, res) {
                             frequencyUnit: String(row.frequencyUnit),
                             nextDueAt: parseDate(row.nextDueAt),
                             lastCalibratedAt: parseDate(row.lastCalibratedAt),
-                            isActive: (_7 = toBool(row.isActive)) !== null && _7 !== void 0 ? _7 : true,
+                            isActive: (_10 = toBool(row.isActive)) !== null && _10 !== void 0 ? _10 : true,
                             standardProcedure: toStringOrNull(row.standardProcedure),
                             vendorId,
                             reminderDays: toNumber(row.reminderDays),

@@ -9,6 +9,7 @@ const authMiddleware_1 = require("../../middleware/authMiddleware");
 const router = express_1.default.Router();
 router.get("/", authMiddleware_1.authenticateToken, employee_controller_1.getAllEmployees);
 router.post("/", employee_controller_1.createEmployee);
+router.put("/:id", authMiddleware_1.authenticateToken, employee_controller_1.updateEmployee);
 router.get('/:employeeID/department', employee_controller_1.getDepartmentNameByEmployeeID);
 router.delete("/:id", authMiddleware_1.authenticateToken, employee_controller_1.deleteEmployee);
 router.get("/:id/assets", authMiddleware_1.authenticateToken, employee_controller_1.getEmployeeAssets);

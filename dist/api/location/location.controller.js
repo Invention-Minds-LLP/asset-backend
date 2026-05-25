@@ -16,7 +16,9 @@ exports.getBranches = exports.createBranch = exports.getLocationHistory = export
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const addAssetLocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
-        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid } = req.body;
+        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid, 
+        // Phase 1 — precise placement
+        placementProfile, placementType, placementLabel, mountType, rackCode, rackUnit, portRef, coverageArea, latitude, longitude, } = req.body;
         if (!assetId) {
             res.status(400).json({ message: "assetId is required" });
             return;
@@ -37,6 +39,16 @@ const addAssetLocation = (req, res) => __awaiter(void 0, void 0, void 0, functio
                     room,
                     employeeResponsibleId,
                     departmentSnapshot,
+                    placementProfile: placementProfile !== null && placementProfile !== void 0 ? placementProfile : null,
+                    placementType: placementType !== null && placementType !== void 0 ? placementType : null,
+                    placementLabel: placementLabel !== null && placementLabel !== void 0 ? placementLabel : null,
+                    mountType: mountType !== null && mountType !== void 0 ? mountType : null,
+                    rackCode: rackCode !== null && rackCode !== void 0 ? rackCode : null,
+                    rackUnit: rackUnit !== null && rackUnit !== void 0 ? rackUnit : null,
+                    portRef: portRef !== null && portRef !== void 0 ? portRef : null,
+                    coverageArea: coverageArea !== null && coverageArea !== void 0 ? coverageArea : null,
+                    latitude: latitude != null && latitude !== "" ? Number(latitude) : null,
+                    longitude: longitude != null && longitude !== "" ? Number(longitude) : null,
                     isActive: true
                 }
             });
@@ -60,7 +72,7 @@ exports.addAssetLocation = addAssetLocation;
 const updateCurrentLocation = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const locationId = Number(req.params.locationId);
-        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid } = req.body;
+        const { assetId, branchId, block, floor, room, employeeResponsibleId, departmentSnapshot, rfid, placementProfile, placementType, placementLabel, mountType, rackCode, rackUnit, portRef, coverageArea, latitude, longitude, } = req.body;
         // Option A: if frontend sends assetId
         if (!assetId) {
             res.status(400).json({ message: "assetId is required" });
@@ -82,6 +94,16 @@ const updateCurrentLocation = (req, res) => __awaiter(void 0, void 0, void 0, fu
                     room,
                     employeeResponsibleId,
                     departmentSnapshot,
+                    placementProfile: placementProfile !== null && placementProfile !== void 0 ? placementProfile : null,
+                    placementType: placementType !== null && placementType !== void 0 ? placementType : null,
+                    placementLabel: placementLabel !== null && placementLabel !== void 0 ? placementLabel : null,
+                    mountType: mountType !== null && mountType !== void 0 ? mountType : null,
+                    rackCode: rackCode !== null && rackCode !== void 0 ? rackCode : null,
+                    rackUnit: rackUnit !== null && rackUnit !== void 0 ? rackUnit : null,
+                    portRef: portRef !== null && portRef !== void 0 ? portRef : null,
+                    coverageArea: coverageArea !== null && coverageArea !== void 0 ? coverageArea : null,
+                    latitude: latitude != null && latitude !== "" ? Number(latitude) : null,
+                    longitude: longitude != null && longitude !== "" ? Number(longitude) : null,
                     isActive: true
                 },
                 include: { branch: true, employeeResponsible: true }

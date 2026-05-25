@@ -62,6 +62,7 @@ function pickCategoryFields(body) {
         code: ((_b = body.code) === null || _b === void 0 ? void 0 : _b.trim()) || null,
         description: (_c = body.description) !== null && _c !== void 0 ? _c : null,
         serialRequired: body.serialRequired === undefined ? true : Boolean(body.serialRequired),
+        locationProfile: body.locationProfile || "ROOM",
         defaultDepreciationMethod: body.defaultDepreciationMethod || null,
         defaultDepreciationRate: body.defaultDepreciationRate != null && body.defaultDepreciationRate !== ''
             ? Number(body.defaultDepreciationRate) : null,

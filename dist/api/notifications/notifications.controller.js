@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendManualEmail = exports.upsertSmtpConfig = exports.getSmtpConfig = exports.seedEmailTemplates = exports.upsertEmailTemplate = exports.getEmailTemplates = exports.updateMyPreferences = exports.getMyPreferences = exports.getUnreadCount = exports.deleteNotification = exports.markAllAsRead = exports.markAsRead = exports.getAllNotifications = exports.getMyNotifications = exports.createNotification = void 0;
+exports.removeDeviceToken = exports.saveDeviceToken = exports.sendManualEmail = exports.upsertSmtpConfig = exports.getSmtpConfig = exports.seedEmailTemplates = exports.upsertEmailTemplate = exports.getEmailTemplates = exports.updateMyPreferences = exports.getMyPreferences = exports.getUnreadCount = exports.deleteNotification = exports.markAllAsRead = exports.markAsRead = exports.getAllNotifications = exports.getMyNotifications = exports.createNotification = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const notificationHelper_1 = require("../../utilis/notificationHelper");
 // ─── Create Notification ───────────────────────────────────────────────────────
@@ -257,6 +257,7 @@ const getMyPreferences = (req, res) => __awaiter(void 0, void 0, void 0, functio
                 channelEmail: false,
                 channelSms: false,
                 channelWhatsapp: false,
+                channelPush: true,
                 createdAt: new Date(),
                 updatedAt: new Date(),
             };
@@ -508,3 +509,48 @@ const sendManualEmail = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.sendManualEmail = sendManualEmail;
+// ═════════════════════════════════════════════════════════════════════════════
+// FIREBASE DEVICE TOKENS — Mobile push notification registration
+// ═════════════════════════════════════════════════════════════════════════════
+// POST /api/notifications/device-token
+// The mobile client upserts its FCM token on every successful login.
+// Body: { employeeId, token, platform }   platform = ANDROID | IOS | WEB
+const saveDeviceToken = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { employeeId, token, platform } = req.body || {};
+        if (!employeeId || !token) {
+            res.status(400).json({ error: "employeeId and token are required" });
+            return;
+        }
+        yield prismaClient_1.default.deviceToken.upsert({
+            where: { token },
+            update: { employeeId: Number(employeeId), platform: platform || "UNKNOWN" },
+            create: { employeeId: Number(employeeId), token, platform: platform || "UNKNOWN" },
+        });
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error("saveDeviceToken error:", error);
+        res.status(500).json({ message: "Failed to save device token", error: error.message });
+    }
+});
+exports.saveDeviceToken = saveDeviceToken;
+// POST /api/notifications/remove-device-token
+// Called by the mobile client on logout.
+// Body: { token }
+const removeDeviceToken = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { token } = req.body || {};
+        if (!token) {
+            res.status(400).json({ error: "token is required" });
+            return;
+        }
+        yield prismaClient_1.default.deviceToken.deleteMany({ where: { token } });
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error("removeDeviceToken error:", error);
+        res.status(500).json({ message: "Failed to remove device token", error: error.message });
+    }
+});
+exports.removeDeviceToken = removeDeviceToken;

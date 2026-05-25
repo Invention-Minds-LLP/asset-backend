@@ -12,9 +12,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.formatCurrency = exports.getAdminIds = exports.getSecurityTeam = exports.getDepartmentHODs = exports.notify = exports.sendEmail = exports.removeSSEClient = exports.addSSEClient = void 0;
+exports.formatCurrency = exports.getAdminIds = exports.getSecurityTeam = exports.getDepartmentHODs = exports.notify = exports.sendPushNotification = exports.sendEmail = exports.removeSSEClient = exports.addSSEClient = void 0;
 const prismaClient_1 = __importDefault(require("../prismaClient"));
 const nodemailer_1 = __importDefault(require("nodemailer"));
+const firebase_1 = require("../lib/firebase");
 const formatCurrency = (n) => '₹' + n.toLocaleString('en-IN');
 exports.formatCurrency = formatCurrency;
 let clients = [];
@@ -76,6 +77,50 @@ const sendEmail = (options) => __awaiter(void 0, void 0, void 0, function* () {
     }
 });
 exports.sendEmail = sendEmail;
+// ── Firebase push (FCM) ──
+// Sends a multicast push to every active device registered for `employeeId`.
+// No-op when Firebase isn't configured (FIREBASE_SERVICE_ACCOUNT_PATH unset),
+// so the rest of the notification flow keeps working in dev / demo envs.
+// Tokens that come back as INVALID / NOT_REGISTERED are pruned automatically.
+const sendPushNotification = (employeeId, title, message, data) => __awaiter(void 0, void 0, void 0, function* () {
+    const app = (0, firebase_1.getFirebaseApp)();
+    if (!app)
+        return;
+    try {
+        const tokens = yield prismaClient_1.default.deviceToken.findMany({
+            where: { employeeId },
+            select: { token: true },
+        });
+        if (!tokens.length)
+            return;
+        const response = yield app.messaging().sendEachForMulticast({
+            tokens: tokens.map(t => t.token),
+            notification: { title, body: message },
+            data: data !== null && data !== void 0 ? data : { route: "/notifications" },
+        });
+        // Cleanup tokens FCM tells us are dead. Codes that mean "remove this token":
+        //   messaging/registration-token-not-registered
+        //   messaging/invalid-registration-token
+        response.responses.forEach((r, i) => __awaiter(void 0, void 0, void 0, function* () {
+            var _a;
+            if (r.success)
+                return;
+            const code = ((_a = r.error) === null || _a === void 0 ? void 0 : _a.code) || "";
+            if (code.includes("registration-token-not-registered") ||
+                code.includes("invalid-registration-token") ||
+                code.includes("invalid-argument")) {
+                yield prismaClient_1.default.deviceToken.deleteMany({
+                    where: { token: tokens[i].token },
+                });
+            }
+        }));
+    }
+    catch (err) {
+        // Push failure must never break the in-app / email flow.
+        console.error("Push send failed (non-blocking):", err);
+    }
+});
+exports.sendPushNotification = sendPushNotification;
 // ── Map notification type → NotificationPreference category toggle ──
 // Types not listed here have no per-category toggle and are always delivered.
 const PREF_FIELD_BY_TYPE = {
@@ -183,6 +228,20 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
                     templateData: tplData,
                 });
             }
+        }
+        // Send Firebase push to recipients who allow push (channelPush on by default).
+        // Fan-out happens in parallel; each call is fault-isolated and a no-op when
+        // Firebase isn't configured, so this is safe on any environment.
+        for (const empId of allowedIds) {
+            const pref = prefByEmp.get(empId);
+            const pushAllowed = !pref || pref.channelPush !== false;
+            if (!pushAllowed)
+                continue;
+            void (0, exports.sendPushNotification)(empId, params.title, params.message, {
+                notificationId: String(notification.id),
+                type: params.type,
+                route: "/notifications",
+            });
         }
     }
     catch (err) {

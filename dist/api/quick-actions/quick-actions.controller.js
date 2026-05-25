@@ -121,8 +121,32 @@ const getQRBulkPrintData = (req, res) => __awaiter(void 0, void 0, void 0, funct
             res.status(400).json({ message: "assetIds (array) is required" });
             return;
         }
+        // Expand the selection to include every descendant sub-asset (any depth),
+        // so printing a parent also yields labels for its whole component tree.
+        // BFS keeps parents ahead of their children; visited-set guards against cycles.
+        const rootIds = assetIds.map(Number).filter((id) => !Number.isNaN(id));
+        const visited = new Set();
+        const orderedIds = [];
+        let frontier = rootIds;
+        while (frontier.length) {
+            const level = [];
+            for (const id of frontier) {
+                if (visited.has(id))
+                    continue;
+                visited.add(id);
+                orderedIds.push(id);
+                level.push(id);
+            }
+            if (level.length === 0)
+                break;
+            const children = yield prismaClient_1.default.asset.findMany({
+                where: { parentAssetId: { in: level } },
+                select: { id: true },
+            });
+            frontier = children.map((c) => c.id).filter((id) => !visited.has(id));
+        }
         const assets = yield prismaClient_1.default.asset.findMany({
-            where: { id: { in: assetIds.map(Number) } },
+            where: { id: { in: orderedIds } },
             select: {
                 id: true,
                 assetId: true,
@@ -134,8 +158,13 @@ const getQRBulkPrintData = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 assetCategory: { select: { name: true } },
             },
         });
+        // Keep BFS order (parents before children) when returning to the frontend.
+        const assetById = new Map(assets.map((a) => [a.id, a]));
         // Generate QR data for each asset (the actual QR image generation happens on frontend)
-        const printData = assets.map((a) => {
+        const printData = orderedIds
+            .map((id) => assetById.get(id))
+            .filter((a) => Boolean(a))
+            .map((a) => {
             var _a, _b;
             return ({
                 id: a.id,
@@ -153,9 +182,9 @@ const getQRBulkPrintData = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 }),
             });
         });
-        // Mark as printed
+        // Mark as printed (parents + all descendants that were expanded above)
         yield prismaClient_1.default.asset.updateMany({
-            where: { id: { in: assetIds.map(Number) } },
+            where: { id: { in: orderedIds } },
             data: { qrLabelPrinted: true },
         });
         res.json({ count: printData.length, printData });

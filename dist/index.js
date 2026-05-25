@@ -78,6 +78,8 @@ const finance_routes_1 = __importDefault(require("./api/finance/finance.routes")
 const service_invoices_routes_1 = __importDefault(require("./api/service-invoices/service-invoices.routes"));
 const legacy_migration_routes_1 = __importDefault(require("./api/legacy-migration/legacy-migration.routes"));
 const reconciliation_routes_1 = __importDefault(require("./api/reconciliation/reconciliation.routes"));
+const export_routes_1 = __importDefault(require("./api/export/export.routes"));
+const floor_plan_routes_1 = __importDefault(require("./api/floor-plan/floor-plan.routes"));
 const cors_1 = __importDefault(require("cors"));
 const path_1 = __importDefault(require("path"));
 const helmet_1 = __importDefault(require("helmet"));
@@ -190,6 +192,10 @@ app.use("/api/service-invoices", service_invoices_routes_1.default);
 app.use("/api/legacy-migration", legacy_migration_routes_1.default);
 // ── Reconciliation (Books vs Audit vs System) ────────────────────────────────
 app.use("/api/reconciliation", reconciliation_routes_1.default);
+// ── Data Export Centre (Excel) ───────────────────────────────────────────────
+app.use("/api/export", export_routes_1.default);
+// ── Floor Plans (asset location pin map) ─────────────────────────────────────
+app.use("/api/floor-plan", floor_plan_routes_1.default);
 // Default route
 app.get("/", (req, res) => {
     res.send("Asset Management API is running!");

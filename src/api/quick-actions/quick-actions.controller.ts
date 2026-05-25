@@ -119,8 +119,31 @@ export const getQRBulkPrintData = async (req: AuthenticatedRequest, res: Respons
       return;
     }
 
+    // Expand the selection to include every descendant sub-asset (any depth),
+    // so printing a parent also yields labels for its whole component tree.
+    // BFS keeps parents ahead of their children; visited-set guards against cycles.
+    const rootIds = assetIds.map(Number).filter((id) => !Number.isNaN(id));
+    const visited = new Set<number>();
+    const orderedIds: number[] = [];
+    let frontier = rootIds;
+    while (frontier.length) {
+      const level: number[] = [];
+      for (const id of frontier) {
+        if (visited.has(id)) continue;
+        visited.add(id);
+        orderedIds.push(id);
+        level.push(id);
+      }
+      if (level.length === 0) break;
+      const children = await prisma.asset.findMany({
+        where: { parentAssetId: { in: level } },
+        select: { id: true },
+      });
+      frontier = children.map((c) => c.id).filter((id) => !visited.has(id));
+    }
+
     const assets = await prisma.asset.findMany({
-      where: { id: { in: assetIds.map(Number) } },
+      where: { id: { in: orderedIds } },
       select: {
         id: true,
         assetId: true,
@@ -133,8 +156,14 @@ export const getQRBulkPrintData = async (req: AuthenticatedRequest, res: Respons
       },
     });
 
+    // Keep BFS order (parents before children) when returning to the frontend.
+    const assetById = new Map(assets.map((a) => [a.id, a]));
+
     // Generate QR data for each asset (the actual QR image generation happens on frontend)
-    const printData = assets.map((a) => ({
+    const printData = orderedIds
+      .map((id) => assetById.get(id))
+      .filter((a): a is NonNullable<typeof a> => Boolean(a))
+      .map((a) => ({
       id: a.id,
       assetId: a.assetId,
       assetName: a.assetName,
@@ -150,9 +179,9 @@ export const getQRBulkPrintData = async (req: AuthenticatedRequest, res: Respons
       }),
     }));
 
-    // Mark as printed
+    // Mark as printed (parents + all descendants that were expanded above)
     await prisma.asset.updateMany({
-      where: { id: { in: assetIds.map(Number) } },
+      where: { id: { in: orderedIds } },
       data: { qrLabelPrinted: true },
     });
 

@@ -8,11 +8,22 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteUser = exports.createUser = exports.getAllUsers = exports.resetPassword = exports.loginUser = void 0;
+exports.updateUser = exports.deleteUser = exports.createUser = exports.getAllUsers = exports.resetPassword = exports.loginUser = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
@@ -127,3 +138,45 @@ const deleteUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () 
     res.status(204).send();
 });
 exports.deleteUser = deleteUser;
+// Partial-patch user fields (username, role). Password changes go via /reset-password.
+const updateUser = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a;
+    try {
+        const id = parseInt(req.params.id, 10);
+        const { username, role } = (_a = req.body) !== null && _a !== void 0 ? _a : {};
+        const data = {};
+        if (username !== undefined) {
+            const u = String(username).trim();
+            if (!u) {
+                res.status(400).json({ message: "username cannot be empty" });
+                return;
+            }
+            data.username = u;
+        }
+        if (role !== undefined) {
+            const r = String(role).trim();
+            if (!r) {
+                res.status(400).json({ message: "role cannot be empty" });
+                return;
+            }
+            data.role = r;
+        }
+        if (Object.keys(data).length === 0) {
+            res.status(400).json({ message: "No editable fields provided" });
+            return;
+        }
+        const user = yield prismaClient_1.default.user.update({
+            where: { id },
+            data,
+            include: { employee: true },
+        });
+        // Strip password hash from response
+        const _b = user, { passwordHash } = _b, safe = __rest(_b, ["passwordHash"]);
+        res.json(safe);
+    }
+    catch (err) {
+        console.error("updateUser error:", err);
+        res.status(500).json({ message: err.message || "Failed to update user" });
+    }
+});
+exports.updateUser = updateUser;

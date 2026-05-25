@@ -44,6 +44,7 @@ const getSubAssetsByAssetId = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 modeOfProcurement: true,
                 workingCondition: true,
                 referenceCode: true,
+                exceedsParentThreshold: true,
             },
         });
         res.json({ parent, children });

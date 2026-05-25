@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getEmployeeAssets = exports.getDepartmentNameByEmployeeID = exports.deleteEmployee = exports.createEmployee = exports.getAllEmployees = void 0;
+exports.getEmployeeAssets = exports.getDepartmentNameByEmployeeID = exports.deleteEmployee = exports.updateEmployee = exports.createEmployee = exports.getAllEmployees = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const getAllEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -68,11 +68,64 @@ const getAllEmployees = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.getAllEmployees = getAllEmployees;
+// Coerce + null-safe the subset of fields the create/edit form sends.
+// Stops random body keys (e.g. departmentId === "") from blowing up Prisma.
+function pickEmployeeFields(body) {
+    const trim = (v) => {
+        const s = String(v !== null && v !== void 0 ? v : '').trim();
+        return s ? s : null;
+    };
+    return {
+        name: body.name ? String(body.name).trim() : undefined,
+        employeeID: body.employeeID ? String(body.employeeID).trim() : undefined,
+        departmentId: body.departmentId != null && body.departmentId !== '' ? Number(body.departmentId) : null,
+        reportingToId: body.reportingToId != null && body.reportingToId !== '' ? Number(body.reportingToId) : null,
+        role: body.role || undefined,
+        designation: trim(body.designation),
+        email: trim(body.email),
+        phone: trim(body.phone),
+        isActive: typeof body.isActive === 'boolean' ? body.isActive : undefined,
+    };
+}
 const createEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    const employee = yield prismaClient_1.default.employee.create({ data: req.body });
-    res.status(201).json(employee);
+    try {
+        const data = pickEmployeeFields(req.body);
+        if (!data.name || !data.employeeID) {
+            res.status(400).json({ message: 'name and employeeID are required' });
+            return;
+        }
+        const employee = yield prismaClient_1.default.employee.create({ data: data });
+        res.status(201).json(employee);
+    }
+    catch (err) {
+        console.error('createEmployee error:', err);
+        res.status(500).json({ message: err.message || 'Failed to create employee' });
+    }
 });
 exports.createEmployee = createEmployee;
+const updateEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const id = Number(req.params.id);
+        // Only update keys that were sent — partial-patch friendly
+        const raw = pickEmployeeFields(req.body);
+        const data = {};
+        for (const [k, v] of Object.entries(raw)) {
+            if (v !== undefined)
+                data[k] = v;
+        }
+        const employee = yield prismaClient_1.default.employee.update({
+            where: { id },
+            data,
+            include: { department: true, reportingTo: { select: { name: true, employeeID: true } } },
+        });
+        res.json(employee);
+    }
+    catch (err) {
+        console.error('updateEmployee error:', err);
+        res.status(500).json({ message: err.message || 'Failed to update employee' });
+    }
+});
+exports.updateEmployee = updateEmployee;
 const deleteEmployee = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const id = parseInt(req.params.id);

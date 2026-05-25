@@ -899,21 +899,8 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
             const remainingDeletions = +(Number(sched.deletions) * remainingRatio).toFixed(2);
             const remainingDeletions1H = +(Number((_d = sched.deletionsFirstHalf) !== null && _d !== void 0 ? _d : 0) * remainingRatio).toFixed(2);
             const remainingDeletions2H = +(Number((_e = sched.deletionsSecondHalf) !== null && _e !== void 0 ? _e : 0) * remainingRatio).toFixed(2);
-            let remainingDepOnOpen = +(Number((_f = sched.depOnOpeningBlock) !== null && _f !== void 0 ? _f : 0) * remainingRatio).toFixed(2);
-            let remainingDepOnAddn = +(Number((_g = sched.depOnAdditions) !== null && _g !== void 0 ? _g : 0) * remainingRatio).toFixed(2);
-            // Manually-entered pool schedules may not have the split filled in. In that
-            // case fall back to `depreciationForPeriod` so Period Dep on the category row
-            // matches the schedule's stated total (and matches Closing Acc Dep math).
-            // Distribute: if the pool had additions this FY → bucket the dep into
-            // depOnAdditions; otherwise it's all dep on the opening WDV.
-            if (remainingDepOnOpen === 0 && remainingDepOnAddn === 0 && remainingPeriodDep > 0) {
-                if (remainingAdditions > 0) {
-                    remainingDepOnAddn = remainingPeriodDep;
-                }
-                else {
-                    remainingDepOnOpen = remainingPeriodDep;
-                }
-            }
+            const remainingDepOnOpen = +(Number((_f = sched.depOnOpeningBlock) !== null && _f !== void 0 ? _f : 0) * remainingRatio).toFixed(2);
+            const remainingDepOnAddn = +(Number((_g = sched.depOnAdditions) !== null && _g !== void 0 ? _g : 0) * remainingRatio).toFixed(2);
             const remainingOpenNet = +(remainingOpenGross - remainingOpenDep).toFixed(2);
             const remainingCloseNet = +(remainingGross - Math.max(0, remainingCloseDep)).toFixed(2);
             // Only add a pool remainder row if there's actually undigitized balance left
@@ -1572,6 +1559,50 @@ const getCategoryAssetDetail = (req, res) => __awaiter(void 0, void 0, void 0, f
             closingDep: 0, netCurrent: 0, netPrevious: 0,
         });
         Object.keys(totals).forEach(k => { totals[k] = +totals[k].toFixed(2); });
+        // ── Excel export ──────────────────────────────────────────────────────────
+        const exportFormat = req.query.export;
+        if (exportFormat === "excel" || exportFormat === "csv") {
+            const exportRows = rows.map((r, i) => ({
+                "#": i + 1,
+                "Asset ID": r.assetId,
+                "Asset Name": r.assetName,
+                "Serial Number": r.serialNumber || "",
+                "Opening Gross": r.openingGross,
+                "Additions 1H (Apr-Sep)": r.additions1H,
+                "Additions 2H (Oct-Mar)": r.additions2H,
+                "Deletions": r.deletions,
+                "Closing Gross": r.closingGross,
+                "Rate %": r.rate,
+                "Dep. On Opening": r.depOnOpening,
+                "Dep. On Additions": r.depOnAdditions,
+                "Closing Acc. Dep.": r.closingDep,
+                "Net Block (Current)": r.netCurrent,
+                "Net Block (Prev.)": r.netPrevious,
+            }));
+            // Append a subtotal row
+            exportRows.push({
+                "#": "",
+                "Asset ID": "",
+                "Asset Name": `SUBTOTAL (${rows.length} assets)`,
+                "Serial Number": "",
+                "Opening Gross": totals.openingGross,
+                "Additions 1H (Apr-Sep)": totals.additions1H,
+                "Additions 2H (Oct-Mar)": totals.additions2H,
+                "Deletions": totals.deletions,
+                "Closing Gross": totals.closingGross,
+                "Rate %": "",
+                "Dep. On Opening": totals.depOnOpening,
+                "Dep. On Additions": totals.depOnAdditions,
+                "Closing Acc. Dep.": totals.closingDep,
+                "Net Block (Current)": totals.netCurrent,
+                "Net Block (Prev.)": totals.netPrevious,
+            });
+            const safeCat = categoryName.replace(/[^A-Za-z0-9]+/g, "-").toLowerCase();
+            const fname = `asset-breakdown-${safeCat}-${fiscalYear}-${String(fiscalYear + 1).slice(2)}`;
+            if (exportFormat === "csv")
+                return sendCsv(res, exportRows, fname);
+            return sendExcel(res, exportRows, fname, "Asset Breakdown");
+        }
         res.json({
             category: categoryName,
             fiscalYear,

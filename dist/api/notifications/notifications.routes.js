@@ -42,6 +42,12 @@ router.get("/smtp-config", authMiddleware_1.authenticateToken, notifications_con
 router.put("/smtp-config", authMiddleware_1.authenticateToken, notifications_controller_1.upsertSmtpConfig);
 // Send manual email (with CC/BCC + template)
 router.post("/send-email", authMiddleware_1.authenticateToken, notifications_controller_1.sendManualEmail);
+// ── Firebase device tokens (mobile push) ──────────────────────────────────
+// device-token is intentionally unauthenticated so the mobile client can
+// register its FCM token during the login flow itself, before holding a JWT.
+// The body must include employeeId — verify identity at the call site.
+router.post("/device-token", notifications_controller_1.saveDeviceToken);
+router.post("/remove-device-token", authMiddleware_1.authenticateToken, notifications_controller_1.removeDeviceToken);
 // Admin / system
 router.get("/", authMiddleware_1.authenticateToken, notifications_controller_1.getAllNotifications);
 router.post("/", authMiddleware_1.authenticateToken, notifications_controller_1.createNotification);
