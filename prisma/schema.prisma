@@ -220,6 +220,9 @@ model Asset {
   sourceType         String? // NEW | INVENTORY
   sourceReference    String?
   remarks            String?           @db.Text
+  // Sub-asset flagged because its value is >= 40% of its parent's value.
+  // Created as a sub-asset anyway, but surfaced in the UI for review.
+  exceedsParentThreshold Boolean? @default(false)
   // Hospital-critical classification (optional)
   criticalityLevel   String? // LOW | MEDIUM | HIGH | LIFE_SUPPORT
   riskClass          String? // CLASS_I | CLASS_II | CLASS_III
@@ -650,6 +653,10 @@ model AssetCategory {
   // Set false for non-serialized items (Office Equipment, Furniture, Stationery, etc.)
   serialRequired                Boolean                        @default(true)
 
+  // Drives which placement fields the Location tab shows for assets of this category.
+  // ROOM (default) | NETWORK | CAMERA | OUTDOOR | GENERIC
+  locationProfile               String?    @default("ROOM")
+
   // Default depreciation config — auto-applied to imported / new assets when not specified
   defaultDepreciationMethod     String?    // "SL" | "DB"
   defaultDepreciationRate       Decimal?   @db.Decimal(5, 2)   // e.g. 15.00 for 15%
@@ -1063,6 +1070,7 @@ model Branch {
   locations     AssetLocation[]
   transfersFrom AssetTransferHistory[] @relation("FromBranch")
   transfersTo   AssetTransferHistory[] @relation("ToBranch")
+  floorPlans    FloorPlan[]
 
   createdById Int?
   updatedById Int?
@@ -1085,6 +1093,27 @@ model AssetLocation {
   floor              String?
   room               String?
   departmentSnapshot String?
+
+  // ── Precise placement (Phase 1) — beyond Block/Floor/Room ──
+  // Lets non-room assets (cameras, network gear, outdoor infra) record where
+  // they actually sit. All optional; existing room-based assets are unaffected.
+  // Per-asset profile chosen on the Location tab (overrides the category default).
+  placementProfile String? // ROOM | CAMERA | NETWORK | OUTDOOR | GENERIC
+  placementType  String?  // ROOM | RACK | MOUNTED | AREA | OUTDOOR
+  placementLabel String?  @db.Text // free text, e.g. "Above main entrance, facing reception"
+  mountType      String?  // WALL | CEILING | POLE | DESK | RACK | FLOOR
+  rackCode       String?  // network gear: rack identifier
+  rackUnit       String?  // network gear: U-position, e.g. "U23"
+  portRef        String?  // network gear: panel/port reference
+  coverageArea   String?  @db.Text // cameras/sensors: area covered
+  latitude       Decimal? @db.Decimal(10, 7) // outdoor / GPS-tagged assets
+  longitude      Decimal? @db.Decimal(10, 7)
+
+  // ── Floor-plan pin (Phase 3) — position on an uploaded floor-plan image ──
+  floorPlanId Int?
+  floorPlan   FloorPlan? @relation(fields: [floorPlanId], references: [id])
+  planX       Float?  // pin X as a 0–100 percentage of image width
+  planY       Float?  // pin Y as a 0–100 percentage of image height
 
   employeeResponsibleId Int?
   employeeResponsible   Employee? @relation(fields: [employeeResponsibleId], references: [id])
@@ -1115,7 +1144,33 @@ model AssetLocation {
   createdAt DateTime @default(now())
 
   @@index([assetId, isActive])
+  @@index([floorPlanId])
   @@map("assetlocation")
+}
+
+// ── Floor-plan images (Phase 3) — one per branch/block/floor ──
+// Assets are pinned onto these via AssetLocation.floorPlanId + planX/planY.
+model FloorPlan {
+  id       Int    @id @default(autoincrement())
+  name     String
+  branchId Int
+  branch   Branch @relation(fields: [branchId], references: [id])
+  block    String?
+  floor    String?
+
+  imageUrl String  // served from /uploads/floor-plans/...
+  width    Int?    // natural image width (px) — optional, for scaling
+  height   Int?
+
+  isActive    Boolean  @default(true)
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  locations AssetLocation[]
+
+  @@index([branchId])
+  @@map("floorplan")
 }
 
 model AssetTransferHistory {

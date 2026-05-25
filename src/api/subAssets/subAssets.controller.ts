@@ -34,6 +34,7 @@ export const getSubAssetsByAssetId = async (req: Request, res: Response) => {
         modeOfProcurement: true,
         workingCondition: true,
         referenceCode: true,
+        exceedsParentThreshold: true,
       },
     });
 

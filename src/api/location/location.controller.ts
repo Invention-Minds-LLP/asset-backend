@@ -15,7 +15,11 @@ export const addAssetLocation = async (
       room,
       employeeResponsibleId,
         departmentSnapshot,
-      rfid
+      rfid,
+      // Phase 1 — precise placement
+      placementProfile, placementType, placementLabel, mountType,
+      rackCode, rackUnit, portRef, coverageArea,
+      latitude, longitude,
     } = req.body;
 
     if (!assetId) {
@@ -40,8 +44,18 @@ export const addAssetLocation = async (
           room,
           employeeResponsibleId,
             departmentSnapshot,
+          placementProfile: placementProfile ?? null,
+          placementType: placementType ?? null,
+          placementLabel: placementLabel ?? null,
+          mountType: mountType ?? null,
+          rackCode: rackCode ?? null,
+          rackUnit: rackUnit ?? null,
+          portRef: portRef ?? null,
+          coverageArea: coverageArea ?? null,
+          latitude: latitude != null && latitude !== "" ? Number(latitude) : null,
+          longitude: longitude != null && longitude !== "" ? Number(longitude) : null,
           isActive: true
-        }
+        } as any
       });
 
       // 3️⃣ Update asset RFID (and optionally branch)
@@ -67,7 +81,9 @@ export const addAssetLocation = async (
 export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const locationId = Number(req.params.locationId);
-    const { assetId, branchId, block, floor, room, employeeResponsibleId,  departmentSnapshot, rfid } = req.body;
+    const { assetId, branchId, block, floor, room, employeeResponsibleId,  departmentSnapshot, rfid,
+      placementProfile, placementType, placementLabel, mountType, rackCode, rackUnit, portRef, coverageArea, latitude, longitude,
+    } = req.body;
 
     // Option A: if frontend sends assetId
     if (!assetId) {
@@ -92,8 +108,18 @@ export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Resp
           room,
           employeeResponsibleId,
             departmentSnapshot,
+          placementProfile: placementProfile ?? null,
+          placementType: placementType ?? null,
+          placementLabel: placementLabel ?? null,
+          mountType: mountType ?? null,
+          rackCode: rackCode ?? null,
+          rackUnit: rackUnit ?? null,
+          portRef: portRef ?? null,
+          coverageArea: coverageArea ?? null,
+          latitude: latitude != null && latitude !== "" ? Number(latitude) : null,
+          longitude: longitude != null && longitude !== "" ? Number(longitude) : null,
           isActive: true
-        },
+        } as any,
         include: { branch: true, employeeResponsible: true }
       });
 

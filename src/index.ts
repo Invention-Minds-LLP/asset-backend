@@ -74,6 +74,7 @@ import serviceInvoiceRoutes from "./api/service-invoices/service-invoices.routes
 import legacyMigrationRoutes from "./api/legacy-migration/legacy-migration.routes";
 import reconciliationRoutes from "./api/reconciliation/reconciliation.routes";
 import exportRoutes from "./api/export/export.routes";
+import floorPlanRoutes from "./api/floor-plan/floor-plan.routes";
 
 import cors from "cors";
 import path from "path";
@@ -204,6 +205,9 @@ app.use("/api/reconciliation", reconciliationRoutes);
 
 // ── Data Export Centre (Excel) ───────────────────────────────────────────────
 app.use("/api/export", exportRoutes);
+
+// ── Floor Plans (asset location pin map) ─────────────────────────────────────
+app.use("/api/floor-plan", floorPlanRoutes);
 
 // Default route
 app.get("/", (req, res) => {
