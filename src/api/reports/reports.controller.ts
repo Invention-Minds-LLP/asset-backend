@@ -860,7 +860,12 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
     // Fetch all assets that could appear in this FY schedule
     const assets = await prisma.asset.findMany({
       where: {
-        purchaseDate: { lte: fyEnd },
+        // Include purchased AND donated assets. Donations carry their date in
+        // donationDate (and value in estimatedValue), so match on either date.
+        OR: [
+          { purchaseDate: { lte: fyEnd } },
+          { donationDate: { lte: fyEnd } },
+        ],
       },
       select: {
         id: true,
@@ -868,6 +873,8 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
         assetNature: true,
         purchaseCost: true,
         purchaseDate: true,
+        donationDate: true,
+        estimatedValue: true,
         disposalDate: true,
         status: true,
         assetPoolId: true,
@@ -1023,8 +1030,11 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
       const catAssets = categoryMap.get(catName) ?? [];
 
       for (const asset of catAssets) {
-        const cost = Number(asset.purchaseCost || 0);
-        const purchaseDate = asset.purchaseDate ? new Date(asset.purchaseDate) : null;
+        // Cost basis & acquisition date fall back to the donation equivalents,
+        // so donated assets are capitalised at their estimated (fair) value.
+        const cost = Number(asset.purchaseCost ?? asset.estimatedValue ?? 0);
+        const acqDate = asset.purchaseDate ?? asset.donationDate;
+        const purchaseDate = acqDate ? new Date(acqDate) : null;
         const disposalDate = asset.disposalDate ? new Date(asset.disposalDate) : null;
 
         // ── Skip pool-individualized assets for years before their handover ─────
@@ -1495,10 +1505,18 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
 
     // Fetch all assets in this category that could appear in this FY
     const assets = await prisma.asset.findMany({
-      where: { assetCategoryId: category.id, purchaseDate: { lte: fyEnd } },
+      where: {
+        assetCategoryId: category.id,
+        OR: [
+          { purchaseDate: { lte: fyEnd } },
+          { donationDate: { lte: fyEnd } },
+        ],
+      },
       select: {
         id: true, assetId: true, assetName: true, serialNumber: true,
-        purchaseCost: true, purchaseDate: true, disposalDate: true, status: true,
+        purchaseCost: true, purchaseDate: true, donationDate: true, estimatedValue: true,
+        modeOfProcurement: true,
+        disposalDate: true, status: true,
         depreciation: {
           select: {
             depreciationRate: true, depreciationMethod: true, depreciationStart: true,
@@ -1520,8 +1538,9 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
     const isSecondHalf = (d: Date) => { const m = d.getMonth(); return m >= 9 || m <= 2; };
 
     const rows = assets.map(a => {
-      const cost = Number(a.purchaseCost || 0);
-      const purchaseDate = a.purchaseDate ? new Date(a.purchaseDate) : null;
+      const cost = Number(a.purchaseCost ?? a.estimatedValue ?? 0);
+      const acqDate = a.purchaseDate ?? a.donationDate;
+      const purchaseDate = acqDate ? new Date(acqDate) : null;
       const disposalDate = a.disposalDate ? new Date(a.disposalDate) : null;
 
       const isDisposedBeforeFY = disposalDate && disposalDate < fyStart;
@@ -1592,6 +1611,8 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
         assetId: a.assetId,
         assetName: a.assetName,
         serialNumber: a.serialNumber,
+        modeOfProcurement: a.modeOfProcurement,
+        donated: a.modeOfProcurement === "DONATION",
         purchaseDate: purchaseDate?.toISOString().split("T")[0] ?? null,
         openingGross: +openingGross.toFixed(2),
         additions: +additions.toFixed(2),
