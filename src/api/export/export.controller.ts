@@ -283,6 +283,201 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         return sendExcel(res, "IT_Act_FA_Register", headers, rows);
       }
 
+      // A2.1 — CFO Fixed Asset Register (Tally-style 22-column, per-asset)
+      // Columns match the CFO's required format:
+      //   No | Description | Last Acq Date | Last Dep Date
+      //   | Acq Cost: Before Start / Net Change / At End
+      //   | Depreciation: Before Start / Net Change / At End
+      //   | Book Value: Before Start / Net Change / At End
+      //   | Acq Cost A/c | Acc Dep A/c
+      //   | Dep Start | Dep End | No. of Years | Method | Rate %
+      //   | Bill No | Vendor
+      case "cfo-fixed-asset-register": {
+        // Default FY = current Indian FY if none supplied
+        let fyStart = f.fyStart;
+        let fyEnd   = f.fyEnd;
+        if (!fyStart || !fyEnd) {
+          const now = new Date();
+          const startYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+          fyStart = new Date(startYear, 3, 1);
+          fyEnd   = new Date(startYear + 1, 2, 31, 23, 59, 59);
+        }
+        const fyLabel = f.fyLabel ?? `${fyStart.getFullYear()}-${String((fyStart.getFullYear() + 1) % 100).padStart(2, "0")}`;
+
+        const assets = await prisma.asset.findMany({
+          where: {
+            ...(f.assetCategoryId ? { assetCategoryId: f.assetCategoryId } : {}),
+            OR: [
+              { purchaseDate: { lte: fyEnd } },
+              { donationDate: { lte: fyEnd } },
+            ],
+          },
+          select: {
+            id: true,
+            assetId: true,
+            assetName: true,
+            serialNumber: true,
+            invoiceNumber: true,
+            purchaseVoucherNo: true,
+            purchaseCost: true,
+            purchaseDate: true,
+            donationDate: true,
+            estimatedValue: true,
+            modeOfProcurement: true,
+            disposalDate: true,
+            status: true,
+            vendor: { select: { name: true } },
+            assetCategory: {
+              select: {
+                name: true,
+                glMapping: {
+                  select: {
+                    fixedAssetAccount: { select: { code: true, name: true } },
+                    accDepAccount:     { select: { code: true, name: true } },
+                  },
+                },
+              },
+            },
+            depreciation: {
+              select: {
+                depreciationMethod: true,
+                depreciationRate: true,
+                expectedLifeYears: true,
+                depreciationStart: true,
+              },
+            },
+          },
+          orderBy: [{ assetCategory: { name: "asc" } }, { purchaseDate: "asc" }, { id: "asc" }],
+        });
+
+        const allLogs = await prisma.depreciationLog.findMany({
+          where: {
+            assetId: { in: assets.map(a => a.id) },
+            periodEnd: { lte: fyEnd },
+          },
+          select: { assetId: true, periodEnd: true, depreciationAmount: true },
+        });
+        const logsByAsset = new Map<number, typeof allLogs>();
+        for (const l of allLogs) {
+          const arr = logsByAsset.get(l.assetId) ?? [];
+          arr.push(l);
+          logsByAsset.set(l.assetId, arr);
+        }
+
+        const methodLabel = (m: string | null | undefined) => {
+          if (m === "SL") return "Straight-Line";
+          if (m === "DB") return "Diminishing Balance";
+          return m || "";
+        };
+
+        const headers = [
+          "No.",
+          "Description",
+          "Last Acquisition Cost Date",
+          "Last Depreciation Date",
+          "Acquisition Cost before Starting Date",
+          "Acquisition Cost Net Change",
+          "Acquisition Cost at Ending Date",
+          "Depreciation before Starting Date",
+          "Depreciation Net Change",
+          "Depreciation at Ending Date",
+          "Book Value before Starting Date",
+          "Book Value Net Change",
+          "Book Value at Ending Date",
+          "Acquisition Cost Account",
+          "Accum. Depreciation Account",
+          "Depreciation Starting Date",
+          "Depreciation Ending Date",
+          "No. of Depreciation Years",
+          "Depreciation Method",
+          "Straight-Line %",
+          "Bill Number",
+          "Vendor Name",
+        ];
+
+        const rows: Row[] = [];
+        let no = 0;
+        for (const a of assets as any[]) {
+          const cost = num(a.purchaseCost ?? a.estimatedValue ?? 0);
+          const acqRaw = a.purchaseDate ?? a.donationDate;
+          const acq = acqRaw ? new Date(acqRaw) : null;
+          const disp = a.disposalDate ? new Date(a.disposalDate) : null;
+
+          const acquiredBeforeFY = acq && acq < fyStart;
+          const acquiredInFY     = acq && acq >= fyStart && acq <= fyEnd;
+          const disposedBeforeFY = disp && disp < fyStart;
+          const disposedInFY     = disp && disp >= fyStart && disp <= fyEnd;
+
+          const acqOpening = (acquiredBeforeFY && !disposedBeforeFY) ? cost : 0;
+          let acqNet = 0;
+          if (acquiredInFY) acqNet += cost;
+          if (disposedInFY) acqNet -= cost;
+          const acqClosing = (acq && acq <= fyEnd && (!disp || disp > fyEnd)) ? cost : 0;
+
+          let depOpening = 0;
+          let depNet = 0;
+          let lastDepDate: Date | null = null;
+          for (const l of logsByAsset.get(a.id) ?? []) {
+            const amt = num(l.depreciationAmount);
+            const pe = new Date(l.periodEnd);
+            if (pe < fyStart) depOpening += amt;
+            else if (pe <= fyEnd) depNet += amt;
+            if (!lastDepDate || pe > lastDepDate) lastDepDate = pe;
+          }
+          const depClosing = depOpening + depNet;
+
+          const bvOpening = acqOpening - depOpening;
+          const bvNet     = acqNet - depNet;
+          const bvClosing = acqClosing - depClosing;
+
+          // Drop rows with no balance and no activity in this FY (CFO schedule
+          // shouldn't list assets that aren't relevant to the period).
+          if (acqOpening === 0 && acqClosing === 0 && acqNet === 0 && depNet === 0) continue;
+
+          const gl = a.assetCategory?.glMapping;
+          const acqAccount = gl?.fixedAssetAccount
+            ? `${gl.fixedAssetAccount.code} - ${gl.fixedAssetAccount.name}` : "";
+          const accDepAccount = gl?.accDepAccount
+            ? `${gl.accDepAccount.code} - ${gl.accDepAccount.name}` : "";
+
+          const dep = a.depreciation;
+          const depStart = dep?.depreciationStart ? new Date(dep.depreciationStart) : acq;
+          let depEnd: Date | null = null;
+          if (depStart && dep?.expectedLifeYears) {
+            depEnd = new Date(depStart);
+            depEnd.setFullYear(depEnd.getFullYear() + dep.expectedLifeYears);
+          }
+
+          no += 1;
+          rows.push([
+            no,
+            a.assetName,
+            fmt(acq),
+            fmt(lastDepDate),
+            money(acqOpening),
+            money(acqNet),
+            money(acqClosing),
+            money(depOpening),
+            money(depNet),
+            money(depClosing),
+            money(bvOpening),
+            money(bvNet),
+            money(bvClosing),
+            acqAccount,
+            accDepAccount,
+            fmt(depStart),
+            fmt(depEnd),
+            dep?.expectedLifeYears ?? "",
+            methodLabel(dep?.depreciationMethod),
+            dep?.depreciationRate ? num(dep.depreciationRate).toFixed(2) : "",
+            a.purchaseVoucherNo || a.invoiceNumber || "",
+            a.vendor?.name || "",
+          ]);
+        }
+
+        return sendExcel(res, `CFO_Fixed_Asset_Register_FY${fyLabel}`, headers, rows);
+      }
+
       // A3 — Block of Assets schedule (group by IT-Act rate brackets)
       case "block-of-assets-schedule": {
         const assets = await prisma.asset.findMany({
