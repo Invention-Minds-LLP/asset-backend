@@ -127,6 +127,42 @@ function sendExcel(res: Response, filename: string, headers: string[], rows: Row
   res.send(buf);
 }
 
+// Numeric-aware export — keeps amount cells as real numbers (not strings) so SUM/
+// pivot tables work, and applies an Indian-currency format string to the listed
+// column indexes. Optional `colWidths` controls column widths in "wch" units.
+function sendExcelTyped(
+  res: Response,
+  filename: string,
+  headers: string[],
+  rows: Row[],
+  numericColIndexes: number[] = [],
+  numberFormat = "#,##0.00",
+  colWidths?: number[],
+): void {
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  const numericSet = new Set(numericColIndexes);
+  // Row index 0 is the header. Data rows start at 1.
+  for (let r = 1; r <= rows.length; r++) {
+    for (const c of numericSet) {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[ref];
+      if (cell && typeof cell.v === "number") {
+        cell.t = "n";
+        cell.z = numberFormat;
+      }
+    }
+  }
+  if (colWidths && colWidths.length) {
+    ws["!cols"] = colWidths.map(w => ({ wch: w }));
+  }
+  XLSX.utils.book_append_sheet(wb, ws, "Data");
+  const buf: Buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}.xlsx"`);
+  res.send(buf);
+}
+
 function sendMultiSheetExcel(res: Response, filename: string, sheets: SheetData[]): void {
   const wb = XLSX.utils.book_new();
   for (const sheet of sheets) {
@@ -283,15 +319,15 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         return sendExcel(res, "IT_Act_FA_Register", headers, rows);
       }
 
-      // A2.1 — CFO Fixed Asset Register (Tally-style 22-column, per-asset)
-      // Columns match the CFO's required format:
-      //   No | Description | Last Acq Date | Last Dep Date
-      //   | Acq Cost: Before Start / Net Change / At End
-      //   | Depreciation: Before Start / Net Change / At End
-      //   | Book Value: Before Start / Net Change / At End
-      //   | Acq Cost A/c | Acc Dep A/c
-      //   | Dep Start | Dep End | No. of Years | Method | Rate %
-      //   | Bill No | Vendor
+      // A2.1 — CFO Fixed Asset Register (Tally-style 24-column, per-asset).
+      // Differences vs the earlier 22-column draft (CFO feedback):
+      //   • Period filter is a date *range* within the FY (?startDate=/?endDate=),
+      //     not the whole FY. Dates outside the FY are clamped to the FY edges.
+      //   • Gross "Net Change" is split → Additions | Deletions.
+      //   • Dep   "Net Change" is split → Period Depreciation | Acc Dep on Disposals.
+      //   • Amount cells are written as Numbers (not formatted strings) with an
+      //     Indian-currency format applied, so Excel SUM/pivots work.
+      //   • A grand-total row is appended at the bottom.
       case "cfo-fixed-asset-register": {
         // Default FY = current Indian FY if none supplied
         let fyStart = f.fyStart;
@@ -304,12 +340,27 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         }
         const fyLabel = f.fyLabel ?? `${fyStart.getFullYear()}-${String((fyStart.getFullYear() + 1) % 100).padStart(2, "0")}`;
 
+        // Reporting window = (winStart, winEnd) inside the FY.
+        // If the caller passed startDate/endDate, clamp them to [fyStart, fyEnd].
+        // Otherwise the window is the whole FY.
+        const clampDown = (d: Date) => d < fyStart! ? fyStart! : d > fyEnd! ? fyEnd! : d;
+        const winStart: Date = f.start ? clampDown(new Date(f.start)) : fyStart;
+        const winEnd:   Date = f.end   ? clampDown(new Date(f.end))   : fyEnd;
+
+        // Human-friendly suffix for the filename if the caller picked a sub-window.
+        const isFullFY = winStart.getTime() === fyStart.getTime() && winEnd.getTime() === fyEnd.getTime();
+        const monthShort = (d: Date) =>
+          ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()];
+        const periodLabel = isFullFY
+          ? "All_Months"
+          : `${monthShort(winStart)}${winStart.getDate().toString().padStart(2,"0")}-${monthShort(winEnd)}${winEnd.getDate().toString().padStart(2,"0")}`;
+
         const assets = await prisma.asset.findMany({
           where: {
             ...(f.assetCategoryId ? { assetCategoryId: f.assetCategoryId } : {}),
             OR: [
-              { purchaseDate: { lte: fyEnd } },
-              { donationDate: { lte: fyEnd } },
+              { purchaseDate: { lte: winEnd } },
+              { donationDate: { lte: winEnd } },
             ],
           },
           select: {
@@ -353,7 +404,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const allLogs = await prisma.depreciationLog.findMany({
           where: {
             assetId: { in: assets.map(a => a.id) },
-            periodEnd: { lte: fyEnd },
+            periodEnd: { lte: winEnd },
           },
           select: { assetId: true, periodEnd: true, depreciationAmount: true },
         });
@@ -371,68 +422,111 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         };
 
         const headers = [
-          "No.",
-          "Description",
-          "Last Acquisition Cost Date",
-          "Last Depreciation Date",
-          "Acquisition Cost before Starting Date",
-          "Acquisition Cost Net Change",
-          "Acquisition Cost at Ending Date",
-          "Depreciation before Starting Date",
-          "Depreciation Net Change",
-          "Depreciation at Ending Date",
-          "Book Value before Starting Date",
-          "Book Value Net Change",
-          "Book Value at Ending Date",
-          "Acquisition Cost Account",
-          "Accum. Depreciation Account",
-          "Depreciation Starting Date",
-          "Depreciation Ending Date",
-          "No. of Depreciation Years",
-          "Depreciation Method",
-          "Straight-Line %",
-          "Bill Number",
-          "Vendor Name",
+          "No.",                                       // 0
+          "Description",                               // 1
+          "Last Acquisition Cost Date",                // 2
+          "Last Depreciation Date",                    // 3
+          "Acquisition Cost before Starting Date",     // 4   ← opening gross
+          "Additions during Period",                   // 5   ← NEW
+          "Deletions during Period",                   // 6   ← NEW
+          "Acquisition Cost at Ending Date",           // 7   ← closing gross
+          "Depreciation before Starting Date",         // 8   ← opening dep
+          "Depreciation for the Period",               // 9   ← NEW
+          "Acc. Depreciation on Disposals",            // 10  ← NEW
+          "Depreciation at Ending Date",               // 11  ← closing dep
+          "Book Value before Starting Date",           // 12
+          "Book Value Net Change",                     // 13
+          "Book Value at Ending Date",                 // 14
+          "Acquisition Cost Account",                  // 15
+          "Accum. Depreciation Account",               // 16
+          "Depreciation Starting Date",                // 17
+          "Depreciation Ending Date",                  // 18
+          "No. of Depreciation Years",                 // 19
+          "Depreciation Method",                       // 20
+          "Straight-Line %",                           // 21
+          "Bill Number",                               // 22
+          "Vendor Name",                               // 23
+        ];
+        // Columns whose cells should be numeric & currency-formatted in Excel.
+        const numericCols = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+        // Column widths (wch units ≈ characters) — keeps the wide register readable.
+        const colWidths = [
+          6,  40, 14, 14, 18, 16, 16, 18, 18, 18, 18, 18,
+          18, 18, 18, 26, 26, 14, 14, 8,  18, 12, 16, 26,
         ];
 
         const rows: Row[] = [];
         let no = 0;
+        const totals = {
+          opGross: 0, additions: 0, deletions: 0, clGross: 0,
+          opDep: 0,   periodDep: 0, accDepOnDisp: 0, clDep: 0,
+          opBv: 0,    bvNet: 0,     clBv: 0,
+        };
+
         for (const a of assets as any[]) {
           const cost = num(a.purchaseCost ?? a.estimatedValue ?? 0);
           const acqRaw = a.purchaseDate ?? a.donationDate;
           const acq = acqRaw ? new Date(acqRaw) : null;
           const disp = a.disposalDate ? new Date(a.disposalDate) : null;
 
-          const acquiredBeforeFY = acq && acq < fyStart;
-          const acquiredInFY     = acq && acq >= fyStart && acq <= fyEnd;
-          const disposedBeforeFY = disp && disp < fyStart;
-          const disposedInFY     = disp && disp >= fyStart && disp <= fyEnd;
+          const acquiredBeforeWin = acq && acq < winStart;
+          const acquiredInWin     = acq && acq >= winStart && acq <= winEnd;
+          const disposedBeforeWin = disp && disp < winStart;
+          const disposedInWin     = disp && disp >= winStart && disp <= winEnd;
 
-          const acqOpening = (acquiredBeforeFY && !disposedBeforeFY) ? cost : 0;
-          let acqNet = 0;
-          if (acquiredInFY) acqNet += cost;
-          if (disposedInFY) acqNet -= cost;
-          const acqClosing = (acq && acq <= fyEnd && (!disp || disp > fyEnd)) ? cost : 0;
+          // ── Gross block math ────────────────────────────────────────────
+          // Opening: on the books at winStart.
+          const acqOpening = (acquiredBeforeWin && !disposedBeforeWin) ? cost : 0;
+          // Additions: capitalised during the window.
+          const additions  = acquiredInWin ? cost : 0;
+          // Deletions: written off during the window.
+          const deletions  = disposedInWin ? cost : 0;
+          // Closing: on the books at winEnd (acquired by then, not disposed before/in window).
+          const acqClosing = (acq && acq <= winEnd && (!disp || disp > winEnd)) ? cost : 0;
 
+          // ── Depreciation math ───────────────────────────────────────────
+          // depOpening    = Σ logs with periodEnd < winStart
+          // periodDep     = Σ logs with winStart ≤ periodEnd ≤ winEnd
+          //                 (for assets NOT disposed before/in window — i.e.
+          //                 logs that survive the disposal write-off below)
+          // accDepOnDisp  = for assets disposed in window, the Σ of ALL logs
+          //                 up to their disposal date (= the acc dep eliminated
+          //                 from books). Carved out of periodDep so the column
+          //                 math reconciles: depClosing = depOpening + periodDep
+          //                 − accDepOnDisp.
           let depOpening = 0;
-          let depNet = 0;
+          let depUpToWinEnd = 0;       // Σ logs with periodEnd ≤ winEnd
+          let depUpToDisposal = 0;     // Σ logs with periodEnd ≤ disposalDate
           let lastDepDate: Date | null = null;
           for (const l of logsByAsset.get(a.id) ?? []) {
             const amt = num(l.depreciationAmount);
             const pe = new Date(l.periodEnd);
-            if (pe < fyStart) depOpening += amt;
-            else if (pe <= fyEnd) depNet += amt;
+            if (pe < winStart) depOpening += amt;
+            if (pe <= winEnd)  depUpToWinEnd += amt;
+            if (disp && pe <= disp) depUpToDisposal += amt;
             if (!lastDepDate || pe > lastDepDate) lastDepDate = pe;
           }
-          const depClosing = depOpening + depNet;
+          const accDepOnDisp = disposedInWin ? depUpToDisposal : 0;
+          // Period dep that stays on books = total dep within window minus what
+          // was eliminated on disposal. (depUpToWinEnd − depOpening) is the
+          // raw within-window dep; subtract the disposal-eliminated portion
+          // that falls inside the window.
+          const rawPeriodDep = depUpToWinEnd - depOpening;
+          const periodDep    = Math.max(0, rawPeriodDep - accDepOnDisp);
+          const depClosing   = depOpening + periodDep - accDepOnDisp;
 
+          // ── Book value (derived) ────────────────────────────────────────
           const bvOpening = acqOpening - depOpening;
-          const bvNet     = acqNet - depNet;
           const bvClosing = acqClosing - depClosing;
+          const bvNet     = bvClosing - bvOpening;
 
-          // Drop rows with no balance and no activity in this FY (CFO schedule
-          // shouldn't list assets that aren't relevant to the period).
-          if (acqOpening === 0 && acqClosing === 0 && acqNet === 0 && depNet === 0) continue;
+          // Drop rows that are zero across the board — the CFO schedule should
+          // only list assets relevant to the selected window.
+          if (
+            acqOpening === 0 && acqClosing === 0 &&
+            additions === 0 && deletions === 0 &&
+            periodDep === 0 && accDepOnDisp === 0
+          ) continue;
 
           const gl = a.assetCategory?.glMapping;
           const acqAccount = gl?.fixedAssetAccount
@@ -454,28 +548,65 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             a.assetName,
             fmt(acq),
             fmt(lastDepDate),
-            money(acqOpening),
-            money(acqNet),
-            money(acqClosing),
-            money(depOpening),
-            money(depNet),
-            money(depClosing),
-            money(bvOpening),
-            money(bvNet),
-            money(bvClosing),
+            acqOpening,
+            additions,
+            deletions,
+            acqClosing,
+            depOpening,
+            periodDep,
+            accDepOnDisp,
+            depClosing,
+            bvOpening,
+            bvNet,
+            bvClosing,
             acqAccount,
             accDepAccount,
             fmt(depStart),
             fmt(depEnd),
             dep?.expectedLifeYears ?? "",
             methodLabel(dep?.depreciationMethod),
-            dep?.depreciationRate ? num(dep.depreciationRate).toFixed(2) : "",
+            dep?.depreciationRate ? num(dep.depreciationRate) : "",
             a.purchaseVoucherNo || a.invoiceNumber || "",
             a.vendor?.name || "",
           ]);
+
+          totals.opGross      += acqOpening;
+          totals.additions    += additions;
+          totals.deletions    += deletions;
+          totals.clGross      += acqClosing;
+          totals.opDep        += depOpening;
+          totals.periodDep    += periodDep;
+          totals.accDepOnDisp += accDepOnDisp;
+          totals.clDep        += depClosing;
+          totals.opBv         += bvOpening;
+          totals.bvNet        += bvNet;
+          totals.clBv         += bvClosing;
         }
 
-        return sendExcel(res, `CFO_Fixed_Asset_Register_FY${fyLabel}`, headers, rows);
+        // Blank spacer + grand-total row (xlsx CE can't bold cells; we make the
+        // label uppercase so it's still visually distinct).
+        rows.push(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+        rows.push([
+          "",
+          `TOTAL (${no} assets)`,
+          "",
+          "",
+          totals.opGross,
+          totals.additions,
+          totals.deletions,
+          totals.clGross,
+          totals.opDep,
+          totals.periodDep,
+          totals.accDepOnDisp,
+          totals.clDep,
+          totals.opBv,
+          totals.bvNet,
+          totals.clBv,
+          "", "", "", "", "", "", "", "", "",
+        ]);
+
+        const filename = `CFO_Fixed_Asset_Register_FY${fyLabel}_${periodLabel}`;
+        return sendExcelTyped(res, filename, headers, rows, numericCols, "#,##0.00", colWidths);
       }
 
       // A3 — Block of Assets schedule (group by IT-Act rate brackets)
