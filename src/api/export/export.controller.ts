@@ -319,16 +319,31 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         return sendExcel(res, "IT_Act_FA_Register", headers, rows);
       }
 
-      // A2.1 — CFO Fixed Asset Register (Tally-style 24-column, per-asset).
-      // Differences vs the earlier 22-column draft (CFO feedback):
-      //   • Period filter is a date *range* within the FY (?startDate=/?endDate=),
-      //     not the whole FY. Dates outside the FY are clamped to the FY edges.
+      // A2.1 / A2.2 — CFO Fixed Asset Register (Tally-style 24-column, per-asset).
+      //
+      // Two report keys share the same compute path; they differ ONLY in whether
+      // zero-activity rows are dropped:
+      //   • cfo-fixed-asset-register          → Full register (Schedule II / year-end).
+      //                                         Includes every legacy asset still on books.
+      //   • cfo-fixed-asset-register-activity → Activity-only. Drops rows where
+      //                                         Additions/Deletions/Period Dep/Acc Dep
+      //                                         on Disposals are all zero in the window.
+      //
+      // Filter priority (highest specificity wins):
+      //   1. ?startDate= and ?endDate=  → exact range, clamped to FY edges
+      //   2. ?month=1..12               → that one month inside the FY
+      //   3. ?financialYear=YYYY-YY     → whole FY
+      //   4. (nothing)                   → current FY, whole year
+      //
+      // Other shared characteristics:
       //   • Gross "Net Change" is split → Additions | Deletions.
       //   • Dep   "Net Change" is split → Period Depreciation | Acc Dep on Disposals.
-      //   • Amount cells are written as Numbers (not formatted strings) with an
-      //     Indian-currency format applied, so Excel SUM/pivots work.
-      //   • A grand-total row is appended at the bottom.
-      case "cfo-fixed-asset-register": {
+      //   • Amount cells are Numbers with #,##0.00 format so Excel SUM/pivots work.
+      //   • Grand-total row appended at the bottom.
+      case "cfo-fixed-asset-register":
+      case "cfo-fixed-asset-register-activity": {
+        const activityOnly = report === "cfo-fixed-asset-register-activity";
+
         // Default FY = current Indian FY if none supplied
         let fyStart = f.fyStart;
         let fyEnd   = f.fyEnd;
@@ -340,20 +355,38 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         }
         const fyLabel = f.fyLabel ?? `${fyStart.getFullYear()}-${String((fyStart.getFullYear() + 1) % 100).padStart(2, "0")}`;
 
-        // Reporting window = (winStart, winEnd) inside the FY.
-        // If the caller passed startDate/endDate, clamp them to [fyStart, fyEnd].
-        // Otherwise the window is the whole FY.
+        // ── Resolve the reporting window via the priority above ────────────
         const clampDown = (d: Date) => d < fyStart! ? fyStart! : d > fyEnd! ? fyEnd! : d;
-        const winStart: Date = f.start ? clampDown(new Date(f.start)) : fyStart;
-        const winEnd:   Date = f.end   ? clampDown(new Date(f.end))   : fyEnd;
+        let winStart: Date;
+        let winEnd: Date;
+        let periodKind: "range" | "month" | "fullYear";
+        if (f.start && f.end) {
+          winStart   = clampDown(new Date(f.start));
+          winEnd     = clampDown(new Date(f.end));
+          periodKind = "range";
+        } else if (f.month && f.month >= 1 && f.month <= 12) {
+          // Apr-Dec belong to FY's starting calendar year; Jan-Mar to the next.
+          const yr = f.month >= 4 ? fyStart.getFullYear() : fyStart.getFullYear() + 1;
+          winStart   = new Date(yr, f.month - 1, 1);
+          winEnd     = new Date(yr, f.month, 0, 23, 59, 59);   // day 0 of next month = last day of this one
+          periodKind = "month";
+        } else {
+          winStart   = fyStart;
+          winEnd     = fyEnd;
+          periodKind = "fullYear";
+        }
 
-        // Human-friendly suffix for the filename if the caller picked a sub-window.
-        const isFullFY = winStart.getTime() === fyStart.getTime() && winEnd.getTime() === fyEnd.getTime();
+        // ── Filename suffix that reflects exactly what was filtered ────────
         const monthShort = (d: Date) =>
           ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getMonth()];
-        const periodLabel = isFullFY
-          ? "All_Months"
-          : `${monthShort(winStart)}${winStart.getDate().toString().padStart(2,"0")}-${monthShort(winEnd)}${winEnd.getDate().toString().padStart(2,"0")}`;
+        let periodLabel: string;
+        if (periodKind === "range") {
+          periodLabel = `${monthShort(winStart)}${winStart.getDate().toString().padStart(2,"0")}-${monthShort(winEnd)}${winEnd.getDate().toString().padStart(2,"0")}`;
+        } else if (periodKind === "month") {
+          periodLabel = `${monthShort(winStart)}${winStart.getFullYear()}`;
+        } else {
+          periodLabel = "FullYear";
+        }
 
         const assets = await prisma.asset.findMany({
           where: {
@@ -520,13 +553,16 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           const bvClosing = acqClosing - depClosing;
           const bvNet     = bvClosing - bvOpening;
 
-          // Drop rows that are zero across the board — the CFO schedule should
-          // only list assets relevant to the selected window.
-          if (
-            acqOpening === 0 && acqClosing === 0 &&
+          // Activity-only mode drops rows with no movement in the window
+          // (additions/deletions/period dep/disposal dep all zero). The full
+          // register additionally drops rows that have no balance at all on
+          // either side of the window — those are pre-FY disposals that aren't
+          // relevant to any FA register.
+          const noActivity =
             additions === 0 && deletions === 0 &&
-            periodDep === 0 && accDepOnDisp === 0
-          ) continue;
+            periodDep === 0 && accDepOnDisp === 0;
+          const noBalance = acqOpening === 0 && acqClosing === 0;
+          if (activityOnly ? noActivity : (noActivity && noBalance)) continue;
 
           const gl = a.assetCategory?.glMapping;
           const acqAccount = gl?.fixedAssetAccount
@@ -605,7 +641,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           "", "", "", "", "", "", "", "", "",
         ]);
 
-        const filename = `CFO_Fixed_Asset_Register_FY${fyLabel}_${periodLabel}`;
+        const modeSuffix = activityOnly ? "_ActivityOnly" : "_Full";
+        const filename = `CFO_Fixed_Asset_Register_FY${fyLabel}_${periodLabel}${modeSuffix}`;
         return sendExcelTyped(res, filename, headers, rows, numericCols, "#,##0.00", colWidths);
       }
 
