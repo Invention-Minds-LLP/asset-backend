@@ -353,6 +353,8 @@ export const acceptGRA = async (req: AuthenticatedRequest, res: Response) => {
                 purchaseCost: line.unitPrice ?? null,
                 vendorId: po?.vendorId ?? gra.vendorId ?? null,
                 status: "IN_STORE",
+                currentStoreId: line.storeId ?? null,
+                currentStoreSince: line.storeId ? new Date() : null,
                 sourceType: "INTERNAL_PO_GRA",
                 sourceReference: gra.grnNumber,
                 assetCategoryId: poLine?.assetCategoryId ?? 1,

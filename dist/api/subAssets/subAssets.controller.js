@@ -413,7 +413,7 @@ function isDescendant(candidateParentId, childId) {
 //             assetId: newAssetId,
 //             assetName,
 //             assetType,
-//             assetCategoryId: Number(assetCategoryId),
+//             assetCategoryId: resolvedCategoryId,
 //             serialNumber,
 //             referenceCode: referenceCode || null,
 //             sourceType: "INVENTORY_SPARE",
@@ -549,8 +549,11 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
             res.status(400).json({ message: "Invalid source type" });
             return;
         }
-        if (!assetName || !assetType || !assetCategoryId || !serialNumber || !status) {
-            res.status(400).json({ message: "Missing required fields" });
+        // Category & status are NOT required from the client — a sub-asset is a
+        // component of its parent, so it inherits the parent's category/status
+        // (resolved below) unless explicitly overridden.
+        if (!assetName || !assetType || !serialNumber) {
+            res.status(400).json({ message: "Missing required fields (component name, type and serial number)" });
             return;
         }
         const { forceCreate, createAsStandalone } = req.body;
@@ -563,12 +566,19 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 departmentId: true,
                 purchaseCost: true,
                 estimatedValue: true,
+                assetCategoryId: true,
+                status: true,
             },
         });
         if (!parent) {
             res.status(404).json({ message: "Parent asset not found" });
             return;
         }
+        // Inherit category/status from the parent when not explicitly provided.
+        const resolvedCategoryId = assetCategoryId != null && assetCategoryId !== ""
+            ? Number(assetCategoryId)
+            : parent.assetCategoryId;
+        const resolvedStatus = status || parent.status || "ACTIVE";
         // ── 40% threshold check ────────────────────────────────────────────────────
         if (!forceCreate && !createAsStandalone) {
             const parentValue = Number((_b = (_a = parent.purchaseCost) !== null && _a !== void 0 ? _a : parent.estimatedValue) !== null && _b !== void 0 ? _b : 0);
@@ -589,19 +599,19 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
         }
         // If user chose standalone, create without parentAssetId
         if (createAsStandalone) {
-            const standaloneId = yield (0, assetIdGenerator_1.generateAssetId)(undefined, undefined, { categoryId: Number(assetCategoryId) });
+            const standaloneId = yield (0, assetIdGenerator_1.generateAssetId)(undefined, undefined, { categoryId: resolvedCategoryId });
             const standaloneChild = yield prismaClient_1.default.asset.create({
                 data: {
                     assetId: standaloneId,
                     assetName,
                     assetType,
-                    assetCategoryId: Number(assetCategoryId),
+                    assetCategoryId: resolvedCategoryId,
                     serialNumber,
                     referenceCode: req.body.referenceCode || null,
                     sourceType: sourceType || "NEW",
                     remarks: req.body.remarks || null,
                     modeOfProcurement: req.body.modeOfProcurement || "PURCHASE",
-                    status,
+                    status: resolvedStatus,
                     vendorId: req.body.vendorId != null ? Number(req.body.vendorId) : parent.vendorId,
                     departmentId: req.body.departmentId != null ? Number(req.body.departmentId) : parent.departmentId,
                     invoiceNumber: req.body.invoiceNumber || null,
@@ -650,13 +660,13 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
                         assetId: newAssetId,
                         assetName,
                         assetType,
-                        assetCategoryId: Number(assetCategoryId),
+                        assetCategoryId: resolvedCategoryId,
                         serialNumber,
                         referenceCode: referenceCode || null,
                         sourceType: "INVENTORY_SPARE",
                         sourceReference: sourceReference || null,
                         remarks: remarks || null,
-                        status,
+                        status: resolvedStatus,
                         modeOfProcurement: "PURCHASE",
                         parentAssetId: parent.id,
                         vendorId: useInherit
@@ -753,7 +763,7 @@ const createSubAsset = (req, res) => __awaiter(void 0, void 0, void 0, function*
                 sourceReference: sourceReference || null,
                 remarks: remarks || null,
                 modeOfProcurement,
-                status,
+                status: resolvedStatus,
                 parentAssetId: parent.id,
                 vendorId: useInherit ? parent.vendorId : (vendorId != null ? Number(vendorId) : null),
                 departmentId: useInherit ? parent.departmentId : (departmentId != null ? Number(departmentId) : null),

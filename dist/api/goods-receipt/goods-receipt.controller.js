@@ -292,7 +292,7 @@ const acceptGRA = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
         });
         const autoCreateAsset = (autoCreateCfg === null || autoCreateCfg === void 0 ? void 0 : autoCreateCfg.value) === "true";
         yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
-            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
+            var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t;
             // 1. Set GRA status to ACCEPTED
             yield tx.goodsReceipt.update({
                 where: { id: graId },
@@ -325,9 +325,11 @@ const acceptGRA = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                                 purchaseCost: (_e = line.unitPrice) !== null && _e !== void 0 ? _e : null,
                                 vendorId: (_g = (_f = po === null || po === void 0 ? void 0 : po.vendorId) !== null && _f !== void 0 ? _f : gra.vendorId) !== null && _g !== void 0 ? _g : null,
                                 status: "IN_STORE",
+                                currentStoreId: (_h = line.storeId) !== null && _h !== void 0 ? _h : null,
+                                currentStoreSince: line.storeId ? new Date() : null,
                                 sourceType: "INTERNAL_PO_GRA",
                                 sourceReference: gra.grnNumber,
-                                assetCategoryId: (_h = poLine === null || poLine === void 0 ? void 0 : poLine.assetCategoryId) !== null && _h !== void 0 ? _h : 1,
+                                assetCategoryId: (_j = poLine === null || poLine === void 0 ? void 0 : poLine.assetCategoryId) !== null && _j !== void 0 ? _j : 1,
                             },
                         });
                         // Set createdAssetId on the line (last created asset for multi-qty)
@@ -342,10 +344,10 @@ const acceptGRA = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                 else if ((line.itemType === "SPARE_PART" || line.itemType === "CONSUMABLE") && acceptedQty > 0) {
                     // 3. Create InventoryTransaction + update StoreStockPosition
                     const spId = line.itemType === "SPARE_PART" && line.poLineId
-                        ? ((_m = (_l = (_k = (_j = gra.purchaseOrder) === null || _j === void 0 ? void 0 : _j.lines) === null || _k === void 0 ? void 0 : _k.find((pl) => pl.id === line.poLineId)) === null || _l === void 0 ? void 0 : _l.sparePartId) !== null && _m !== void 0 ? _m : null)
+                        ? ((_o = (_m = (_l = (_k = gra.purchaseOrder) === null || _k === void 0 ? void 0 : _k.lines) === null || _l === void 0 ? void 0 : _l.find((pl) => pl.id === line.poLineId)) === null || _m === void 0 ? void 0 : _m.sparePartId) !== null && _o !== void 0 ? _o : null)
                         : null;
                     const conId = line.itemType === "CONSUMABLE" && line.poLineId
-                        ? ((_r = (_q = (_p = (_o = gra.purchaseOrder) === null || _o === void 0 ? void 0 : _o.lines) === null || _p === void 0 ? void 0 : _p.find((pl) => pl.id === line.poLineId)) === null || _q === void 0 ? void 0 : _q.consumableId) !== null && _r !== void 0 ? _r : null)
+                        ? ((_s = (_r = (_q = (_p = gra.purchaseOrder) === null || _p === void 0 ? void 0 : _p.lines) === null || _q === void 0 ? void 0 : _q.find((pl) => pl.id === line.poLineId)) === null || _r === void 0 ? void 0 : _r.consumableId) !== null && _s !== void 0 ? _s : null)
                         : null;
                     yield tx.inventoryTransaction.create({
                         data: {
@@ -355,7 +357,7 @@ const acceptGRA = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
                             quantity: acceptedQty,
                             referenceType: "GRA",
                             referenceId: gra.id,
-                            storeId: (_s = line.storeId) !== null && _s !== void 0 ? _s : null,
+                            storeId: (_t = line.storeId) !== null && _t !== void 0 ? _t : null,
                             performedById: user.employeeDbId,
                             notes: `Auto-created from GRA ${gra.grnNumber}, line ${line.id}`,
                         },

@@ -8,6 +8,7 @@ import { Client } from "basic-ftp";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { AssignmentAction, AssignmentStage, AssignmentStatus, AcknowledgementPurpose } from "@prisma/client";
 import { generateAssetId } from "../../utilis/assetIdGenerator";
+import { generateTransferNumber } from "../store-transfer/store-transfer.controller";
 
 
 const FTP_CONFIG = {
@@ -287,6 +288,8 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
     const assignmentId = Number(req.params.assignmentId);
     const acknowledgementNote = req.body.acknowledgementNote;
     const digitalSignature = req.body.digitalSignature;
+    // Sub-store the HOD parks the asset into when acknowledging (Main Store → Sub Store)
+    const storeId = req.body.storeId;
 
     const checklist = req.body.checklist ? JSON.parse(req.body.checklist) : [];
 
@@ -428,7 +431,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
 
     const currentAsset = await prisma.asset.findUnique({
       where: { id: assignment.assetId },
-      select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true },
+      select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true, currentStoreId: true },
     });
 
     if (currentAsset?.assetId.startsWith("TEMP-") && currentAsset.departmentId) {
@@ -442,8 +445,51 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
 
         await prisma.asset.update({
           where: { id: assignment.assetId },
-          data: { assetId: issuedAssetId } as any,
+          data: {
+            assetId: issuedAssetId,
+            // Park into the HOD's chosen sub-store at the same time as ID issuance.
+            ...(storeId ? { currentStoreId: Number(storeId), currentStoreSince: new Date() } : {}),
+          } as any,
         });
+
+        // Auto-log the Main Store → Sub Store move as a received StoreTransfer,
+        // so the move has a transfer number and shows up in the Transfers tab.
+        // Best-effort: a logging failure must not fail the acknowledgement itself.
+        const fromStoreId = currentAsset.currentStoreId;
+        const toStoreId = storeId ? Number(storeId) : null;
+        if (toStoreId && fromStoreId && fromStoreId !== toStoreId) {
+          try {
+            const transferNumber = await generateTransferNumber();
+            await prisma.storeTransfer.create({
+              data: {
+                transferNumber,
+                fromStoreId,
+                toStoreId,
+                transferType: "STORE_TO_STORE",
+                status: "RECEIVED",
+                requestedById: employeeId,
+                approvedById: employeeId,
+                receivedById: employeeId,
+                requestedAt: new Date(),
+                approvedAt: new Date(),
+                receivedAt: new Date(),
+                remarks: `Auto-logged on HOD acknowledgement of asset ${issuedAssetId}`,
+                items: {
+                  create: [
+                    {
+                      itemType: "ASSET",
+                      assetId: assignment.assetId,
+                      quantity: 1,
+                      receivedQty: 1,
+                    },
+                  ],
+                },
+              },
+            });
+          } catch (txErr: any) {
+            console.error("Auto-log StoreTransfer on acknowledge failed:", txErr?.message);
+          }
+        }
       }
     }
 

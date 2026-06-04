@@ -12,10 +12,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getMobileProfile = exports.mobileRaiseTicket = exports.getMobileAssetList = exports.getMobileDashboard = exports.mobileLogin = void 0;
+exports.mobileVerifyOtp = exports.mobileRequestOtp = exports.getMobileProfile = exports.mobileRaiseTicket = exports.getMobileAssetList = exports.getMobileDashboard = exports.mobileLogin = void 0;
+const crypto_1 = __importDefault(require("crypto"));
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
+const notificationHelper_1 = require("../../utilis/notificationHelper");
 const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
 // Mobile Login — returns token + user profile + assigned assets summary
 const mobileLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
@@ -287,3 +289,194 @@ const getMobileProfile = (req, res) => __awaiter(void 0, void 0, void 0, functio
     }
 });
 exports.getMobileProfile = getMobileProfile;
+// ── OTP login (internal employees) ────────────────────────────────────────
+// Two-step replacement for the password flow. Until Batch B's cleanup removes
+// the password endpoint, both auth paths coexist.
+const OTP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_BCRYPT_COST = 10;
+const INTERNAL_IDENTIFIER_TYPE = "EMPLOYEE_ID";
+// POST /api/mobile/login/request-otp
+// Body: { employeeId }
+// Always responds 200 success — even if the employee doesn't exist or has no
+// email on file — so an attacker can't enumerate valid employee IDs by probing.
+// Rate-limited to one fresh OTP per 60s per identifier.
+const mobileRequestOtp = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const { employeeId } = req.body || {};
+        if (!employeeId || typeof employeeId !== "string") {
+            res.status(400).json({ message: "Employee ID is required" });
+            return;
+        }
+        // Rate limit check first — don't even hit the user table if the caller
+        // is hammering the endpoint.
+        const recent = yield prismaClient_1.default.loginOtp.findFirst({
+            where: {
+                identifier: employeeId,
+                identifierType: INTERNAL_IDENTIFIER_TYPE,
+                createdAt: { gt: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        if (recent) {
+            const retryAfterSec = Math.ceil((recent.createdAt.getTime() + OTP_RESEND_COOLDOWN_MS - Date.now()) / 1000);
+            res.setHeader("Retry-After", String(Math.max(retryAfterSec, 1)));
+            res.status(429).json({ message: "Please wait before requesting another code." });
+            return;
+        }
+        const user = yield prismaClient_1.default.user.findUnique({
+            where: { employeeID: employeeId },
+            include: { employee: { select: { email: true, name: true } } },
+        });
+        const email = (_a = user === null || user === void 0 ? void 0 : user.employee) === null || _a === void 0 ? void 0 : _a.email;
+        // No employee or no email → still respond success so we don't leak which
+        // employee IDs exist. The code below is skipped silently.
+        if (!user || !email) {
+            res.json({ success: true });
+            return;
+        }
+        const otp = String(crypto_1.default.randomInt(100000, 1000000));
+        const otpHash = yield bcrypt_1.default.hash(otp, OTP_BCRYPT_COST);
+        yield prismaClient_1.default.loginOtp.create({
+            data: {
+                identifier: employeeId,
+                identifierType: INTERNAL_IDENTIFIER_TYPE,
+                otpHash,
+                expiresAt: new Date(Date.now() + OTP_TTL_MS),
+            },
+        });
+        // Fire and forget — sendEmail swallows errors internally. If SMTP is
+        // misconfigured the OTP row still exists; the user will never receive it,
+        // but the failure is logged server-side.
+        yield (0, notificationHelper_1.sendEmail)({
+            to: email,
+            subject: "Your Smart Assets login code",
+            html: `<p>Hi ${((_b = user.employee) === null || _b === void 0 ? void 0 : _b.name) || "there"},</p>
+             <p>Your Smart Assets login code is:</p>
+             <p style="font-size:24px;font-weight:bold;letter-spacing:4px">${otp}</p>
+             <p>This code expires in 5 minutes. If you didn't request it, ignore this email.</p>
+             <p>— Smart Assets</p>`,
+        });
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error("mobileRequestOtp error:", error);
+        res.status(500).json({ message: "Failed to send login code" });
+    }
+});
+exports.mobileRequestOtp = mobileRequestOtp;
+// POST /api/mobile/login/verify-otp
+// Body: { employeeId, otp, deviceId?, deviceType?, pushToken? }
+// On success, returns the same shape as POST /api/mobile/login.
+const mobileVerifyOtp = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
+    try {
+        const { employeeId, otp, deviceType } = req.body || {};
+        if (!employeeId || !otp) {
+            res.status(400).json({ message: "Employee ID and code are required" });
+            return;
+        }
+        const record = yield prismaClient_1.default.loginOtp.findFirst({
+            where: {
+                identifier: employeeId,
+                identifierType: INTERNAL_IDENTIFIER_TYPE,
+                consumedAt: null,
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        if (!record || record.expiresAt < new Date()) {
+            res.status(401).json({ message: "Code expired. Request a new one." });
+            return;
+        }
+        if (record.attempts >= OTP_MAX_ATTEMPTS) {
+            res.status(401).json({ message: "Too many attempts. Request a new code." });
+            return;
+        }
+        const isMatch = yield bcrypt_1.default.compare(String(otp), record.otpHash);
+        if (!isMatch) {
+            yield prismaClient_1.default.loginOtp.update({
+                where: { id: record.id },
+                data: { attempts: { increment: 1 } },
+            });
+            res.status(401).json({ message: "Incorrect code." });
+            return;
+        }
+        // Consume immediately so the same code can't be replayed.
+        yield prismaClient_1.default.loginOtp.update({
+            where: { id: record.id },
+            data: { consumedAt: new Date() },
+        });
+        const user = yield prismaClient_1.default.user.findUnique({
+            where: { employeeID: employeeId },
+            include: {
+                employee: {
+                    include: {
+                        department: { select: { id: true, name: true } },
+                    },
+                },
+            },
+        });
+        if (!user) {
+            // OTP was valid but user record vanished between issuance and verify.
+            // Treat as expired so the client requests a new code.
+            res.status(401).json({ message: "Account no longer available." });
+            return;
+        }
+        // Response shape mirrors mobileLogin. Kept duplicated rather than extracted
+        // so the password flow stays bit-identical through Batch A. Will be
+        // reconciled when the password endpoint is removed in Batch B cleanup.
+        const token = jsonwebtoken_1.default.sign({
+            userId: user.id,
+            employeeID: user.employeeID,
+            employeeDbId: (_a = user.employee) === null || _a === void 0 ? void 0 : _a.id,
+            role: user.role,
+            name: (_b = user.employee) === null || _b === void 0 ? void 0 : _b.name,
+            departmentId: (_c = user.employee) === null || _c === void 0 ? void 0 : _c.departmentId,
+            userType: "INTERNAL",
+        }, JWT_SECRET, { expiresIn: "30d" });
+        yield prismaClient_1.default.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
+        yield prismaClient_1.default.loginHistory.create({
+            data: {
+                userId: user.id,
+                success: true,
+                ipAddress: req.ip,
+                userAgent: `mobile-otp-${deviceType || "unknown"}`,
+            },
+        });
+        const employeeDbId = (_d = user.employee) === null || _d === void 0 ? void 0 : _d.id;
+        const [myAssetsCount, myTicketsCount, pendingAckCount, unreadNotifs] = yield Promise.all([
+            employeeDbId ? prismaClient_1.default.asset.count({ where: { allottedToId: employeeDbId } }) : Promise.resolve(0),
+            employeeDbId ? prismaClient_1.default.ticket.count({ where: { raisedById: employeeDbId, status: { notIn: ["CLOSED", "RESOLVED"] } } }) : Promise.resolve(0),
+            employeeDbId ? prismaClient_1.default.assetAssignment.count({ where: { assignedToId: employeeDbId, status: "PENDING", isActive: true } }) : Promise.resolve(0),
+            employeeDbId ? prismaClient_1.default.notificationRecipient.count({ where: { employeeId: employeeDbId, isRead: false } }) : Promise.resolve(0),
+        ]);
+        res.json({
+            token,
+            user: {
+                id: user.id,
+                employeeID: user.employeeID,
+                employeeDbId: (_e = user.employee) === null || _e === void 0 ? void 0 : _e.id,
+                name: (_f = user.employee) === null || _f === void 0 ? void 0 : _f.name,
+                email: (_g = user.employee) === null || _g === void 0 ? void 0 : _g.email,
+                phone: (_h = user.employee) === null || _h === void 0 ? void 0 : _h.phone,
+                designation: (_j = user.employee) === null || _j === void 0 ? void 0 : _j.designation,
+                role: user.role,
+                departmentId: (_k = user.employee) === null || _k === void 0 ? void 0 : _k.departmentId,
+                departmentName: (_m = (_l = user.employee) === null || _l === void 0 ? void 0 : _l.department) === null || _m === void 0 ? void 0 : _m.name,
+            },
+            summary: {
+                myAssets: myAssetsCount,
+                openTickets: myTicketsCount,
+                pendingAcknowledgements: pendingAckCount,
+                unreadNotifications: unreadNotifs,
+            },
+        });
+    }
+    catch (error) {
+        console.error("mobileVerifyOtp error:", error);
+        res.status(500).json({ message: "Login failed" });
+    }
+});
+exports.mobileVerifyOtp = mobileVerifyOtp;

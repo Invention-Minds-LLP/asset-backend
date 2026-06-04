@@ -9,11 +9,21 @@ import {
   completeAudit,
   getAuditSummary,
   getAuditLocationOptions,
+  getScopeFloors,
+  getScopeCategories,
+  getScopePreview,
+  getFloorMap,
+  getNextItem,
+  getMyAudits,
 } from "./asset-audit.controller";
 
 const router = express.Router();
 
 router.get("/locations", authenticateToken, getAuditLocationOptions);
+router.get("/scope/floors", authenticateToken, getScopeFloors);
+router.get("/scope/categories", authenticateToken, getScopeCategories);
+router.get("/scope/preview", authenticateToken, getScopePreview);
+router.get("/my", authenticateToken, getMyAudits);
 router.get("/", authenticateToken, getAllAudits);
 router.get("/:id", authenticateToken, getAuditById);
 router.post("/", authenticateToken, createAudit);
@@ -21,5 +31,7 @@ router.put("/:id/start", authenticateToken, startAudit);
 router.put("/items/:itemId/verify", authenticateToken, verifyItem);
 router.put("/:id/complete", authenticateToken, completeAudit);
 router.get("/:id/summary", authenticateToken, getAuditSummary);
+router.get("/:id/floor-map", authenticateToken, getFloorMap);
+router.get("/:id/next-item", authenticateToken, getNextItem);
 
 export default router;

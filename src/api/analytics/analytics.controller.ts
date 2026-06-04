@@ -1125,6 +1125,8 @@ export const getInStoreAging = async (req: AuthenticatedRequest, res: Response) 
         grnDate: true,
         status: true,
         currentLocation: true,
+        currentStoreSince: true,
+        currentStore: { select: { name: true, code: true } },
         assetCategory: { select: { name: true } },
       },
       orderBy: { purchaseDate: "asc" },
@@ -1133,9 +1135,11 @@ export const getInStoreAging = async (req: AuthenticatedRequest, res: Response) 
     const nowMs = Date.now();
 
     const result = assets.map((a) => {
-      const referenceDate = a.grnDate ?? a.purchaseDate;
+      // Prefer "days since it entered the store"; fall back to GRN/purchase date for
+      // legacy assets that have no currentStoreSince yet.
+      const referenceDate = a.currentStoreSince ?? a.grnDate ?? a.purchaseDate;
       const daysInStore = referenceDate
-        ? Math.floor((nowMs - new Date(referenceDate).getTime()) / (24 * 60 * 60 * 1000))
+        ? Math.max(0, Math.floor((nowMs - new Date(referenceDate).getTime()) / (24 * 60 * 60 * 1000)))
         : null;
 
       return {
@@ -1144,6 +1148,7 @@ export const getInStoreAging = async (req: AuthenticatedRequest, res: Response) 
         category: a.assetCategory.name,
         purchaseCost: Number(a.purchaseCost ?? 0),
         daysInStore,
+        storeName: a.currentStore?.name ?? null,
         storeLocation: a.currentLocation ?? null,
       };
     });

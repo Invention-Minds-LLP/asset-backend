@@ -13,11 +13,20 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.cancelTransfer = exports.receiveTransfer = exports.markInTransit = exports.approveTransfer = exports.createTransfer = exports.getTransferById = exports.getAllTransfers = void 0;
+exports.generateTransferNumber = generateTransferNumber;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const client_1 = require("@prisma/client");
 const audit_trail_controller_1 = require("../audit-trail/audit-trail.controller");
 const notificationHelper_1 = require("../../utilis/notificationHelper");
 // ─── helpers ───────────────────────────────────────────────
+class InsufficientStockError extends Error {
+    constructor(message, available, requested) {
+        super(message);
+        this.name = "InsufficientStockError";
+        this.available = available;
+        this.requested = requested;
+    }
+}
 function getFY() {
     const now = new Date();
     const month = now.getMonth() + 1;
@@ -103,63 +112,86 @@ exports.getTransferById = getTransferById;
 // CREATE
 // ═══════════════════════════════════════════════════════════
 const createTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b;
     try {
         const { fromStoreId, toStoreId, toDepartmentId, transferType, remarks, items } = req.body;
-        if (!fromStoreId || !toStoreId || !transferType || !(items === null || items === void 0 ? void 0 : items.length)) {
-            res.status(400).json({ message: "fromStoreId, toStoreId, transferType, and items are required" });
+        if (!fromStoreId || !transferType || !(items === null || items === void 0 ? void 0 : items.length)) {
+            res.status(400).json({ message: "fromStoreId, transferType, and items are required" });
             return;
         }
-        // Validate stock availability for each item
-        for (const item of items) {
-            if (item.itemType === "SPARE_PART" || item.itemType === "CONSUMABLE") {
-                const stockWhere = Object.assign(Object.assign({ storeId: Number(fromStoreId), itemType: item.itemType }, (item.itemType === "SPARE_PART" ? { sparePartId: Number(item.sparePartId) } : {})), (item.itemType === "CONSUMABLE" ? { consumableId: Number(item.consumableId) } : {}));
-                const stock = yield prismaClient_1.default.storeStockPosition.findFirst({ where: stockWhere });
-                const requestedQty = new client_1.Prisma.Decimal(item.quantity);
-                if (!stock || stock.availableQty.lessThan(requestedQty)) {
-                    res.status(400).json({
-                        message: `Insufficient stock for ${item.itemType} (ID: ${item.sparePartId || item.consumableId})`,
-                        available: (_b = (_a = stock === null || stock === void 0 ? void 0 : stock.availableQty) === null || _a === void 0 ? void 0 : _a.toString()) !== null && _b !== void 0 ? _b : "0",
-                        requested: requestedQty.toString(),
-                    });
-                    return;
-                }
+        if (transferType === "STORE_TO_DEPARTMENT") {
+            if (!toDepartmentId) {
+                res.status(400).json({ message: "toDepartmentId is required for a Store-to-Department transfer" });
+                return;
             }
         }
+        else if (!toStoreId) {
+            res.status(400).json({ message: "toStoreId is required for a Store-to-Store transfer" });
+            return;
+        }
         const transferNumber = yield generateTransferNumber();
-        const transfer = yield prismaClient_1.default.storeTransfer.create({
-            data: {
-                transferNumber,
-                fromStoreId: Number(fromStoreId),
-                toStoreId: Number(toStoreId),
-                toDepartmentId: toDepartmentId ? Number(toDepartmentId) : null,
-                transferType,
-                status: "REQUESTED",
-                requestedById: (_d = (_c = req.user) === null || _c === void 0 ? void 0 : _c.employeeDbId) !== null && _d !== void 0 ? _d : null,
-                remarks: remarks || null,
-                items: {
-                    create: items.map((item) => ({
-                        itemType: item.itemType,
-                        sparePartId: item.sparePartId ? Number(item.sparePartId) : null,
-                        consumableId: item.consumableId ? Number(item.consumableId) : null,
-                        assetId: item.assetId ? Number(item.assetId) : null,
-                        quantity: new client_1.Prisma.Decimal(item.quantity),
-                    })),
+        // Validate availability and reserve stock atomically so concurrent
+        // transfers cannot oversell the same source stock.
+        const transfer = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            var _a, _b, _c, _d;
+            for (const item of items) {
+                if (item.itemType === "SPARE_PART" || item.itemType === "CONSUMABLE") {
+                    const stockWhere = Object.assign(Object.assign({ storeId: Number(fromStoreId), itemType: item.itemType }, (item.itemType === "SPARE_PART" ? { sparePartId: Number(item.sparePartId) } : {})), (item.itemType === "CONSUMABLE" ? { consumableId: Number(item.consumableId) } : {}));
+                    const stock = yield tx.storeStockPosition.findFirst({ where: stockWhere });
+                    const requestedQty = new client_1.Prisma.Decimal(item.quantity);
+                    if (!stock || stock.availableQty.lessThan(requestedQty)) {
+                        throw new InsufficientStockError(`Insufficient stock for ${item.itemType} (ID: ${item.sparePartId || item.consumableId})`, (_b = (_a = stock === null || stock === void 0 ? void 0 : stock.availableQty) === null || _a === void 0 ? void 0 : _a.toString()) !== null && _b !== void 0 ? _b : "0", requestedQty.toString());
+                    }
+                    // Reserve: hold the quantity out of available until receive/cancel.
+                    // currentQty is untouched — goods are still physically in the source store.
+                    yield tx.storeStockPosition.update({
+                        where: { id: stock.id },
+                        data: {
+                            reservedQty: { increment: requestedQty },
+                            availableQty: { decrement: requestedQty },
+                            lastUpdatedAt: new Date(),
+                        },
+                    });
+                }
+            }
+            return tx.storeTransfer.create({
+                data: {
+                    transferNumber,
+                    fromStoreId: Number(fromStoreId),
+                    toStoreId: toStoreId ? Number(toStoreId) : null,
+                    toDepartmentId: toDepartmentId ? Number(toDepartmentId) : null,
+                    transferType,
+                    status: "REQUESTED",
+                    requestedById: (_d = (_c = req.user) === null || _c === void 0 ? void 0 : _c.employeeDbId) !== null && _d !== void 0 ? _d : null,
+                    remarks: remarks || null,
+                    items: {
+                        create: items.map((item) => ({
+                            itemType: item.itemType,
+                            sparePartId: item.sparePartId ? Number(item.sparePartId) : null,
+                            consumableId: item.consumableId ? Number(item.consumableId) : null,
+                            assetId: item.assetId ? Number(item.assetId) : null,
+                            quantity: new client_1.Prisma.Decimal(item.quantity),
+                        })),
+                    },
                 },
-            },
-            include: {
-                items: true,
-                fromStore: { select: { id: true, name: true } },
-                toStore: { select: { id: true, name: true } },
-            },
-        });
-        (0, audit_trail_controller_1.logAction)({ entityType: "STORE_TRANSFER", entityId: transfer.id, action: "CREATE", description: `Store transfer ${transfer.transferNumber} created (${transferType})`, performedById: (_e = req.user) === null || _e === void 0 ? void 0 : _e.employeeDbId });
+                include: {
+                    items: true,
+                    fromStore: { select: { id: true, name: true } },
+                    toStore: { select: { id: true, name: true } },
+                },
+            });
+        }));
+        (0, audit_trail_controller_1.logAction)({ entityType: "STORE_TRANSFER", entityId: transfer.id, action: "CREATE", description: `Store transfer ${transfer.transferNumber} created (${transferType})`, performedById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId });
         // Notify admins about new store transfer request
         const adminIds = yield (0, notificationHelper_1.getAdminIds)();
-        (0, notificationHelper_1.notify)({ type: "TRANSFER", title: "Store Transfer Requested", message: `Store transfer ${transfer.transferNumber} (${transferType}) requested`, recipientIds: adminIds, createdById: (_f = req.user) === null || _f === void 0 ? void 0 : _f.employeeDbId });
+        (0, notificationHelper_1.notify)({ type: "TRANSFER", title: "Store Transfer Requested", message: `Store transfer ${transfer.transferNumber} (${transferType}) requested`, recipientIds: adminIds, createdById: (_b = req.user) === null || _b === void 0 ? void 0 : _b.employeeDbId });
         res.status(201).json(transfer);
     }
     catch (e) {
+        if (e instanceof InsufficientStockError) {
+            res.status(400).json({ message: e.message, available: e.available, requested: e.requested });
+            return;
+        }
         res.status(500).json({ message: e.message });
     }
 });
@@ -283,69 +315,89 @@ const receiveTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function
                         notes: `Transfer OUT - ${transfer.transferNumber}`,
                     },
                 });
-                // Create IN transaction to destination store
-                yield tx.inventoryTransaction.create({
-                    data: {
-                        type: "IN",
-                        sparePartId: transferItem.sparePartId,
-                        consumableId: transferItem.consumableId,
-                        quantity: receivedQty,
-                        referenceType: "STORE_TRANSFER",
-                        referenceId: transfer.id,
-                        storeId: transfer.toStoreId,
-                        storeTransferId: transfer.id,
-                        performedById: (_f = (_e = req.user) === null || _e === void 0 ? void 0 : _e.employeeDbId) !== null && _f !== void 0 ? _f : null,
-                        notes: `Transfer IN - ${transfer.transferNumber}`,
-                    },
-                });
+                // Create IN transaction to destination store (only for store-to-store;
+                // a store-to-department transfer has no destination store — items are issued out).
+                if (transfer.toStoreId) {
+                    yield tx.inventoryTransaction.create({
+                        data: {
+                            type: "IN",
+                            sparePartId: transferItem.sparePartId,
+                            consumableId: transferItem.consumableId,
+                            quantity: receivedQty,
+                            referenceType: "STORE_TRANSFER",
+                            referenceId: transfer.id,
+                            storeId: transfer.toStoreId,
+                            storeTransferId: transfer.id,
+                            performedById: (_f = (_e = req.user) === null || _e === void 0 ? void 0 : _e.employeeDbId) !== null && _f !== void 0 ? _f : null,
+                            notes: `Transfer IN - ${transfer.transferNumber}`,
+                        },
+                    });
+                }
                 // Update StoreStockPosition for source (decrement)
                 if (transferItem.itemType === "SPARE_PART" || transferItem.itemType === "CONSUMABLE") {
                     const fromStock = yield tx.storeStockPosition.findFirst({
                         where: Object.assign(Object.assign({ storeId: transfer.fromStoreId, itemType: transferItem.itemType }, (transferItem.itemType === "SPARE_PART" ? { sparePartId: transferItem.sparePartId } : {})), (transferItem.itemType === "CONSUMABLE" ? { consumableId: transferItem.consumableId } : {})),
                     });
                     if (fromStock) {
+                        // Goods physically leave the source: drop currentQty by what shipped,
+                        // and release the reservation made at create. availableQty was already
+                        // reduced at create, so only return the reserved-but-unshipped remainder.
                         yield tx.storeStockPosition.update({
                             where: { id: fromStock.id },
                             data: {
                                 currentQty: { decrement: receivedQty },
-                                availableQty: { decrement: receivedQty },
+                                reservedQty: { decrement: transferItem.quantity },
+                                availableQty: { increment: transferItem.quantity.minus(receivedQty) },
                                 lastUpdatedAt: new Date(),
                             },
                         });
                     }
-                    // Update or create StoreStockPosition for destination (increment)
-                    const toStock = yield tx.storeStockPosition.findFirst({
-                        where: Object.assign(Object.assign({ storeId: transfer.toStoreId, itemType: transferItem.itemType }, (transferItem.itemType === "SPARE_PART" ? { sparePartId: transferItem.sparePartId } : {})), (transferItem.itemType === "CONSUMABLE" ? { consumableId: transferItem.consumableId } : {})),
-                    });
-                    if (toStock) {
-                        yield tx.storeStockPosition.update({
-                            where: { id: toStock.id },
-                            data: {
-                                currentQty: { increment: receivedQty },
-                                availableQty: { increment: receivedQty },
-                                lastUpdatedAt: new Date(),
-                            },
+                    // Update or create StoreStockPosition for destination (store-to-store only;
+                    // a department transfer issues items out, with no destination store stock).
+                    if (transfer.toStoreId) {
+                        const toStock = yield tx.storeStockPosition.findFirst({
+                            where: Object.assign(Object.assign({ storeId: transfer.toStoreId, itemType: transferItem.itemType }, (transferItem.itemType === "SPARE_PART" ? { sparePartId: transferItem.sparePartId } : {})), (transferItem.itemType === "CONSUMABLE" ? { consumableId: transferItem.consumableId } : {})),
+                        });
+                        if (toStock) {
+                            yield tx.storeStockPosition.update({
+                                where: { id: toStock.id },
+                                data: {
+                                    currentQty: { increment: receivedQty },
+                                    availableQty: { increment: receivedQty },
+                                    lastUpdatedAt: new Date(),
+                                },
+                            });
+                        }
+                        else {
+                            yield tx.storeStockPosition.create({
+                                data: {
+                                    storeId: transfer.toStoreId,
+                                    itemType: transferItem.itemType,
+                                    sparePartId: transferItem.sparePartId,
+                                    consumableId: transferItem.consumableId,
+                                    currentQty: receivedQty,
+                                    availableQty: receivedQty,
+                                },
+                            });
+                        }
+                    }
+                }
+                // ASSET transfer: relocate within the store network, or deploy into a department.
+                if (transferItem.itemType === "ASSET" && transferItem.assetId) {
+                    if (transfer.transferType === "STORE_TO_DEPARTMENT") {
+                        // Deployed into service: asset leaves the store network and goes ACTIVE.
+                        yield tx.asset.update({
+                            where: { id: transferItem.assetId },
+                            data: Object.assign({ status: "ACTIVE", currentStoreId: null, currentStoreSince: null }, (transfer.toDepartmentId ? { departmentId: transfer.toDepartmentId } : {})),
                         });
                     }
                     else {
-                        yield tx.storeStockPosition.create({
-                            data: {
-                                storeId: transfer.toStoreId,
-                                itemType: transferItem.itemType,
-                                sparePartId: transferItem.sparePartId,
-                                consumableId: transferItem.consumableId,
-                                currentQty: receivedQty,
-                                availableQty: receivedQty,
-                            },
+                        // STORE_TO_STORE: still staged (IN_STORE), just sitting in a different store now.
+                        yield tx.asset.update({
+                            where: { id: transferItem.assetId },
+                            data: { currentStoreId: transfer.toStoreId, currentStoreSince: new Date() },
                         });
                     }
-                }
-                // ASSET transfer: update asset status if STORE_TO_DEPARTMENT
-                if (transferItem.itemType === "ASSET" && transfer.transferType === "STORE_TO_DEPARTMENT" && transferItem.assetId) {
-                    yield tx.asset.update({
-                        where: { id: transferItem.assetId },
-                        data: { status: "ACTIVE" },
-                    });
                 }
             }
             return tx.storeTransfer.findUnique({
@@ -370,7 +422,10 @@ exports.receiveTransfer = receiveTransfer;
 const cancelTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const id = Number(req.params.id);
-        const transfer = yield prismaClient_1.default.storeTransfer.findUnique({ where: { id } });
+        const transfer = yield prismaClient_1.default.storeTransfer.findUnique({
+            where: { id },
+            include: { items: true },
+        });
         if (!transfer) {
             res.status(404).json({ message: "Store transfer not found" });
             return;
@@ -379,10 +434,30 @@ const cancelTransfer = (req, res) => __awaiter(void 0, void 0, void 0, function*
             res.status(400).json({ message: `Cannot cancel transfer in ${transfer.status} status` });
             return;
         }
-        const updated = yield prismaClient_1.default.storeTransfer.update({
-            where: { id },
-            data: { status: "CANCELLED" },
-        });
+        const updated = yield prismaClient_1.default.$transaction((tx) => __awaiter(void 0, void 0, void 0, function* () {
+            // Release the reservation held at create — currentQty untouched, nothing shipped.
+            for (const transferItem of transfer.items) {
+                if (transferItem.itemType === "SPARE_PART" || transferItem.itemType === "CONSUMABLE") {
+                    const fromStock = yield tx.storeStockPosition.findFirst({
+                        where: Object.assign(Object.assign({ storeId: transfer.fromStoreId, itemType: transferItem.itemType }, (transferItem.itemType === "SPARE_PART" ? { sparePartId: transferItem.sparePartId } : {})), (transferItem.itemType === "CONSUMABLE" ? { consumableId: transferItem.consumableId } : {})),
+                    });
+                    if (fromStock) {
+                        yield tx.storeStockPosition.update({
+                            where: { id: fromStock.id },
+                            data: {
+                                reservedQty: { decrement: transferItem.quantity },
+                                availableQty: { increment: transferItem.quantity },
+                                lastUpdatedAt: new Date(),
+                            },
+                        });
+                    }
+                }
+            }
+            return tx.storeTransfer.update({
+                where: { id },
+                data: { status: "CANCELLED" },
+            });
+        }));
         res.json(updated);
     }
     catch (e) {

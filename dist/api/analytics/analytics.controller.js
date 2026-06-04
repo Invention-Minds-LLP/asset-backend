@@ -984,24 +984,29 @@ const getInStoreAging = (req, res) => __awaiter(void 0, void 0, void 0, function
                 grnDate: true,
                 status: true,
                 currentLocation: true,
+                currentStoreSince: true,
+                currentStore: { select: { name: true, code: true } },
                 assetCategory: { select: { name: true } },
             },
             orderBy: { purchaseDate: "asc" },
         });
         const nowMs = Date.now();
         const result = assets.map((a) => {
-            var _a, _b, _c;
-            const referenceDate = (_a = a.grnDate) !== null && _a !== void 0 ? _a : a.purchaseDate;
+            var _a, _b, _c, _d, _e, _f;
+            // Prefer "days since it entered the store"; fall back to GRN/purchase date for
+            // legacy assets that have no currentStoreSince yet.
+            const referenceDate = (_b = (_a = a.currentStoreSince) !== null && _a !== void 0 ? _a : a.grnDate) !== null && _b !== void 0 ? _b : a.purchaseDate;
             const daysInStore = referenceDate
-                ? Math.floor((nowMs - new Date(referenceDate).getTime()) / (24 * 60 * 60 * 1000))
+                ? Math.max(0, Math.floor((nowMs - new Date(referenceDate).getTime()) / (24 * 60 * 60 * 1000)))
                 : null;
             return {
                 assetId: a.assetId,
                 assetName: a.assetName,
                 category: a.assetCategory.name,
-                purchaseCost: Number((_b = a.purchaseCost) !== null && _b !== void 0 ? _b : 0),
+                purchaseCost: Number((_c = a.purchaseCost) !== null && _c !== void 0 ? _c : 0),
                 daysInStore,
-                storeLocation: (_c = a.currentLocation) !== null && _c !== void 0 ? _c : null,
+                storeName: (_e = (_d = a.currentStore) === null || _d === void 0 ? void 0 : _d.name) !== null && _e !== void 0 ? _e : null,
+                storeLocation: (_f = a.currentLocation) !== null && _f !== void 0 ? _f : null,
             };
         });
         result.sort((a, b) => { var _a, _b; return ((_a = b.daysInStore) !== null && _a !== void 0 ? _a : 0) - ((_b = a.daysInStore) !== null && _b !== void 0 ? _b : 0); });

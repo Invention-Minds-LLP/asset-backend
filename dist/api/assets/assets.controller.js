@@ -67,6 +67,12 @@ const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 ? { departmentId: Number(departmentId) }
                 : { allottedToId: Number(employeeDbId) };
         }
+        // Optional filters (e.g. Store screen asking "which assets are parked in store X")
+        const { currentStoreId, status } = req.query;
+        if (currentStoreId)
+            where.currentStoreId = Number(currentStoreId);
+        if (status)
+            where.status = String(status);
         const assets = yield prismaClient_1.default.asset.findMany({
             where,
             include: {
@@ -74,7 +80,8 @@ const getAllAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 vendor: true,
                 department: true,
                 allottedTo: true,
-                supervisor: true
+                supervisor: true,
+                currentStore: { select: { id: true, name: true, code: true } }
             }
         });
         res.json(assets);
@@ -310,6 +317,8 @@ const createAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 assetPoolId: data.assetPoolId ? Number(data.assetPoolId) : null,
                 financialYearAdded: (_s = data.financialYearAdded) !== null && _s !== void 0 ? _s : null,
                 status: "IN_STORE",
+                currentStoreId: data.currentStoreId ? Number(data.currentStoreId) : null,
+                currentStoreSince: data.currentStoreId ? new Date() : null,
             }
         });
         (0, audit_trail_controller_1.logAction)({ entityType: "ASSET", entityId: asset.id, action: "CREATE", description: `Asset ${asset.assetId} created`, newValue: JSON.stringify(asset), performedById: (_t = req.user) === null || _t === void 0 ? void 0 : _t.employeeDbId });
@@ -733,6 +742,16 @@ const updateAsset = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
                 rentalAgreementDoc: data.rentalAgreementDoc
             });
         }
+        // ── Mint permanent stores reference on first completion of a GRN skeleton ──
+        // GRN-created assets start with no storeAssetId; the first time a stores user
+        // fills in the asset's basic details we mint it. Never overwrite an existing one.
+        const existingStoreRef = yield prismaClient_1.default.asset.findUnique({
+            where: { id },
+            select: { storeAssetId: true },
+        });
+        if (!(existingStoreRef === null || existingStoreRef === void 0 ? void 0 : existingStoreRef.storeAssetId)) {
+            updateData.storeAssetId = yield (0, assetIdGenerator_1.generateStoreAssetId)(effectiveCategoryId);
+        }
         const updated = yield prismaClient_1.default.asset.update({
             where: { id },
             data: updateData,
@@ -895,7 +914,7 @@ const updateAssetAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
         if (allottedToId !== undefined) {
             updateData.allottedTo = { connect: { id: Number(allottedToId) } };
         }
-        updateData.status = 'active';
+        updateData.status = 'ACTIVE';
         const updated = yield prismaClient_1.default.asset.update({
             where: { id },
             data: updateData,

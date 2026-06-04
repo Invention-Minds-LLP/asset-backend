@@ -19,6 +19,7 @@ const path_1 = __importDefault(require("path"));
 const basic_ftp_1 = require("basic-ftp");
 const client_1 = require("@prisma/client");
 const assetIdGenerator_1 = require("../../utilis/assetIdGenerator");
+const store_transfer_controller_1 = require("../store-transfer/store-transfer.controller");
 const FTP_CONFIG = {
     host: "srv680.main-hosting.eu", // Your FTP hostname
     user: "u948610439", // Your FTP username
@@ -267,6 +268,8 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
         const assignmentId = Number(req.params.assignmentId);
         const acknowledgementNote = req.body.acknowledgementNote;
         const digitalSignature = req.body.digitalSignature;
+        // Sub-store the HOD parks the asset into when acknowledging (Main Store → Sub Store)
+        const storeId = req.body.storeId;
         const checklist = req.body.checklist ? JSON.parse(req.body.checklist) : [];
         if (!req.user) {
             res.status(401).json({ message: "Unauthorized" });
@@ -390,7 +393,7 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
         let issuedAssetId = null;
         const currentAsset = yield prismaClient_1.default.asset.findUnique({
             where: { id: assignment.assetId },
-            select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true },
+            select: { assetId: true, departmentId: true, modeOfProcurement: true, assetCategoryId: true, currentStoreId: true },
         });
         if ((currentAsset === null || currentAsset === void 0 ? void 0 : currentAsset.assetId.startsWith("TEMP-")) && currentAsset.departmentId) {
             const acknowledger = yield prismaClient_1.default.employee.findUnique({
@@ -401,8 +404,47 @@ const acknowledgeAssignment = (req, res) => __awaiter(void 0, void 0, void 0, fu
                 issuedAssetId = yield (0, assetIdGenerator_1.generateAssetId)(currentAsset.modeOfProcurement || "PURCHASE", undefined, { categoryId: currentAsset.assetCategoryId });
                 yield prismaClient_1.default.asset.update({
                     where: { id: assignment.assetId },
-                    data: { assetId: issuedAssetId },
+                    data: Object.assign({ assetId: issuedAssetId }, (storeId ? { currentStoreId: Number(storeId), currentStoreSince: new Date() } : {})),
                 });
+                // Auto-log the Main Store → Sub Store move as a received StoreTransfer,
+                // so the move has a transfer number and shows up in the Transfers tab.
+                // Best-effort: a logging failure must not fail the acknowledgement itself.
+                const fromStoreId = currentAsset.currentStoreId;
+                const toStoreId = storeId ? Number(storeId) : null;
+                if (toStoreId && fromStoreId && fromStoreId !== toStoreId) {
+                    try {
+                        const transferNumber = yield (0, store_transfer_controller_1.generateTransferNumber)();
+                        yield prismaClient_1.default.storeTransfer.create({
+                            data: {
+                                transferNumber,
+                                fromStoreId,
+                                toStoreId,
+                                transferType: "STORE_TO_STORE",
+                                status: "RECEIVED",
+                                requestedById: employeeId,
+                                approvedById: employeeId,
+                                receivedById: employeeId,
+                                requestedAt: new Date(),
+                                approvedAt: new Date(),
+                                receivedAt: new Date(),
+                                remarks: `Auto-logged on HOD acknowledgement of asset ${issuedAssetId}`,
+                                items: {
+                                    create: [
+                                        {
+                                            itemType: "ASSET",
+                                            assetId: assignment.assetId,
+                                            quantity: 1,
+                                            receivedQty: 1,
+                                        },
+                                    ],
+                                },
+                            },
+                        });
+                    }
+                    catch (txErr) {
+                        console.error("Auto-log StoreTransfer on acknowledge failed:", txErr === null || txErr === void 0 ? void 0 : txErr.message);
+                    }
+                }
             }
         }
         res.json(Object.assign({ message: "Acknowledged with checklist", assignment: updatedAssignment, acknowledgementRun }, (issuedAssetId ? { issuedAssetId } : {})));

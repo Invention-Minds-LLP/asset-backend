@@ -43,6 +43,7 @@ const reports_routes_1 = __importDefault(require("./api/reports/reports.routes")
 const disposal_routes_1 = __importDefault(require("./api/disposal/disposal.routes"));
 const e_waste_routes_1 = __importDefault(require("./api/e-waste/e-waste.routes"));
 const asset_audit_routes_1 = __importDefault(require("./api/asset-audit/asset-audit.routes"));
+const external_auditor_routes_1 = __importDefault(require("./api/external-auditor/external-auditor.routes"));
 const preventive_maintenance_routes_1 = __importDefault(require("./api/preventive-maintenance/preventive-maintenance.routes"));
 const pm_checklist_routes_1 = __importDefault(require("./api/pm-checklist/pm-checklist.routes"));
 const vendor_performance_routes_1 = __importDefault(require("./api/vendor-performance/vendor-performance.routes"));
@@ -152,6 +153,7 @@ app.use("/api/reports", reports_routes_1.default);
 app.use("/api/disposal", disposal_routes_1.default);
 app.use("/api/e-waste", e_waste_routes_1.default);
 app.use("/api/asset-audit", asset_audit_routes_1.default);
+app.use("/api/external-auditors", external_auditor_routes_1.default);
 app.use("/api/preventive-maintenance", preventive_maintenance_routes_1.default);
 app.use("/api/pm-checklist", pm_checklist_routes_1.default);
 app.use("/api/vendor-performance", vendor_performance_routes_1.default);

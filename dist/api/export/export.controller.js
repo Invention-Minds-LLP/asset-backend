@@ -117,6 +117,33 @@ function sendExcel(res, filename, headers, rows) {
     res.setHeader("Content-Disposition", `attachment; filename="${filename}.xlsx"`);
     res.send(buf);
 }
+// Numeric-aware export — keeps amount cells as real numbers (not strings) so SUM/
+// pivot tables work, and applies an Indian-currency format string to the listed
+// column indexes. Optional `colWidths` controls column widths in "wch" units.
+function sendExcelTyped(res, filename, headers, rows, numericColIndexes = [], numberFormat = "#,##0.00", colWidths) {
+    const wb = xlsx_1.default.utils.book_new();
+    const ws = xlsx_1.default.utils.aoa_to_sheet([headers, ...rows]);
+    const numericSet = new Set(numericColIndexes);
+    // Row index 0 is the header. Data rows start at 1.
+    for (let r = 1; r <= rows.length; r++) {
+        for (const c of numericSet) {
+            const ref = xlsx_1.default.utils.encode_cell({ r, c });
+            const cell = ws[ref];
+            if (cell && typeof cell.v === "number") {
+                cell.t = "n";
+                cell.z = numberFormat;
+            }
+        }
+    }
+    if (colWidths && colWidths.length) {
+        ws["!cols"] = colWidths.map(w => ({ wch: w }));
+    }
+    xlsx_1.default.utils.book_append_sheet(wb, ws, "Data");
+    const buf = xlsx_1.default.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}.xlsx"`);
+    res.send(buf);
+}
 function sendMultiSheetExcel(res, filename, sheets) {
     const wb = xlsx_1.default.utils.book_new();
     for (const sheet of sheets) {
@@ -166,7 +193,7 @@ function getVendorMap() {
 // MAIN DISPATCHER
 // ───────────────────────────────────────────────────────────────────────────
 const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z, _0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15;
     const report = req.params.report;
     const f = parseFilters(req);
     try {
@@ -281,6 +308,321 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 });
                 return sendExcel(res, "IT_Act_FA_Register", headers, rows);
             }
+            // A2.1 / A2.2 — CFO Fixed Asset Register (Tally-style 24-column, per-asset).
+            //
+            // Two report keys share the same compute path; they differ ONLY in whether
+            // zero-activity rows are dropped:
+            //   • cfo-fixed-asset-register          → Full register (Schedule II / year-end).
+            //                                         Includes every legacy asset still on books.
+            //   • cfo-fixed-asset-register-activity → Activity-only. Drops rows where
+            //                                         Additions/Deletions/Period Dep/Acc Dep
+            //                                         on Disposals are all zero in the window.
+            //
+            // Filter priority (highest specificity wins):
+            //   1. ?startDate= and ?endDate=  → exact range, clamped to FY edges
+            //   2. ?month=1..12               → that one month inside the FY
+            //   3. ?financialYear=YYYY-YY     → whole FY
+            //   4. (nothing)                   → current FY, whole year
+            //
+            // Other shared characteristics:
+            //   • Gross "Net Change" is split → Additions | Deletions.
+            //   • Dep   "Net Change" is split → Period Depreciation | Acc Dep on Disposals.
+            //   • Amount cells are Numbers with #,##0.00 format so Excel SUM/pivots work.
+            //   • Grand-total row appended at the bottom.
+            case "cfo-fixed-asset-register":
+            case "cfo-fixed-asset-register-activity": {
+                const activityOnly = report === "cfo-fixed-asset-register-activity";
+                // Default FY = current Indian FY if none supplied
+                let fyStart = f.fyStart;
+                let fyEnd = f.fyEnd;
+                if (!fyStart || !fyEnd) {
+                    const now = new Date();
+                    const startYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+                    fyStart = new Date(startYear, 3, 1);
+                    fyEnd = new Date(startYear + 1, 2, 31, 23, 59, 59);
+                }
+                const fyLabel = (_g = f.fyLabel) !== null && _g !== void 0 ? _g : `${fyStart.getFullYear()}-${String((fyStart.getFullYear() + 1) % 100).padStart(2, "0")}`;
+                // ── Resolve the reporting window via the priority above ────────────
+                const clampDown = (d) => d < fyStart ? fyStart : d > fyEnd ? fyEnd : d;
+                let winStart;
+                let winEnd;
+                let periodKind;
+                if (f.start && f.end) {
+                    winStart = clampDown(new Date(f.start));
+                    winEnd = clampDown(new Date(f.end));
+                    periodKind = "range";
+                }
+                else if (f.month && f.month >= 1 && f.month <= 12) {
+                    // Apr-Dec belong to FY's starting calendar year; Jan-Mar to the next.
+                    const yr = f.month >= 4 ? fyStart.getFullYear() : fyStart.getFullYear() + 1;
+                    winStart = new Date(yr, f.month - 1, 1);
+                    winEnd = new Date(yr, f.month, 0, 23, 59, 59); // day 0 of next month = last day of this one
+                    periodKind = "month";
+                }
+                else {
+                    winStart = fyStart;
+                    winEnd = fyEnd;
+                    periodKind = "fullYear";
+                }
+                // ── Filename suffix that reflects exactly what was filtered ────────
+                const monthShort = (d) => ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+                let periodLabel;
+                if (periodKind === "range") {
+                    periodLabel = `${monthShort(winStart)}${winStart.getDate().toString().padStart(2, "0")}-${monthShort(winEnd)}${winEnd.getDate().toString().padStart(2, "0")}`;
+                }
+                else if (periodKind === "month") {
+                    periodLabel = `${monthShort(winStart)}${winStart.getFullYear()}`;
+                }
+                else {
+                    periodLabel = "FullYear";
+                }
+                const assets = yield prismaClient_1.default.asset.findMany({
+                    where: Object.assign(Object.assign({}, (f.assetCategoryId ? { assetCategoryId: f.assetCategoryId } : {})), { OR: [
+                            { purchaseDate: { lte: winEnd } },
+                            { donationDate: { lte: winEnd } },
+                        ] }),
+                    select: {
+                        id: true,
+                        assetId: true,
+                        assetName: true,
+                        serialNumber: true,
+                        invoiceNumber: true,
+                        purchaseVoucherNo: true,
+                        purchaseCost: true,
+                        purchaseDate: true,
+                        donationDate: true,
+                        estimatedValue: true,
+                        modeOfProcurement: true,
+                        disposalDate: true,
+                        status: true,
+                        vendor: { select: { name: true } },
+                        assetCategory: {
+                            select: {
+                                name: true,
+                                glMapping: {
+                                    select: {
+                                        fixedAssetAccount: { select: { code: true, name: true } },
+                                        accDepAccount: { select: { code: true, name: true } },
+                                    },
+                                },
+                            },
+                        },
+                        depreciation: {
+                            select: {
+                                depreciationMethod: true,
+                                depreciationRate: true,
+                                expectedLifeYears: true,
+                                depreciationStart: true,
+                            },
+                        },
+                    },
+                    orderBy: [{ assetCategory: { name: "asc" } }, { purchaseDate: "asc" }, { id: "asc" }],
+                });
+                const allLogs = yield prismaClient_1.default.depreciationLog.findMany({
+                    where: {
+                        assetId: { in: assets.map(a => a.id) },
+                        periodEnd: { lte: winEnd },
+                    },
+                    select: { assetId: true, periodEnd: true, depreciationAmount: true },
+                });
+                const logsByAsset = new Map();
+                for (const l of allLogs) {
+                    const arr = (_h = logsByAsset.get(l.assetId)) !== null && _h !== void 0 ? _h : [];
+                    arr.push(l);
+                    logsByAsset.set(l.assetId, arr);
+                }
+                const methodLabel = (m) => {
+                    if (m === "SL")
+                        return "Straight-Line";
+                    if (m === "DB")
+                        return "Diminishing Balance";
+                    return m || "";
+                };
+                const headers = [
+                    "No.", // 0
+                    "Description", // 1
+                    "Category", // 2   ← NEW
+                    "Last Acquisition Cost Date", // 3
+                    "Last Depreciation Date", // 4
+                    "Acquisition Cost before Starting Date", // 5   ← opening gross
+                    "Additions during Period", // 6
+                    "Deletions during Period", // 7
+                    "Acquisition Cost at Ending Date", // 8   ← closing gross
+                    "Depreciation before Starting Date", // 9   ← opening dep
+                    "Depreciation for the Period", // 10
+                    "Acc. Depreciation on Disposals", // 11
+                    "Depreciation at Ending Date", // 12  ← closing dep
+                    "Book Value before Starting Date", // 13
+                    "Book Value Net Change", // 14
+                    "Book Value at Ending Date", // 15
+                    "Acquisition Cost Account", // 16
+                    "Accum. Depreciation Account", // 17
+                    "Depreciation Starting Date", // 18
+                    "Depreciation Ending Date", // 19
+                    "No. of Depreciation Years", // 20
+                    "Depreciation Method", // 21
+                    "Straight-Line %", // 22
+                    "Bill Number", // 23
+                    "Vendor Name", // 24
+                ];
+                // Columns whose cells should be numeric & currency-formatted in Excel.
+                const numericCols = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+                // Column widths (wch units ≈ characters) — keeps the wide register readable.
+                const colWidths = [
+                    6, 40, 20, 14, 14, 18, 16, 16, 18, 18, 18, 18,
+                    18, 18, 18, 18, 26, 26, 14, 14, 8, 18, 12, 16, 26,
+                ];
+                const rows = [];
+                let no = 0;
+                const totals = {
+                    opGross: 0, additions: 0, deletions: 0, clGross: 0,
+                    opDep: 0, periodDep: 0, accDepOnDisp: 0, clDep: 0,
+                    opBv: 0, bvNet: 0, clBv: 0,
+                };
+                for (const a of assets) {
+                    const cost = num((_k = (_j = a.purchaseCost) !== null && _j !== void 0 ? _j : a.estimatedValue) !== null && _k !== void 0 ? _k : 0);
+                    const acqRaw = (_l = a.purchaseDate) !== null && _l !== void 0 ? _l : a.donationDate;
+                    const acq = acqRaw ? new Date(acqRaw) : null;
+                    const disp = a.disposalDate ? new Date(a.disposalDate) : null;
+                    const acquiredBeforeWin = acq && acq < winStart;
+                    const acquiredInWin = acq && acq >= winStart && acq <= winEnd;
+                    const disposedBeforeWin = disp && disp < winStart;
+                    const disposedInWin = disp && disp >= winStart && disp <= winEnd;
+                    // ── Gross block math ────────────────────────────────────────────
+                    // Opening: on the books at winStart.
+                    const acqOpening = (acquiredBeforeWin && !disposedBeforeWin) ? cost : 0;
+                    // Additions: capitalised during the window.
+                    const additions = acquiredInWin ? cost : 0;
+                    // Deletions: written off during the window.
+                    const deletions = disposedInWin ? cost : 0;
+                    // Closing: on the books at winEnd (acquired by then, not disposed before/in window).
+                    const acqClosing = (acq && acq <= winEnd && (!disp || disp > winEnd)) ? cost : 0;
+                    // ── Depreciation math ───────────────────────────────────────────
+                    // depOpening    = Σ logs with periodEnd < winStart
+                    // periodDep     = Σ logs with winStart ≤ periodEnd ≤ winEnd
+                    //                 (for assets NOT disposed before/in window — i.e.
+                    //                 logs that survive the disposal write-off below)
+                    // accDepOnDisp  = for assets disposed in window, the Σ of ALL logs
+                    //                 up to their disposal date (= the acc dep eliminated
+                    //                 from books). Carved out of periodDep so the column
+                    //                 math reconciles: depClosing = depOpening + periodDep
+                    //                 − accDepOnDisp.
+                    let depOpening = 0;
+                    let depUpToWinEnd = 0; // Σ logs with periodEnd ≤ winEnd
+                    let depUpToDisposal = 0; // Σ logs with periodEnd ≤ disposalDate
+                    let lastDepDate = null;
+                    for (const l of (_m = logsByAsset.get(a.id)) !== null && _m !== void 0 ? _m : []) {
+                        const amt = num(l.depreciationAmount);
+                        const pe = new Date(l.periodEnd);
+                        if (pe < winStart)
+                            depOpening += amt;
+                        if (pe <= winEnd)
+                            depUpToWinEnd += amt;
+                        if (disp && pe <= disp)
+                            depUpToDisposal += amt;
+                        if (!lastDepDate || pe > lastDepDate)
+                            lastDepDate = pe;
+                    }
+                    const accDepOnDisp = disposedInWin ? depUpToDisposal : 0;
+                    // Period dep that stays on books = total dep within window minus what
+                    // was eliminated on disposal. (depUpToWinEnd − depOpening) is the
+                    // raw within-window dep; subtract the disposal-eliminated portion
+                    // that falls inside the window.
+                    const rawPeriodDep = depUpToWinEnd - depOpening;
+                    const periodDep = Math.max(0, rawPeriodDep - accDepOnDisp);
+                    const depClosing = depOpening + periodDep - accDepOnDisp;
+                    // ── Book value (derived) ────────────────────────────────────────
+                    const bvOpening = acqOpening - depOpening;
+                    const bvClosing = acqClosing - depClosing;
+                    const bvNet = bvClosing - bvOpening;
+                    // Activity-only mode drops rows with no movement in the window
+                    // (additions/deletions/period dep/disposal dep all zero). The full
+                    // register additionally drops rows that have no balance at all on
+                    // either side of the window — those are pre-FY disposals that aren't
+                    // relevant to any FA register.
+                    const noActivity = additions === 0 && deletions === 0 &&
+                        periodDep === 0 && accDepOnDisp === 0;
+                    const noBalance = acqOpening === 0 && acqClosing === 0;
+                    if (activityOnly ? noActivity : (noActivity && noBalance))
+                        continue;
+                    const gl = (_o = a.assetCategory) === null || _o === void 0 ? void 0 : _o.glMapping;
+                    const acqAccount = (gl === null || gl === void 0 ? void 0 : gl.fixedAssetAccount)
+                        ? `${gl.fixedAssetAccount.code} - ${gl.fixedAssetAccount.name}` : "";
+                    const accDepAccount = (gl === null || gl === void 0 ? void 0 : gl.accDepAccount)
+                        ? `${gl.accDepAccount.code} - ${gl.accDepAccount.name}` : "";
+                    const dep = a.depreciation;
+                    const depStart = (dep === null || dep === void 0 ? void 0 : dep.depreciationStart) ? new Date(dep.depreciationStart) : acq;
+                    let depEnd = null;
+                    if (depStart && (dep === null || dep === void 0 ? void 0 : dep.expectedLifeYears)) {
+                        depEnd = new Date(depStart);
+                        depEnd.setFullYear(depEnd.getFullYear() + dep.expectedLifeYears);
+                    }
+                    no += 1;
+                    rows.push([
+                        no,
+                        a.assetName,
+                        (_q = (_p = a.assetCategory) === null || _p === void 0 ? void 0 : _p.name) !== null && _q !== void 0 ? _q : "",
+                        fmt(acq),
+                        fmt(lastDepDate),
+                        acqOpening,
+                        additions,
+                        deletions,
+                        acqClosing,
+                        depOpening,
+                        periodDep,
+                        accDepOnDisp,
+                        depClosing,
+                        bvOpening,
+                        bvNet,
+                        bvClosing,
+                        acqAccount,
+                        accDepAccount,
+                        fmt(depStart),
+                        fmt(depEnd),
+                        (_r = dep === null || dep === void 0 ? void 0 : dep.expectedLifeYears) !== null && _r !== void 0 ? _r : "",
+                        methodLabel(dep === null || dep === void 0 ? void 0 : dep.depreciationMethod),
+                        (dep === null || dep === void 0 ? void 0 : dep.depreciationRate) ? num(dep.depreciationRate) : "",
+                        a.purchaseVoucherNo || a.invoiceNumber || "",
+                        ((_s = a.vendor) === null || _s === void 0 ? void 0 : _s.name) || "",
+                    ]);
+                    totals.opGross += acqOpening;
+                    totals.additions += additions;
+                    totals.deletions += deletions;
+                    totals.clGross += acqClosing;
+                    totals.opDep += depOpening;
+                    totals.periodDep += periodDep;
+                    totals.accDepOnDisp += accDepOnDisp;
+                    totals.clDep += depClosing;
+                    totals.opBv += bvOpening;
+                    totals.bvNet += bvNet;
+                    totals.clBv += bvClosing;
+                }
+                // Blank spacer + grand-total row (xlsx CE can't bold cells; we make the
+                // label uppercase so it's still visually distinct).
+                rows.push(new Array(25).fill(""));
+                rows.push([
+                    "",
+                    `TOTAL (${no} assets)`,
+                    "", // Category column
+                    "", // Last Acq Date
+                    "", // Last Dep Date
+                    totals.opGross,
+                    totals.additions,
+                    totals.deletions,
+                    totals.clGross,
+                    totals.opDep,
+                    totals.periodDep,
+                    totals.accDepOnDisp,
+                    totals.clDep,
+                    totals.opBv,
+                    totals.bvNet,
+                    totals.clBv,
+                    "", "", "", "", "", "", "", "", "",
+                ]);
+                const modeSuffix = activityOnly ? "_ActivityOnly" : "_Full";
+                const filename = `CFO_Fixed_Asset_Register_FY${fyLabel}_${periodLabel}${modeSuffix}`;
+                return sendExcelTyped(res, filename, headers, rows, numericCols, "#,##0.00", colWidths);
+            }
             // A3 — Block of Assets schedule (group by IT-Act rate brackets)
             case "block-of-assets-schedule": {
                 const assets = yield prismaClient_1.default.asset.findMany({
@@ -299,7 +641,7 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                     const blk = ensureBlock(rate);
                     blk.gross += num(a.purchaseCost);
                     blk.accDep += num(a.depreciation.accumulatedDepreciation);
-                    blk.bv += num((_g = a.depreciation.currentBookValue) !== null && _g !== void 0 ? _g : (num(a.purchaseCost) - num(a.depreciation.accumulatedDepreciation)));
+                    blk.bv += num((_t = a.depreciation.currentBookValue) !== null && _t !== void 0 ? _t : (num(a.purchaseCost) - num(a.depreciation.accumulatedDepreciation)));
                     blk.count += 1;
                 }
                 const headers = ["Block (Depreciation Rate)", "No. of Assets", "Gross Block (₹)", "Accumulated Depreciation (₹)", "Net Block / WDV (₹)"];
@@ -402,7 +744,7 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
             case "auditor-working-paper-pack": {
                 const where = {};
                 if (f.fyStart)
-                    where.purchaseDate = { gte: f.fyStart, lte: (_h = f.fyEnd) !== null && _h !== void 0 ? _h : undefined };
+                    where.purchaseDate = { gte: f.fyStart, lte: (_u = f.fyEnd) !== null && _u !== void 0 ? _u : undefined };
                 const [assets, depLogs, additions, disposals, vendorBalances] = yield Promise.all([
                     prismaClient_1.default.asset.findMany({ include: { assetCategory: true, depreciation: true } }),
                     prismaClient_1.default.depreciationLog.findMany({
@@ -624,8 +966,8 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                         continue;
                     row.count++;
                     row.gross += num(a.purchaseCost);
-                    row.accDep += num((_j = a.depreciation) === null || _j === void 0 ? void 0 : _j.accumulatedDepreciation);
-                    row.netBlock += num((_k = a.depreciation) === null || _k === void 0 ? void 0 : _k.currentBookValue);
+                    row.accDep += num((_v = a.depreciation) === null || _v === void 0 ? void 0 : _v.accumulatedDepreciation);
+                    row.netBlock += num((_w = a.depreciation) === null || _w === void 0 ? void 0 : _w.currentBookValue);
                 }
                 const headers = ["Category", "No. of Assets", "Gross Block (₹)", "Accumulated Depreciation (₹)", "Net Block (₹)"];
                 const rows = Array.from(agg.values())
@@ -755,7 +1097,7 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                         agg.set(m, { count: 0, gross: 0, accDep: 0, netBlock: 0 });
                     const a = agg.get(m);
                     a.count++;
-                    a.gross += num((_l = d.asset) === null || _l === void 0 ? void 0 : _l.purchaseCost);
+                    a.gross += num((_x = d.asset) === null || _x === void 0 ? void 0 : _x.purchaseCost);
                     a.accDep += num(d.accumulatedDepreciation);
                     a.netBlock += num(d.currentBookValue);
                 }
@@ -875,9 +1217,9 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                         continue;
                     if (!agg.has(i.vendorId))
                         agg.set(i.vendorId, {
-                            name: (_o = (_m = i.vendor) === null || _m === void 0 ? void 0 : _m.name) !== null && _o !== void 0 ? _o : "",
-                            gst: (_q = (_p = i.vendor) === null || _p === void 0 ? void 0 : _p.gstNumber) !== null && _q !== void 0 ? _q : "",
-                            pan: (_s = (_r = i.vendor) === null || _r === void 0 ? void 0 : _r.panNumber) !== null && _s !== void 0 ? _s : "",
+                            name: (_z = (_y = i.vendor) === null || _y === void 0 ? void 0 : _y.name) !== null && _z !== void 0 ? _z : "",
+                            gst: (_1 = (_0 = i.vendor) === null || _0 === void 0 ? void 0 : _0.gstNumber) !== null && _1 !== void 0 ? _1 : "",
+                            pan: (_3 = (_2 = i.vendor) === null || _2 === void 0 ? void 0 : _2.panNumber) !== null && _3 !== void 0 ? _3 : "",
                             tds: 0, net: 0, count: 0,
                         });
                     const a = agg.get(i.vendorId);
@@ -1198,8 +1540,8 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 });
                 const agg = new Map();
                 for (const c of allocs) {
-                    const dept = (_v = (_u = (_t = c.asset) === null || _t === void 0 ? void 0 : _t.department) === null || _u === void 0 ? void 0 : _u.name) !== null && _v !== void 0 ? _v : "Unassigned";
-                    const cat = (_y = (_x = (_w = c.asset) === null || _w === void 0 ? void 0 : _w.assetCategory) === null || _x === void 0 ? void 0 : _x.name) !== null && _y !== void 0 ? _y : "Unassigned";
+                    const dept = (_6 = (_5 = (_4 = c.asset) === null || _4 === void 0 ? void 0 : _4.department) === null || _5 === void 0 ? void 0 : _5.name) !== null && _6 !== void 0 ? _6 : "Unassigned";
+                    const cat = (_9 = (_8 = (_7 = c.asset) === null || _7 === void 0 ? void 0 : _7.assetCategory) === null || _8 === void 0 ? void 0 : _8.name) !== null && _9 !== void 0 ? _9 : "Unassigned";
                     const key = `${dept}||${cat}`;
                     if (!agg.has(key))
                         agg.set(key, { department: dept, category: cat, cost: 0, count: 0 });
@@ -1252,7 +1594,7 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                     if (!p.vendorId)
                         continue;
                     if (!agg.has(p.vendorId))
-                        agg.set(p.vendorId, { name: (_0 = (_z = p.vendor) === null || _z === void 0 ? void 0 : _z.name) !== null && _0 !== void 0 ? _0 : "", gst: (_2 = (_1 = p.vendor) === null || _1 === void 0 ? void 0 : _1.gstNumber) !== null && _2 !== void 0 ? _2 : "", pos: 0, value: 0 });
+                        agg.set(p.vendorId, { name: (_11 = (_10 = p.vendor) === null || _10 === void 0 ? void 0 : _10.name) !== null && _11 !== void 0 ? _11 : "", gst: (_13 = (_12 = p.vendor) === null || _12 === void 0 ? void 0 : _12.gstNumber) !== null && _13 !== void 0 ? _13 : "", pos: 0, value: 0 });
                     const e = agg.get(p.vendorId);
                     e.pos++;
                     e.value += num(p.totalAmount);
@@ -2100,7 +2442,7 @@ const exportReport = (req, res) => __awaiter(void 0, void 0, void 0, function* (
                 });
                 const byCategory = new Map();
                 for (const a of assets) {
-                    const cat = (_4 = (_3 = a.assetCategory) === null || _3 === void 0 ? void 0 : _3.name) !== null && _4 !== void 0 ? _4 : "Uncategorised";
+                    const cat = (_15 = (_14 = a.assetCategory) === null || _14 === void 0 ? void 0 : _14.name) !== null && _15 !== void 0 ? _15 : "Uncategorised";
                     if (!byCategory.has(cat))
                         byCategory.set(cat, { total: 0, active: 0, inStore: 0, idle: 0, disposed: 0 });
                     const s = byCategory.get(cat);

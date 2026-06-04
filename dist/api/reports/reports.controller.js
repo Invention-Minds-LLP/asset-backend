@@ -796,7 +796,7 @@ function _wdvAtDate(cost, salvage, rate, depStart, targetDate) {
     return wdv;
 }
 const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
     try {
         const query = req.query;
         const exportFormat = query.export;
@@ -809,7 +809,12 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
         // Fetch all assets that could appear in this FY schedule
         const assets = yield prismaClient_1.default.asset.findMany({
             where: {
-                purchaseDate: { lte: fyEnd },
+                // Include purchased AND donated assets. Donations carry their date in
+                // donationDate (and value in estimatedValue), so match on either date.
+                OR: [
+                    { purchaseDate: { lte: fyEnd } },
+                    { donationDate: { lte: fyEnd } },
+                ],
             },
             select: {
                 id: true,
@@ -817,6 +822,8 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 assetNature: true,
                 purchaseCost: true,
                 purchaseDate: true,
+                donationDate: true,
+                estimatedValue: true,
                 disposalDate: true,
                 status: true,
                 assetPoolId: true,
@@ -953,8 +960,11 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
             let totalRate = 0, rateCount = 0;
             const catAssets = (_k = categoryMap.get(catName)) !== null && _k !== void 0 ? _k : [];
             for (const asset of catAssets) {
-                const cost = Number(asset.purchaseCost || 0);
-                const purchaseDate = asset.purchaseDate ? new Date(asset.purchaseDate) : null;
+                // Cost basis & acquisition date fall back to the donation equivalents,
+                // so donated assets are capitalised at their estimated (fair) value.
+                const cost = Number((_m = (_l = asset.purchaseCost) !== null && _l !== void 0 ? _l : asset.estimatedValue) !== null && _m !== void 0 ? _m : 0);
+                const acqDate = (_o = asset.purchaseDate) !== null && _o !== void 0 ? _o : asset.donationDate;
+                const purchaseDate = acqDate ? new Date(acqDate) : null;
                 const disposalDate = asset.disposalDate ? new Date(asset.disposalDate) : null;
                 // ── Skip pool-individualized assets for years before their handover ─────
                 // Pool-individualized assets only "exist" as standalone records from
@@ -1002,7 +1012,7 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 const assetRate = Number(dep.depreciationRate || 0);
                 const method = dep.depreciationMethod;
                 const depStart = dep.depreciationStart ? new Date(dep.depreciationStart) : purchaseDate;
-                const salvageVal = Number((_l = dep.salvageValue) !== null && _l !== void 0 ? _l : 0);
+                const salvageVal = Number((_p = dep.salvageValue) !== null && _p !== void 0 ? _p : 0);
                 if (assetRate > 0) {
                     totalRate += assetRate;
                     rateCount++;
@@ -1015,8 +1025,8 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                     // Use stored values from the log
                     const logDep = Number(fyLog.depreciationAmount);
                     const logBookAfter = Number(fyLog.bookValueAfter);
-                    const logDepOnOpen = Number((_m = fyLog.depOnOpening) !== null && _m !== void 0 ? _m : 0);
-                    const logDepOnAdd = Number((_o = fyLog.depOnAdditions) !== null && _o !== void 0 ? _o : 0);
+                    const logDepOnOpen = Number((_q = fyLog.depOnOpening) !== null && _q !== void 0 ? _q : 0);
+                    const logDepOnAdd = Number((_r = fyLog.depOnAdditions) !== null && _r !== void 0 ? _r : 0);
                     // Closing acc dep at this FY's end = cost − bookValueAfter
                     closingAccDep += Math.max(0, cost - logBookAfter);
                     depOnOpening += logDepOnOpen;
@@ -1063,7 +1073,7 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 }
             }
             // ── Merge pool remainder rows for this category ──────────────────────────
-            const poolRemainders = (_p = poolRemainderMap.get(catName)) !== null && _p !== void 0 ? _p : [];
+            const poolRemainders = (_s = poolRemainderMap.get(catName)) !== null && _s !== void 0 ? _s : [];
             for (const pr of poolRemainders) {
                 openingGross += pr.openingGross;
                 additions += pr.additions;
@@ -1417,10 +1427,18 @@ const getCategoryAssetDetail = (req, res) => __awaiter(void 0, void 0, void 0, f
         }
         // Fetch all assets in this category that could appear in this FY
         const assets = yield prismaClient_1.default.asset.findMany({
-            where: { assetCategoryId: category.id, purchaseDate: { lte: fyEnd } },
+            where: {
+                assetCategoryId: category.id,
+                OR: [
+                    { purchaseDate: { lte: fyEnd } },
+                    { donationDate: { lte: fyEnd } },
+                ],
+            },
             select: {
                 id: true, assetId: true, assetName: true, serialNumber: true,
-                purchaseCost: true, purchaseDate: true, disposalDate: true, status: true,
+                purchaseCost: true, purchaseDate: true, donationDate: true, estimatedValue: true,
+                modeOfProcurement: true,
+                disposalDate: true, status: true,
                 depreciation: {
                     select: {
                         depreciationRate: true, depreciationMethod: true, depreciationStart: true,
@@ -1440,9 +1458,10 @@ const getCategoryAssetDetail = (req, res) => __awaiter(void 0, void 0, void 0, f
             logByAssetId.set(l.assetId, l);
         const isSecondHalf = (d) => { const m = d.getMonth(); return m >= 9 || m <= 2; };
         const rows = assets.map(a => {
-            var _a, _b, _c, _d;
-            const cost = Number(a.purchaseCost || 0);
-            const purchaseDate = a.purchaseDate ? new Date(a.purchaseDate) : null;
+            var _a, _b, _c, _d, _e, _f, _g;
+            const cost = Number((_b = (_a = a.purchaseCost) !== null && _a !== void 0 ? _a : a.estimatedValue) !== null && _b !== void 0 ? _b : 0);
+            const acqDate = (_c = a.purchaseDate) !== null && _c !== void 0 ? _c : a.donationDate;
+            const purchaseDate = acqDate ? new Date(acqDate) : null;
             const disposalDate = a.disposalDate ? new Date(a.disposalDate) : null;
             const isDisposedBeforeFY = disposalDate && disposalDate < fyStart;
             const isDisposedInFY = disposalDate && disposalDate >= fyStart && disposalDate <= fyEnd;
@@ -1471,15 +1490,15 @@ const getCategoryAssetDetail = (req, res) => __awaiter(void 0, void 0, void 0, f
             const rate = Number((dep === null || dep === void 0 ? void 0 : dep.depreciationRate) || 0);
             const method = dep === null || dep === void 0 ? void 0 : dep.depreciationMethod;
             const depStart = (dep === null || dep === void 0 ? void 0 : dep.depreciationStart) ? new Date(dep.depreciationStart) : purchaseDate;
-            const salvage = Number((_a = dep === null || dep === void 0 ? void 0 : dep.salvageValue) !== null && _a !== void 0 ? _a : 0);
+            const salvage = Number((_d = dep === null || dep === void 0 ? void 0 : dep.salvageValue) !== null && _d !== void 0 ? _d : 0);
             // FY-scoped closing dep (must match category view's logic, not live DB value)
             let depOnOpening = 0, depOnAdditions = 0, closingDep = 0;
             const fyLog = logByAssetId.get(a.id);
             if (fyLog) {
                 // Source of truth: stored log for this FY
                 closingDep = Math.max(0, cost - Number(fyLog.bookValueAfter));
-                depOnOpening = Number((_b = fyLog.depOnOpening) !== null && _b !== void 0 ? _b : 0);
-                depOnAdditions = Number((_c = fyLog.depOnAdditions) !== null && _c !== void 0 ? _c : 0);
+                depOnOpening = Number((_e = fyLog.depOnOpening) !== null && _e !== void 0 ? _e : 0);
+                depOnAdditions = Number((_f = fyLog.depOnAdditions) !== null && _f !== void 0 ? _f : 0);
             }
             else if (rate > 0 && depStart && !isDisposedBeforeFY) {
                 if (method === "DB") {
@@ -1516,7 +1535,9 @@ const getCategoryAssetDetail = (req, res) => __awaiter(void 0, void 0, void 0, f
                 assetId: a.assetId,
                 assetName: a.assetName,
                 serialNumber: a.serialNumber,
-                purchaseDate: (_d = purchaseDate === null || purchaseDate === void 0 ? void 0 : purchaseDate.toISOString().split("T")[0]) !== null && _d !== void 0 ? _d : null,
+                modeOfProcurement: a.modeOfProcurement,
+                donated: a.modeOfProcurement === "DONATION",
+                purchaseDate: (_g = purchaseDate === null || purchaseDate === void 0 ? void 0 : purchaseDate.toISOString().split("T")[0]) !== null && _g !== void 0 ? _g : null,
                 openingGross: +openingGross.toFixed(2),
                 additions: +additions.toFixed(2),
                 additions1H: +additions1H.toFixed(2),

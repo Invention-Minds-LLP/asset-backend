@@ -457,35 +457,36 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const headers = [
           "No.",                                       // 0
           "Description",                               // 1
-          "Last Acquisition Cost Date",                // 2
-          "Last Depreciation Date",                    // 3
-          "Acquisition Cost before Starting Date",     // 4   ← opening gross
-          "Additions during Period",                   // 5   ← NEW
-          "Deletions during Period",                   // 6   ← NEW
-          "Acquisition Cost at Ending Date",           // 7   ← closing gross
-          "Depreciation before Starting Date",         // 8   ← opening dep
-          "Depreciation for the Period",               // 9   ← NEW
-          "Acc. Depreciation on Disposals",            // 10  ← NEW
-          "Depreciation at Ending Date",               // 11  ← closing dep
-          "Book Value before Starting Date",           // 12
-          "Book Value Net Change",                     // 13
-          "Book Value at Ending Date",                 // 14
-          "Acquisition Cost Account",                  // 15
-          "Accum. Depreciation Account",               // 16
-          "Depreciation Starting Date",                // 17
-          "Depreciation Ending Date",                  // 18
-          "No. of Depreciation Years",                 // 19
-          "Depreciation Method",                       // 20
-          "Straight-Line %",                           // 21
-          "Bill Number",                               // 22
-          "Vendor Name",                               // 23
+          "Category",                                  // 2   ← NEW
+          "Last Acquisition Cost Date",                // 3
+          "Last Depreciation Date",                    // 4
+          "Acquisition Cost before Starting Date",     // 5   ← opening gross
+          "Additions during Period",                   // 6
+          "Deletions during Period",                   // 7
+          "Acquisition Cost at Ending Date",           // 8   ← closing gross
+          "Depreciation before Starting Date",         // 9   ← opening dep
+          "Depreciation for the Period",               // 10
+          "Acc. Depreciation on Disposals",            // 11
+          "Depreciation at Ending Date",               // 12  ← closing dep
+          "Book Value before Starting Date",           // 13
+          "Book Value Net Change",                     // 14
+          "Book Value at Ending Date",                 // 15
+          "Acquisition Cost Account",                  // 16
+          "Accum. Depreciation Account",               // 17
+          "Depreciation Starting Date",                // 18
+          "Depreciation Ending Date",                  // 19
+          "No. of Depreciation Years",                 // 20
+          "Depreciation Method",                       // 21
+          "Straight-Line %",                           // 22
+          "Bill Number",                               // 23
+          "Vendor Name",                               // 24
         ];
         // Columns whose cells should be numeric & currency-formatted in Excel.
-        const numericCols = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+        const numericCols = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         // Column widths (wch units ≈ characters) — keeps the wide register readable.
         const colWidths = [
-          6,  40, 14, 14, 18, 16, 16, 18, 18, 18, 18, 18,
-          18, 18, 18, 26, 26, 14, 14, 8,  18, 12, 16, 26,
+          6,  40, 20, 14, 14, 18, 16, 16, 18, 18, 18, 18,
+          18, 18, 18, 18, 26, 26, 14, 14, 8,  18, 12, 16, 26,
         ];
 
         const rows: Row[] = [];
@@ -582,6 +583,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           rows.push([
             no,
             a.assetName,
+            a.assetCategory?.name ?? "",
             fmt(acq),
             fmt(lastDepDate),
             acqOpening,
@@ -621,12 +623,13 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
 
         // Blank spacer + grand-total row (xlsx CE can't bold cells; we make the
         // label uppercase so it's still visually distinct).
-        rows.push(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+        rows.push(new Array(25).fill(""));
         rows.push([
           "",
           `TOTAL (${no} assets)`,
-          "",
-          "",
+          "",                          // Category column
+          "",                          // Last Acq Date
+          "",                          // Last Dep Date
           totals.opGross,
           totals.additions,
           totals.deletions,

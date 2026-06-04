@@ -283,6 +283,14 @@ model Asset {
   ticketHierarchyNotes String? @db.Text
   pmFormatNotes        String? @db.Text
 
+  // Staging store for an IN_STORE (not-yet-deployed) asset — which warehouse/sub-store
+  // it physically sits in. Set on goods receipt, updated by store transfers, and
+  // cleared when the asset is deployed into a department.
+  currentStoreId Int?
+  currentStore   Store? @relation("AssetCurrentStore", fields: [currentStoreId], references: [id])
+  // When the asset entered its current store — drives "days in store" aging.
+  currentStoreSince DateTime?
+
   depreciation AssetDepreciation?
   insurance    AssetInsurance[]
   locations    AssetLocation[]
@@ -1867,6 +1875,48 @@ model SmtpConfig {
   @@map("smtpconfig")
 }
 
+// One-time login codes for mobile OTP auth. `identifier` is either an
+// employeeID (internal) or an email (external). otpHash is bcrypt(otp) so a
+// DB leak doesn't expose live codes. A row is consumed (consumedAt set) on
+// successful verify; rows past expiresAt or with attempts >= 5 are dead.
+model LoginOtp {
+  id             Int       @id @default(autoincrement())
+  identifier     String
+  identifierType String    // "EMPLOYEE_ID" | "EXTERNAL_EMAIL"
+  otpHash        String
+  expiresAt      DateTime
+  attempts       Int       @default(0)
+  consumedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([identifier, identifierType])
+  @@map("loginotp")
+}
+
+// Master record for external auditors that an admin can re-use across audits.
+// Intentionally NOT FK-linked to AssetAuditor — when an audit is created,
+// the auditor's details are SNAPSHOTTED into the AssetAuditor row so a later
+// rename in this master doesn't rewrite history.
+//
+// Email is unique and is the identifier for external OTP login (Batch D).
+// status=INACTIVE acts as a soft delete so historical audits keep their
+// inline auditor row but the auditor can't log in anymore.
+model ExternalAuditor {
+  id           Int       @id @default(autoincrement())
+  email        String    @unique
+  name         String
+  organization String?
+  phone        String?
+  status       String    @default("ACTIVE") // ACTIVE | INACTIVE
+  addedById    Int       // User.id of the admin who added this auditor
+  lastUsedAt   DateTime? // updated each time the auditor is attached to a new audit
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([status])
+  @@map("externalauditor")
+}
+
 model AssetAssignment {
   id Int @id @default(autoincrement())
 
@@ -2730,6 +2780,14 @@ model AssetAudit {
   departmentId Int?
   branchId     Int?
 
+  // Floor-plan scope — reuses the floor plan captured in the location module.
+  floor         String?
+  block         String?
+  floorPlanId   Int? // resolved FloorPlan for the audit's branch/floor (read-only consumer)
+  categoryScope String? @db.Text // JSON [{id,name}] of category filter, for display
+
+  auditorType String? // INTERNAL | EXTERNAL | BOTH
+
   conductedById Int?
   description   String? @db.Text
   remarks       String? @db.Text
@@ -2741,12 +2799,39 @@ model AssetAudit {
 
   completedAt DateTime?
 
-  items AssetAuditItem[]
+  items     AssetAuditItem[]
+  auditors  AssetAuditor[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@map("assetaudit")
+}
+
+// Auditors assigned to an audit. INTERNAL rows reference an Employee by scalar
+// id (no relation — matches AssetAudit's conductedById/branchId convention).
+// EXTERNAL rows capture the auditor's details; `email` is the identifier used
+// by the external email-OTP login (LoginOtp.identifierType = EXTERNAL_EMAIL).
+model AssetAuditor {
+  id      Int        @id @default(autoincrement())
+  auditId Int
+  audit   AssetAudit @relation(fields: [auditId], references: [id])
+
+  type String // INTERNAL | EXTERNAL
+
+  // Internal
+  employeeId Int?
+
+  // External
+  name         String?
+  email        String?
+  organization String?
+  phone        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([auditId])
+  @@map("assetauditor")
 }
 
 model AssetAuditItem {
@@ -3003,6 +3088,7 @@ model Store {
   materialIssues     MaterialIssue[]
   goodsReceiptLines  GoodsReceiptLine[]   @relation("GRALineStore")
   purchaseOrderLines PurchaseOrderLine[]  @relation("POLineStore")
+  stagedAssets       Asset[]              @relation("AssetCurrentStore")
 
   @@map("store")
 }
@@ -3450,8 +3536,8 @@ model StoreTransfer {
 
   fromStoreId Int
   fromStore   Store @relation("TransferFromStore", fields: [fromStoreId], references: [id])
-  toStoreId   Int
-  toStore     Store @relation("TransferToStore", fields: [toStoreId], references: [id])
+  toStoreId   Int?
+  toStore     Store? @relation("TransferToStore", fields: [toStoreId], references: [id])
 
   toDepartmentId Int?
 

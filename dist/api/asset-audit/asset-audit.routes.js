@@ -8,6 +8,10 @@ const authMiddleware_1 = require("../../middleware/authMiddleware");
 const asset_audit_controller_1 = require("./asset-audit.controller");
 const router = express_1.default.Router();
 router.get("/locations", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAuditLocationOptions);
+router.get("/scope/floors", authMiddleware_1.authenticateToken, asset_audit_controller_1.getScopeFloors);
+router.get("/scope/categories", authMiddleware_1.authenticateToken, asset_audit_controller_1.getScopeCategories);
+router.get("/scope/preview", authMiddleware_1.authenticateToken, asset_audit_controller_1.getScopePreview);
+router.get("/my", authMiddleware_1.authenticateToken, asset_audit_controller_1.getMyAudits);
 router.get("/", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAllAudits);
 router.get("/:id", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAuditById);
 router.post("/", authMiddleware_1.authenticateToken, asset_audit_controller_1.createAudit);
@@ -15,4 +19,6 @@ router.put("/:id/start", authMiddleware_1.authenticateToken, asset_audit_control
 router.put("/items/:itemId/verify", authMiddleware_1.authenticateToken, asset_audit_controller_1.verifyItem);
 router.put("/:id/complete", authMiddleware_1.authenticateToken, asset_audit_controller_1.completeAudit);
 router.get("/:id/summary", authMiddleware_1.authenticateToken, asset_audit_controller_1.getAuditSummary);
+router.get("/:id/floor-map", authMiddleware_1.authenticateToken, asset_audit_controller_1.getFloorMap);
+router.get("/:id/next-item", authMiddleware_1.authenticateToken, asset_audit_controller_1.getNextItem);
 exports.default = router;

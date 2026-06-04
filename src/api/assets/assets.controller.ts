@@ -58,6 +58,11 @@ export const getAllAssets = async (req: Request, res: Response) => {
         : { allottedToId: Number(employeeDbId) };
     }
 
+    // Optional filters (e.g. Store screen asking "which assets are parked in store X")
+    const { currentStoreId, status } = req.query;
+    if (currentStoreId) where.currentStoreId = Number(currentStoreId);
+    if (status) where.status = String(status);
+
     const assets = await prisma.asset.findMany({
       where,
       include: {
@@ -65,7 +70,8 @@ export const getAllAssets = async (req: Request, res: Response) => {
         vendor: true,
         department: true,
         allottedTo: true,
-        supervisor: true
+        supervisor: true,
+        currentStore: { select: { id: true, name: true, code: true } }
       }
     });
 
@@ -324,6 +330,8 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         financialYearAdded: data.financialYearAdded ?? null,
 
         status: "IN_STORE",
+        currentStoreId: data.currentStoreId ? Number(data.currentStoreId) : null,
+        currentStoreSince: data.currentStoreId ? new Date() : null,
       } as any
     });
 
@@ -787,6 +795,17 @@ export const updateAsset = async (req: Request, res: Response) => {
       });
     }
 
+    // ── Mint permanent stores reference on first completion of a GRN skeleton ──
+    // GRN-created assets start with no storeAssetId; the first time a stores user
+    // fills in the asset's basic details we mint it. Never overwrite an existing one.
+    const existingStoreRef = await prisma.asset.findUnique({
+      where: { id },
+      select: { storeAssetId: true },
+    });
+    if (!existingStoreRef?.storeAssetId) {
+      updateData.storeAssetId = await generateStoreAssetId(effectiveCategoryId);
+    }
+
     const updated = await prisma.asset.update({
       where: { id },
       data: updateData,
@@ -974,7 +993,7 @@ export const updateAssetAssignment = async (req: Request, res: Response) => {
       updateData.allottedTo = { connect: { id: Number(allottedToId) } };
     }
 
-    updateData.status = 'active'
+    updateData.status = 'ACTIVE'
     const updated = await prisma.asset.update({
       where: { id },
       data: updateData,
