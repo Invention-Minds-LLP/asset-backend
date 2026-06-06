@@ -766,6 +766,199 @@ function sendFixedAssetsScheduleExcel(res, rows, grandTotal, fiscalYear) {
         res.send(buf);
     });
 }
+// Combined export: same 11-column layout as sendFixedAssetsScheduleExcel,
+// but each category section expands into the per-asset rows that make up
+// the category total, followed by a SUBTOTAL row, a blank spacer, and the
+// next category. Pool-remainder rows are surfaced as their own lines so
+// the asset subtotal still ties out to the category aggregate.
+function sendFixedAssetsScheduleCombinedExcel(res, categoryRows, assetRowsByCategory, grandTotal, fiscalYear) {
+    return __awaiter(this, void 0, void 0, function* () {
+        var _a;
+        const fyEndYear = fiscalYear + 1;
+        const fyStartLabel = `01.04.${fiscalYear}`;
+        const fyEndLabel = `31.03.${fyEndYear}`;
+        const prevFyEnd = `31.03.${fiscalYear}`;
+        const fyLabel = `${fiscalYear}-${String(fyEndYear).slice(2)}`;
+        const wb = new exceljs_1.default.Workbook();
+        const ws = wb.addWorksheet("Fixed Assets Schedule");
+        ws.columns = [
+            { width: 50 }, { width: 16 }, { width: 18 }, { width: 18 }, { width: 16 },
+            { width: 9 }, { width: 16 }, { width: 16 }, { width: 16 },
+            { width: 16 }, { width: 16 },
+        ];
+        // ── Title + FY rows ──────────────────────────────────────────
+        const titleRow = ws.addRow(["SCHEDULE OF FIXED ASSETS — WITH ASSET BREAKDOWN"]);
+        ws.mergeCells(1, 1, 1, 11);
+        titleRow.height = 24;
+        const tCell = titleRow.getCell(1);
+        tCell.font = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
+        tCell.alignment = { horizontal: "center", vertical: "middle" };
+        tCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1A237E" } };
+        const fyRow = ws.addRow([`FOR THE YEAR ENDED ${fyEndLabel}`]);
+        ws.mergeCells(2, 1, 2, 11);
+        fyRow.height = 18;
+        const fyCell = fyRow.getCell(1);
+        fyCell.font = { bold: true, size: 11, color: { argb: "FF1A237E" } };
+        fyCell.alignment = { horizontal: "center", vertical: "middle" };
+        fyCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8EAF6" } };
+        ws.addRow([]);
+        // ── Group + sub-headers (same scheme as the summary writer) ──
+        const GROSS_BG = "FF1565C0", DEP_BG = "FFE65100", NET_BG = "FF1B5E20";
+        const grpRow = ws.addRow(["PARTICULARS", "GROSS BLOCK", "", "", "", "DEPRECIATION", "", "", "", "NET BLOCK", ""]);
+        grpRow.height = 20;
+        ws.mergeCells(4, 1, 5, 1);
+        ws.mergeCells(4, 2, 4, 5);
+        ws.mergeCells(4, 6, 4, 9);
+        ws.mergeCells(4, 10, 4, 11);
+        const styleGroupCell = (cell, bg) => {
+            cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+            cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+            cell.border = { bottom: { style: "medium", color: { argb: "FF000000" } } };
+        };
+        styleGroupCell(grpRow.getCell(1), "FF37474F");
+        styleGroupCell(grpRow.getCell(2), GROSS_BG);
+        styleGroupCell(grpRow.getCell(6), DEP_BG);
+        styleGroupCell(grpRow.getCell(10), NET_BG);
+        const GROSS_LIGHT = "FFBBDEFB", DEP_LIGHT = "FFFFE0B2", NET_LIGHT = "FFC8E6C9", PART_LIGHT = "FFECEFF1";
+        const subRow = ws.addRow([
+            "",
+            `AS ON\n${fyStartLabel}`, `ADDITIONS\nDURING YEAR`, `DELETIONS\nDURING YEAR`, `UPTO\n${fyEndLabel}`,
+            "RATE %",
+            `UPTO\n${prevFyEnd}`, `FOR THE\nPERIOD`, `UPTO\n${fyEndLabel}`,
+            `AS ON\n${fyEndLabel}`, `AS ON\n${prevFyEnd}`,
+        ]);
+        subRow.height = 36;
+        const styleSubCell = (cell, bg, fg = "FF0D0D0D") => {
+            cell.font = { bold: true, size: 9, color: { argb: fg } };
+            cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+            cell.border = { bottom: { style: "medium" } };
+        };
+        styleSubCell(subRow.getCell(1), PART_LIGHT);
+        for (let c = 2; c <= 5; c++)
+            styleSubCell(subRow.getCell(c), GROSS_LIGHT, "FF0D47A1");
+        for (let c = 6; c <= 9; c++)
+            styleSubCell(subRow.getCell(c), DEP_LIGHT, "FFBF360C");
+        for (let c = 10; c <= 11; c++)
+            styleSubCell(subRow.getCell(c), NET_LIGHT, "FF1B5E20");
+        const numFmt = "#,##0.00";
+        // ── Per-category section ─────────────────────────────────────
+        // Each section: category banner → asset rows → subtotal → blank spacer.
+        // Category banner uses a darker block so the CFO can scan to the section break.
+        const writeCategoryBanner = (catName) => {
+            const r = ws.addRow([`▌ ${catName.toUpperCase()}`, "", "", "", "", "", "", "", "", "", ""]);
+            ws.mergeCells(r.number, 1, r.number, 11);
+            r.height = 22;
+            const cell = r.getCell(1);
+            cell.font = { bold: true, size: 11, color: { argb: "FFFFFFFF" } };
+            cell.alignment = { horizontal: "left", vertical: "middle", indent: 1 };
+            cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF455A64" } };
+        };
+        const writeAssetRow = (idx, a) => {
+            const label = a.isPoolRow
+                ? a.assetName // "Asset Pool — POOL-CODE …"
+                : `${idx.toString().padStart(3, "0")}  ${a.assetName}${a.serialNumber ? `  (SN: ${a.serialNumber})` : ""}`;
+            const r = ws.addRow([
+                label,
+                a.openingGross, a.additions, a.deletions, a.closingGross,
+                a.rate > 0 ? a.rate : "",
+                a.openingDep, a.periodDep, a.closingDep,
+                a.netCurrent, a.netPrevious,
+            ]);
+            r.height = 15;
+            // Particulars cell: lighter background, italic for pool rows, slight indent
+            const partCell = r.getCell(1);
+            partCell.font = { size: 9, italic: !!a.isPoolRow };
+            partCell.alignment = { vertical: "middle", indent: 2, wrapText: false };
+            partCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFAFAFA" } };
+            partCell.border = { bottom: { style: "thin", color: { argb: "FFEEEEEE" } } };
+            const styleAmt = (col, bg) => {
+                const c = r.getCell(col);
+                c.numFmt = numFmt;
+                c.font = { size: 9 };
+                c.alignment = { horizontal: "right", vertical: "middle" };
+                c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: bg } };
+                c.border = { bottom: { style: "thin", color: { argb: "FFEEEEEE" } } };
+            };
+            styleAmt(2, "FFF1F8FE");
+            styleAmt(3, "FFF1F8FE");
+            styleAmt(4, "FFF1F8FE");
+            styleAmt(5, "FFF1F8FE");
+            const rateCell = r.getCell(6);
+            rateCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFF8E1" } };
+            rateCell.alignment = { horizontal: "center", vertical: "middle" };
+            rateCell.font = { size: 9 };
+            if (a.rate > 0)
+                rateCell.value = `${a.rate}%`;
+            styleAmt(7, "FFFFF8E1");
+            styleAmt(8, "FFFFF8E1");
+            styleAmt(9, "FFFFF8E1");
+            styleAmt(10, "FFF1F8E9");
+            styleAmt(11, "FFF1F8E9");
+        };
+        const writeSubtotalRow = (catName, count, catRow) => {
+            const r = ws.addRow([
+                `SUBTOTAL — ${catName.toUpperCase()} (${count} ${count === 1 ? "asset" : "assets"})`,
+                catRow.openingGross, catRow.additions, catRow.deletions, catRow.closingGross,
+                "",
+                catRow.openingDep, catRow.periodDep, catRow.closingDep,
+                catRow.netCurrent, catRow.netPrevious,
+            ]);
+            r.height = 18;
+            const partCell = r.getCell(1);
+            partCell.font = { bold: true, size: 10, color: { argb: "FF263238" } };
+            partCell.alignment = { vertical: "middle", indent: 1 };
+            partCell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCFD8DC" } };
+            partCell.border = { top: { style: "thin" }, bottom: { style: "medium" } };
+            const styleSubtot = (col) => {
+                const c = r.getCell(col);
+                c.numFmt = numFmt;
+                c.font = { bold: true, size: 10 };
+                c.alignment = { horizontal: "right", vertical: "middle" };
+                c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFCFD8DC" } };
+                c.border = { top: { style: "thin" }, bottom: { style: "medium" } };
+            };
+            for (let c = 2; c <= 11; c++)
+                styleSubtot(c);
+        };
+        // Walk categoryRows in the same order they were computed; for each, drop the
+        // category section into the sheet.
+        for (const catRow of categoryRows) {
+            const assetRows = (_a = assetRowsByCategory.get(catRow.category)) !== null && _a !== void 0 ? _a : [];
+            writeCategoryBanner(catRow.category);
+            assetRows.forEach((a, i) => writeAssetRow(i + 1, a));
+            writeSubtotalRow(catRow.category, assetRows.filter(a => !a.isPoolRow).length, catRow);
+            ws.addRow([]); // blank spacer
+        }
+        // ── Grand total ──────────────────────────────────────────────
+        const totRow = ws.addRow([
+            "GRAND TOTAL",
+            grandTotal.openingGross, grandTotal.additions, grandTotal.deletions, grandTotal.closingGross,
+            "",
+            grandTotal.openingDep, grandTotal.periodDep, grandTotal.closingDep,
+            grandTotal.netCurrent, grandTotal.netPrevious,
+        ]);
+        totRow.height = 20;
+        const styleGrand = (col) => {
+            const c = totRow.getCell(col);
+            c.numFmt = numFmt;
+            c.font = { bold: true, size: 11 };
+            c.alignment = { horizontal: "right", vertical: "middle" };
+            c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE0E0E0" } };
+            c.border = { top: { style: "medium" }, bottom: { style: "double" } };
+        };
+        totRow.getCell(1).font = { bold: true, size: 11 };
+        totRow.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE0E0E0" } };
+        totRow.getCell(1).border = { top: { style: "medium" }, bottom: { style: "double" } };
+        for (let c = 2; c <= 11; c++)
+            styleGrand(c);
+        const buf = yield wb.xlsx.writeBuffer();
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        res.setHeader("Content-Disposition", `attachment; filename=fixed-assets-schedule-with-breakdown-${fyLabel}.xlsx`);
+        res.send(buf);
+    });
+}
 // ─── Indian IT Act 180-day convention helpers ─────────────────────────────────
 // Assets purchased Oct–Mar (second half of Indian FY Apr–Mar) get 50% rate in year 1.
 function _faIsSecondHalfFY(date) {
@@ -796,7 +989,7 @@ function _wdvAtDate(cost, salvage, rate, depStart, targetDate) {
     return wdv;
 }
 const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u;
     try {
         const query = req.query;
         const exportFormat = query.export;
@@ -818,6 +1011,8 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
             },
             select: {
                 id: true,
+                assetId: true,
+                serialNumber: true,
                 assetName: true,
                 assetNature: true,
                 purchaseCost: true,
@@ -947,6 +1142,10 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
         const allCatNames = new Set([...categoryMap.keys(), ...poolRemainderMap.keys()]);
         // Helper: is date in second half of Indian FY (Oct 1 – Mar 31)?
         const isSecondHalf = (d) => { const m = d.getMonth(); return m >= 9 || m <= 2; };
+        // Per-asset breakdown for the "combined" Excel export (Layout A).
+        // Populated only when ?export=combined; otherwise the map stays empty.
+        const collectAssetRows = exportFormat === "combined";
+        const assetRowsByCategory = new Map();
         const rows = [];
         let gOpenGross = 0, gAdditions = 0, gAdditions1H = 0, gAdditions2H = 0;
         let gDeletions = 0, gDeletions1H = 0, gDeletions2H = 0, gCloseGross = 0;
@@ -958,6 +1157,8 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
             let closingAccDep = 0;
             let depOnOpening = 0, depOnAdditions = 0;
             let totalRate = 0, rateCount = 0;
+            if (collectAssetRows)
+                assetRowsByCategory.set(catName, []);
             const catAssets = (_k = categoryMap.get(catName)) !== null && _k !== void 0 ? _k : [];
             for (const asset of catAssets) {
                 // Cost basis & acquisition date fall back to the donation equivalents,
@@ -982,13 +1183,21 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 const isDisposedInFY = disposalDate && disposalDate >= fyStart && disposalDate <= fyEnd;
                 const isAcquiredBeforeFY = purchaseDate && purchaseDate < fyStart;
                 const isAcquiredInFY = purchaseDate && purchaseDate >= fyStart && purchaseDate <= fyEnd;
+                // ── Per-asset accumulators ────────────────────────────────────────────
+                // We compute everything into `a*` locals first, then fold them into the
+                // category totals. When ?export=combined is requested, the per-asset
+                // values are also captured into assetRowsByCategory so the Excel writer
+                // can emit asset-level rows under each category section.
+                let aOpeningGross = 0, aAdditions = 0, aDeletions = 0;
+                let aDepOnOpening = 0, aDepOnAdditions = 0, aClosingAccDep = 0;
+                let aAssetRate = 0;
                 // Opening Gross Block: acquired before FY start, not disposed before FY start
                 if (isAcquiredBeforeFY && !isDisposedBeforeFY) {
-                    openingGross += cost;
+                    aOpeningGross = cost;
                 }
                 // Additions: acquired during FY — split by half
                 if (isAcquiredInFY && purchaseDate) {
-                    additions += cost;
+                    aAdditions = cost;
                     if (isSecondHalf(purchaseDate)) {
                         additions2H += cost;
                     }
@@ -998,7 +1207,7 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 }
                 // Deletions: disposed during FY — split by half
                 if (isDisposedInFY && disposalDate) {
-                    deletions += cost;
+                    aDeletions = cost;
                     if (isSecondHalf(disposalDate)) {
                         deletions2H += cost;
                     }
@@ -1006,74 +1215,110 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                         deletions1H += cost;
                     }
                 }
+                // Roll gross-side per-asset values into category totals
+                openingGross += aOpeningGross;
+                additions += aAdditions;
+                deletions += aDeletions;
                 const dep = asset.depreciation;
-                if (!dep)
-                    continue;
-                const assetRate = Number(dep.depreciationRate || 0);
-                const method = dep.depreciationMethod;
-                const depStart = dep.depreciationStart ? new Date(dep.depreciationStart) : purchaseDate;
-                const salvageVal = Number((_p = dep.salvageValue) !== null && _p !== void 0 ? _p : 0);
-                if (assetRate > 0) {
-                    totalRate += assetRate;
-                    rateCount++;
-                }
-                // ── Source-of-truth: prefer DepreciationLog if it exists for this FY ──
-                // Logs are written by batch runs / backfill / per-asset runs and reflect
-                // the audit-approved values (with rounding settings applied).
-                const fyLog = logByAssetId.get(asset.id);
-                if (fyLog) {
-                    // Use stored values from the log
-                    const logDep = Number(fyLog.depreciationAmount);
-                    const logBookAfter = Number(fyLog.bookValueAfter);
-                    const logDepOnOpen = Number((_q = fyLog.depOnOpening) !== null && _q !== void 0 ? _q : 0);
-                    const logDepOnAdd = Number((_r = fyLog.depOnAdditions) !== null && _r !== void 0 ? _r : 0);
-                    // Closing acc dep at this FY's end = cost − bookValueAfter
-                    closingAccDep += Math.max(0, cost - logBookAfter);
-                    depOnOpening += logDepOnOpen;
-                    depOnAdditions += logDepOnAdd;
-                    // If split components are missing (older logs), fall back to total
-                    if (logDepOnOpen === 0 && logDepOnAdd === 0) {
-                        if (isAcquiredInFY)
-                            depOnAdditions += logDep;
-                        else
-                            depOnOpening += logDep;
+                if (dep) {
+                    const assetRate = Number(dep.depreciationRate || 0);
+                    aAssetRate = assetRate;
+                    const method = dep.depreciationMethod;
+                    const depStart = dep.depreciationStart ? new Date(dep.depreciationStart) : purchaseDate;
+                    const salvageVal = Number((_p = dep.salvageValue) !== null && _p !== void 0 ? _p : 0);
+                    if (assetRate > 0) {
+                        totalRate += assetRate;
+                        rateCount++;
                     }
-                    continue;
-                }
-                // ── No log → calculate on-the-fly (estimated) ──────────────────────────
-                if (isAcquiredBeforeFY && !isDisposedBeforeFY && assetRate > 0 && depStart) {
-                    // Compute what acc dep WOULD BE at this FY's end (not what's currently in DB)
-                    if (method === "DB") {
-                        const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
-                        const closingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyEnd);
-                        closingAccDep += Math.max(0, cost - closingWDV);
-                        const d = Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
-                        depOnOpening += d;
+                    // ── Source-of-truth: prefer DepreciationLog if it exists for this FY ──
+                    // Logs are written by batch runs / backfill / per-asset runs and reflect
+                    // the audit-approved values (with rounding settings applied).
+                    const fyLog = logByAssetId.get(asset.id);
+                    if (fyLog) {
+                        const logDep = Number(fyLog.depreciationAmount);
+                        const logBookAfter = Number(fyLog.bookValueAfter);
+                        const logDepOnOpen = Number((_q = fyLog.depOnOpening) !== null && _q !== void 0 ? _q : 0);
+                        const logDepOnAdd = Number((_r = fyLog.depOnAdditions) !== null && _r !== void 0 ? _r : 0);
+                        aClosingAccDep = Math.max(0, cost - logBookAfter);
+                        aDepOnOpening = logDepOnOpen;
+                        aDepOnAdditions = logDepOnAdd;
+                        // If split components are missing (older logs), fall back to total
+                        if (logDepOnOpen === 0 && logDepOnAdd === 0) {
+                            if (isAcquiredInFY)
+                                aDepOnAdditions += logDep;
+                            else
+                                aDepOnOpening += logDep;
+                        }
                     }
                     else {
-                        const yearsElapsed = Math.max(0, (fyEnd.getTime() - depStart.getTime()) / (365.25 * 86400000));
-                        const annualSL = (cost - salvageVal) * assetRate / 100;
-                        closingAccDep += Math.min((cost - salvageVal), annualSL * yearsElapsed);
-                        depOnOpening += Math.min(annualSL, Math.max(0, cost - salvageVal));
+                        // ── No log → calculate on-the-fly (estimated) ──────────────────────
+                        if (isAcquiredBeforeFY && !isDisposedBeforeFY && assetRate > 0 && depStart) {
+                            if (method === "DB") {
+                                const openingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyStart);
+                                const closingWDV = _wdvAtDate(cost, salvageVal, assetRate, depStart, fyEnd);
+                                aClosingAccDep = Math.max(0, cost - closingWDV);
+                                aDepOnOpening = Math.min(openingWDV * assetRate / 100, Math.max(0, openingWDV - salvageVal));
+                            }
+                            else {
+                                const yearsElapsed = Math.max(0, (fyEnd.getTime() - depStart.getTime()) / (365.25 * 86400000));
+                                const annualSL = (cost - salvageVal) * assetRate / 100;
+                                aClosingAccDep = Math.min((cost - salvageVal), annualSL * yearsElapsed);
+                                aDepOnOpening = Math.min(annualSL, Math.max(0, cost - salvageVal));
+                            }
+                        }
+                        else if (isAcquiredInFY && assetRate > 0 && purchaseDate) {
+                            // First-FY addition: half-year rule for DB
+                            if (method === "DB") {
+                                const halfYear = _faIsSecondHalfFY(purchaseDate);
+                                const d = cost * (halfYear ? assetRate / 200 : assetRate / 100);
+                                aDepOnAdditions = d;
+                                aClosingAccDep = d;
+                            }
+                            else {
+                                const d = Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
+                                aDepOnAdditions = d;
+                                aClosingAccDep = d;
+                            }
+                        }
                     }
+                    // Roll dep-side per-asset values into category totals
+                    closingAccDep += aClosingAccDep;
+                    depOnOpening += aDepOnOpening;
+                    depOnAdditions += aDepOnAdditions;
                 }
-                else if (isAcquiredInFY && assetRate > 0 && purchaseDate) {
-                    // First-FY addition: half-year rule for DB
-                    if (method === "DB") {
-                        const halfYear = _faIsSecondHalfFY(purchaseDate);
-                        const d = cost * (halfYear ? assetRate / 200 : assetRate / 100);
-                        depOnAdditions += d;
-                        closingAccDep += d;
-                    }
-                    else {
-                        const d = Math.min((cost - salvageVal) * assetRate / 100, Math.max(0, cost - salvageVal));
-                        depOnAdditions += d;
-                        closingAccDep += d;
+                // ── Capture per-asset row for the combined Excel writer ──
+                // Skip rows that are zero on every front (e.g. disposed-before-FY),
+                // matching getCategoryAssetDetail's filter so the popup and the
+                // combined Excel show the same set of assets per category.
+                if (collectAssetRows) {
+                    const aPeriodDep = +(aDepOnOpening + aDepOnAdditions).toFixed(2);
+                    const aClosingGross = +(aOpeningGross + aAdditions - aDeletions).toFixed(2);
+                    const aOpeningDep = +Math.max(0, aClosingAccDep - aPeriodDep).toFixed(2);
+                    const aNetCurrent = +(aClosingGross - aClosingAccDep).toFixed(2);
+                    const aNetPrevious = +(aOpeningGross - aOpeningDep).toFixed(2);
+                    const aClosingDep = +aClosingAccDep.toFixed(2);
+                    const isVisible = aOpeningGross !== 0 || aAdditions !== 0 || aDeletions !== 0 || aClosingDep !== 0;
+                    if (isVisible) {
+                        assetRowsByCategory.get(catName).push({
+                            assetIdCode: (_s = asset.assetId) !== null && _s !== void 0 ? _s : "",
+                            assetName: asset.assetName,
+                            serialNumber: (_t = asset.serialNumber) !== null && _t !== void 0 ? _t : "",
+                            openingGross: +aOpeningGross.toFixed(2),
+                            additions: +aAdditions.toFixed(2),
+                            deletions: +aDeletions.toFixed(2),
+                            closingGross: aClosingGross,
+                            rate: aAssetRate,
+                            openingDep: aOpeningDep,
+                            periodDep: aPeriodDep,
+                            closingDep: aClosingDep,
+                            netCurrent: aNetCurrent,
+                            netPrevious: aNetPrevious,
+                        });
                     }
                 }
             }
             // ── Merge pool remainder rows for this category ──────────────────────────
-            const poolRemainders = (_s = poolRemainderMap.get(catName)) !== null && _s !== void 0 ? _s : [];
+            const poolRemainders = (_u = poolRemainderMap.get(catName)) !== null && _u !== void 0 ? _u : [];
             for (const pr of poolRemainders) {
                 openingGross += pr.openingGross;
                 additions += pr.additions;
@@ -1087,6 +1332,27 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
                 depOnAdditions += pr.depOnAdditions;
                 totalRate += pr.rate;
                 rateCount += 1;
+                // Combined export: surface pool-remainder balance as its own row so the
+                // asset subtotal still reconciles to the category total.
+                if (collectAssetRows) {
+                    const prPeriodDep = +(pr.depOnOpening + pr.depOnAdditions).toFixed(2);
+                    assetRowsByCategory.get(catName).push({
+                        assetIdCode: `POOL:${pr.poolCode}`,
+                        assetName: `Asset Pool — ${pr.poolCode} (undigitized balance)`,
+                        serialNumber: "",
+                        openingGross: +pr.openingGross.toFixed(2),
+                        additions: +pr.additions.toFixed(2),
+                        deletions: +pr.deletions.toFixed(2),
+                        closingGross: +pr.closingGross.toFixed(2),
+                        rate: pr.rate,
+                        openingDep: +Math.max(0, pr.closingDep - prPeriodDep).toFixed(2),
+                        periodDep: prPeriodDep,
+                        closingDep: +pr.closingDep.toFixed(2),
+                        netCurrent: +pr.closingNetBlock.toFixed(2),
+                        netPrevious: +pr.openingNetBlock.toFixed(2),
+                        isPoolRow: true,
+                    });
+                }
             }
             // If additions exist but half-year split is incomplete (old pool data or assets without purchaseDate),
             // assign the unclassified portion so totals always match
@@ -1158,6 +1424,9 @@ const getFixedAssetsSchedule = (req, res) => __awaiter(void 0, void 0, void 0, f
         };
         if (exportFormat === "excel") {
             return yield sendFixedAssetsScheduleExcel(res, rows, grandTotal, fiscalYear);
+        }
+        if (exportFormat === "combined") {
+            return yield sendFixedAssetsScheduleCombinedExcel(res, rows, assetRowsByCategory, grandTotal, fiscalYear);
         }
         res.json({
             fiscalYear,
