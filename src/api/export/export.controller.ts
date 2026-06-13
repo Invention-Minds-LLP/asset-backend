@@ -19,10 +19,10 @@ const num = (v: any): number => {
   return Number(v) || 0;
 };
 
-const money = (v: any): string => {
-  const n = num(v);
-  return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-};
+// Amounts are emitted as real numbers (not pre-formatted strings) so Excel
+// SUM/pivots work; columns whose header contains "₹" get CURRENCY_FORMAT
+// applied in buildSheet().
+const money = (v: any): number => Number(num(v).toFixed(2));
 
 const MONTH_NAMES = [
   "", "January", "February", "March", "April", "May", "June",
@@ -115,11 +115,58 @@ function dateRangeOn(f: ExportFilters): { gte?: Date; lte?: Date } | undefined {
 // Excel writers
 // ───────────────────────────────────────────────────────────────────────────
 type Row = (string | number | boolean | null | undefined)[];
-type SheetData = { name: string; headers: string[]; rows: Row[] };
+type SheetData = { name: string; headers: string[]; rows: Row[]; total?: boolean };
 
-function sendExcel(res: Response, filename: string, headers: string[], rows: Row[]): void {
+const CURRENCY_FORMAT = "#,##0.00";
+
+// Column indexes whose header marks an amount column (contains "₹").
+function currencyCols(headers: string[]): number[] {
+  return headers.map((h, i) => (h.includes("₹") ? i : -1)).filter(i => i >= 0);
+}
+
+// Shared sheet builder:
+//   • cells in ₹-columns become typed numbers with CURRENCY_FORMAT so Excel
+//     SUM / pivot tables work;
+//   • when `total` is set, appends a blank spacer + TOTAL row summing every
+//     ₹-column (non-numeric cells like "Unlimited" are ignored).
+function buildSheet(headers: string[], rows: Row[], total?: boolean): XLSX.WorkSheet {
+  const curCols = currencyCols(headers);
+  const dataRows = [...rows];
+  if (total && curCols.length && rows.length) {
+    const sums = new Map<number, number>();
+    for (const c of curCols) {
+      let s = 0;
+      for (const r of rows) {
+        const v = r[c];
+        if (typeof v === "number") s += v;
+      }
+      sums.set(c, Number(s.toFixed(2)));
+    }
+    dataRows.push(new Array(headers.length).fill(""));
+    dataRows.push(headers.map((_, i) => (i === 0 ? "TOTAL" : sums.has(i) ? sums.get(i)! : "")));
+  }
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows]);
+  for (let r = 1; r <= dataRows.length; r++) {
+    for (const c of curCols) {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (cell && typeof cell.v === "number") {
+        cell.t = "n";
+        cell.z = CURRENCY_FORMAT;
+      }
+    }
+  }
+  return ws;
+}
+
+function sendExcel(
+  res: Response,
+  filename: string,
+  headers: string[],
+  rows: Row[],
+  opts: { total?: boolean } = {},
+): void {
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+  const ws = buildSheet(headers, rows, opts.total);
   XLSX.utils.book_append_sheet(wb, ws, "Data");
   const buf: Buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
   res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -167,7 +214,7 @@ function sendMultiSheetExcel(res: Response, filename: string, sheets: SheetData[
   const wb = XLSX.utils.book_new();
   for (const sheet of sheets) {
     const safeName = sheet.name.slice(0, 31); // Excel limit
-    const ws = XLSX.utils.aoa_to_sheet([sheet.headers, ...sheet.rows]);
+    const ws = buildSheet(sheet.headers, sheet.rows, sheet.total);
     XLSX.utils.book_append_sheet(wb, ws, safeName);
   }
   const buf: Buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
@@ -286,7 +333,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             money(r.openingGross), money(r.additions), money(r.deletions), money(r.closingGross),
             money(r.openingAcc), money(r.depForPeriod), money(r.closingAcc), money(r.netBlock),
           ]);
-        return sendExcel(res, `Schedule_II_FA_Register${f.fyLabel ? `_${f.fyLabel}` : ""}`, headers, rows);
+        return sendExcel(res, `Schedule_II_FA_Register${f.fyLabel ? `_${f.fyLabel}` : ""}`, headers, rows, { total: true });
       }
 
       // A2 — IT Act FA Register (asset-wise, with depreciation method/rate)
@@ -316,7 +363,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           money(a.depreciation?.currentBookValue),
           a.status ?? "",
         ]);
-        return sendExcel(res, "IT_Act_FA_Register", headers, rows);
+        return sendExcel(res, "IT_Act_FA_Register", headers, rows, { total: true });
       }
 
       // A2.1 / A2.2 — CFO Fixed Asset Register (Tally-style 24-column, per-asset).
@@ -400,6 +447,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             id: true,
             assetId: true,
             assetName: true,
+            currentLocation: true,
             serialNumber: true,
             invoiceNumber: true,
             purchaseVoucherNo: true,
@@ -456,36 +504,38 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
 
         const headers = [
           "No.",                                       // 0
-          "Description",                               // 1
-          "Category",                                  // 2   ← NEW
-          "Last Acquisition Cost Date",                // 3
-          "Last Depreciation Date",                    // 4
-          "Acquisition Cost before Starting Date",     // 5   ← opening gross
-          "Additions during Period",                   // 6
-          "Deletions during Period",                   // 7
-          "Acquisition Cost at Ending Date",           // 8   ← closing gross
-          "Depreciation before Starting Date",         // 9   ← opening dep
-          "Depreciation for the Period",               // 10
-          "Acc. Depreciation on Disposals",            // 11
-          "Depreciation at Ending Date",               // 12  ← closing dep
-          "Book Value before Starting Date",           // 13
-          "Book Value Net Change",                     // 14
-          "Book Value at Ending Date",                 // 15
-          "Acquisition Cost Account",                  // 16
-          "Accum. Depreciation Account",               // 17
-          "Depreciation Starting Date",                // 18
-          "Depreciation Ending Date",                  // 19
-          "No. of Depreciation Years",                 // 20
-          "Depreciation Method",                       // 21
-          "Straight-Line %",                           // 22
-          "Bill Number",                               // 23
-          "Vendor Name",                               // 24
+          "Asset ID",                                  // 1
+          "Description",                               // 2
+          "Category",                                  // 3
+          "Location",                                  // 4
+          "Last Acquisition Cost Date",                // 5
+          "Last Depreciation Date",                    // 6
+          "Acquisition Cost before Starting Date",     // 7   ← opening gross
+          "Additions during Period",                   // 8
+          "Deletions during Period",                   // 9
+          "Acquisition Cost at Ending Date",           // 10  ← closing gross
+          "Depreciation before Starting Date",         // 11  ← opening dep
+          "Depreciation for the Period",               // 12
+          "Acc. Depreciation on Disposals",            // 13
+          "Depreciation at Ending Date",               // 14  ← closing dep
+          "Book Value before Starting Date",           // 15
+          "Book Value Net Change",                     // 16
+          "Book Value at Ending Date",                 // 17
+          "Acquisition Cost Account",                  // 18
+          "Accum. Depreciation Account",               // 19
+          "Depreciation Starting Date",                // 20
+          "Depreciation Ending Date",                  // 21
+          "Useful Life (Years)",                       // 22
+          "Depreciation Method",                       // 23
+          "Straight-Line %",                           // 24
+          "Bill Number",                               // 25
+          "Vendor Name",                               // 26
         ];
         // Columns whose cells should be numeric & currency-formatted in Excel.
-        const numericCols = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+        const numericCols = [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
         // Column widths (wch units ≈ characters) — keeps the wide register readable.
         const colWidths = [
-          6,  40, 20, 14, 14, 18, 16, 16, 18, 18, 18, 18,
+          6,  14, 40, 20, 18, 14, 14, 18, 16, 16, 18, 18, 18, 18,
           18, 18, 18, 18, 26, 26, 14, 14, 8,  18, 12, 16, 26,
         ];
 
@@ -582,8 +632,10 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           no += 1;
           rows.push([
             no,
+            a.assetId,
             a.assetName,
             a.assetCategory?.name ?? "",
+            a.currentLocation ?? "",
             fmt(acq),
             fmt(lastDepDate),
             acqOpening,
@@ -623,11 +675,13 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
 
         // Blank spacer + grand-total row (xlsx CE can't bold cells; we make the
         // label uppercase so it's still visually distinct).
-        rows.push(new Array(25).fill(""));
+        rows.push(new Array(27).fill(""));
         rows.push([
           "",
+          "",                          // Asset ID column
           `TOTAL (${no} assets)`,
           "",                          // Category column
+          "",                          // Location column
           "",                          // Last Acq Date
           "",                          // Last Dep Date
           totals.opGross,
@@ -673,7 +727,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const rows: Row[] = Array.from(blocks.values())
           .sort((a, b) => a.rate - b.rate)
           .map(b => [b.label, b.count, money(b.gross), money(b.accDep), money(b.bv)]);
-        return sendExcel(res, "Block_of_Assets_Schedule", headers, rows);
+        return sendExcel(res, "Block_of_Assets_Schedule", headers, rows, { total: true });
       }
 
       // A4 — Year-End FA Register Snapshot (every asset, full detail)
@@ -704,7 +758,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           money(a.depreciation?.currentBookValue),
           a.status ?? "", a.physicalCondition ?? "", fmt(a.createdAt),
         ]);
-        return sendExcel(res, "Year_End_FA_Snapshot", headers, rows);
+        return sendExcel(res, "Year_End_FA_Snapshot", headers, rows, { total: true });
       }
 
       // A5 — Pre-Audit Reconciliation
@@ -743,7 +797,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           s.resolvedBy?.name ?? "", fmt(s.resolvedAt),
           s.createdBy?.name ?? "",  fmt(s.createdAt),
         ]);
-        return sendExcel(res, "Pre_Audit_Reconciliation", headers, rows);
+        return sendExcel(res, "Pre_Audit_Reconciliation", headers, rows, { total: true });
       }
 
       // A6 — Auditor's Working Paper Pack (multi-sheet bundle)
@@ -769,6 +823,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const sheets: SheetData[] = [
           {
             name: "Asset Register",
+            total: true,
             headers: ["Asset ID", "Asset Name", "Category", "Purchase Date", "Purchase Cost (₹)", "Acc. Depreciation (₹)", "Net Book Value (₹)", "Status"],
             rows: assets.map((a: any) => [
               a.assetId, a.assetName, a.assetCategory?.name ?? "",
@@ -779,6 +834,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           },
           {
             name: "Depreciation Log",
+            total: true,
             headers: ["Asset ID", "Asset Name", "Period Start", "Period End", "FY", "Depreciation (₹)", "Book Value After (₹)"],
             rows: depLogs.map((l: any) => [
               l.asset?.assetId ?? "", l.asset?.assetName ?? "",
@@ -788,6 +844,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           },
           {
             name: "Additions (Period)",
+            total: true,
             headers: ["Asset ID", "Asset Name", "Category", "Vendor", "Purchase Date", "Cost (₹)", "Invoice No"],
             rows: additions.map((a: any) => [
               a.assetId, a.assetName, a.assetCategory?.name ?? "", a.vendor?.name ?? "",
@@ -796,6 +853,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           },
           {
             name: "Disposals (Period)",
+            total: true,
             headers: ["Asset ID", "Asset Name", "Disposal Type", "Status", "Sale Value (₹)", "Book Value (₹)", "Gain/Loss (₹)", "Date"],
             rows: disposals.map((d: any) => [
               d.asset?.assetId ?? "", d.asset?.assetName ?? "",
@@ -846,7 +904,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           yn(l.halfYearApplied), yn(l.isFirstFY),
           l.batchRun?.runNumber ?? "", l.doneBy?.name ?? "",
         ]);
-        return sendExcel(res, `Depreciation_Log${f.fyLabel ? `_${f.fyLabel}` : ""}`, headers, rows);
+        return sendExcel(res, `Depreciation_Log${f.fyLabel ? `_${f.fyLabel}` : ""}`, headers, rows, { total: true });
       }
 
       // B2 — Asset Additions Register
@@ -874,7 +932,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           a.modeOfProcurement ?? "", fmt(a.purchaseDate), money(a.purchaseCost),
           a.invoiceNumber ?? "", a.grnNumber ?? "", a.purchaseOrderNo ?? "",
         ]);
-        return sendExcel(res, "Asset_Additions", headers, rows);
+        return sendExcel(res, "Asset_Additions", headers, rows, { total: true });
       }
 
       // B3 — Asset Retirements & Disposals (with gain/loss)
@@ -902,7 +960,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           d.buyerName ?? "", d.buyerContact ?? "",
           fmt(d.createdAt), fmt(d.committeeApprovalDate), fmt(d.completedAt),
         ]);
-        return sendExcel(res, "Asset_Retirements", headers, rows);
+        return sendExcel(res, "Asset_Retirements", headers, rows, { total: true });
       }
 
       // B4 — Net Block Movement by Category
@@ -923,7 +981,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const rows: Row[] = Array.from(agg.values())
           .filter(r => r.count > 0)
           .map(r => [r.name, r.count, money(r.gross), money(r.accDep), money(r.netBlock)]);
-        return sendExcel(res, "Net_Block_Movement_by_Category", headers, rows);
+        return sendExcel(res, "Net_Block_Movement_by_Category", headers, rows, { total: true });
       }
 
       // B5 — Fully Depreciated, Still-In-Use
@@ -950,7 +1008,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           money(a.depreciation?.salvageValue),
           a.status ?? "",
         ]);
-        return sendExcel(res, "Fully_Depreciated_In_Use", headers, rows);
+        return sendExcel(res, "Fully_Depreciated_In_Use", headers, rows, { total: true });
       }
 
       // B6 — FA Schedule from Asset Pool (FY + Category)
@@ -971,7 +1029,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           p.poolCode, p.financialYear, p.category?.name ?? "", p.department?.name ?? "",
           p.originalQuantity, money(p.totalPoolCost), p.status, p.description ?? "",
         ]);
-        return sendExcel(res, "FA_Schedule_Pool", headers, rows);
+        return sendExcel(res, "FA_Schedule_Pool", headers, rows, { total: true });
       }
 
       // B7 — Useful Life Remaining
@@ -998,7 +1056,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
               money(a.purchaseCost), money(a.depreciation.currentBookValue),
             ];
           });
-        return sendExcel(res, "Useful_Life_Remaining", headers, rows);
+        return sendExcel(res, "Useful_Life_Remaining", headers, rows, { total: true });
       }
 
       // B8 — Half-Year Convention Applied
@@ -1016,7 +1074,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           l.fyLabel ?? "", money(l.additionsAmount),
           num(l.effectiveRate).toFixed(4), money(l.depreciationAmount),
         ]);
-        return sendExcel(res, "Half_Year_Convention_Applied", headers, rows);
+        return sendExcel(res, "Half_Year_Convention_Applied", headers, rows, { total: true });
       }
 
       // B9 — Depreciation Method Summary
@@ -1034,7 +1092,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         }
         const headers = ["Depreciation Method", "No. of Assets", "Gross Block (₹)", "Accumulated Depreciation (₹)", "Net Block (₹)"];
         const rows: Row[] = Array.from(agg.entries()).map(([m, v]) => [m, v.count, money(v.gross), money(v.accDep), money(v.netBlock)]);
-        return sendExcel(res, "Depreciation_Method_Summary", headers, rows);
+        return sendExcel(res, "Depreciation_Method_Summary", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1064,7 +1122,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           (p.lines || []).map((l: any) => l.hsnCode).filter(Boolean).join(", "),
           (p.lines || []).length,
         ]);
-        return sendExcel(res, "GST_on_Asset_Purchases", headers, rows);
+        return sendExcel(res, "GST_on_Asset_Purchases", headers, rows, { total: true });
       }
 
       // C2 — Capital Goods ITC Register (5-year amortisation per GST rules)
@@ -1090,7 +1148,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             money(tax), money(monthly), money(yearly), fyLabelFromDate(p.poDate),
           ];
         });
-        return sendExcel(res, "Capital_Goods_ITC_Register", headers, rows);
+        return sendExcel(res, "Capital_Goods_ITC_Register", headers, rows, { total: true });
       }
 
       // C3 — TDS on Capital Purchases (from Service Invoice)
@@ -1113,7 +1171,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           i.asset?.assetId ?? "", money(i.netAmount),
           num(i.gstPct).toFixed(2), money(i.gstAmount), money(i.tdsAmount), money(i.payableAmount),
         ]);
-        return sendExcel(res, "TDS_on_Capital_Purchases", headers, rows);
+        return sendExcel(res, "TDS_on_Capital_Purchases", headers, rows, { total: true });
       }
 
       // C4 — Vendor TDS Deductions Summary
@@ -1141,7 +1199,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         }
         const headers = ["Vendor", "GST No", "PAN", "No. of Invoices", "Net Billed (₹)", "TDS Deducted (₹)"];
         const rows: Row[] = Array.from(agg.values()).map(v => [v.name, v.gst, v.pan, v.count, money(v.net), money(v.tds)]);
-        return sendExcel(res, "Vendor_TDS_Deductions", headers, rows);
+        return sendExcel(res, "Vendor_TDS_Deductions", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1183,8 +1241,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           ])
         );
         return sendMultiSheetExcel(res, "Journal_Entries", [
-          { name: "Entries", headers: masterHeaders, rows: masterRows },
-          { name: "Lines",   headers: lineHeaders,   rows: lineRows },
+          { name: "Entries", headers: masterHeaders, rows: masterRows, total: true },
+          { name: "Lines",   headers: lineHeaders,   rows: lineRows,   total: true },
         ]);
       }
 
@@ -1210,7 +1268,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           v.vendor?.name ?? "", v.purchaseVoucher?.voucherNo ?? "",
           v.status, v.approvedBy?.name ?? "", fmt(v.approvedAt), v.narration ?? "",
         ]);
-        return sendExcel(res, "Payment_Vouchers", headers, rows);
+        return sendExcel(res, "Payment_Vouchers", headers, rows, { total: true });
       }
 
       // D3 — Purchase Vouchers
@@ -1233,7 +1291,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           v.vendor?.name ?? "", v.asset?.assetId ?? "",
           v.goodsReceipt?.grnNumber ?? "", v.status, v.narration ?? "",
         ]);
-        return sendExcel(res, "Purchase_Vouchers", headers, rows);
+        return sendExcel(res, "Purchase_Vouchers", headers, rows, { total: true });
       }
 
       // D4 — Chart of Accounts
@@ -1263,7 +1321,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           const credit = (a.creditLines ?? []).reduce((s: number, l: any) => s + num(l.amount), 0);
           return [a.code, a.name, a.type, a.subType ?? "", money(debit), money(credit), money(debit - credit)];
         });
-        return sendExcel(res, "Trial_Balance_FA", headers, rows);
+        return sendExcel(res, "Trial_Balance_FA", headers, rows, { total: true });
       }
 
       // D6 — Asset GL Mapping
@@ -1295,7 +1353,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           e.entryNo ?? e.id, fmt(e.entryDate), e.accountName ?? e.account ?? "",
           e.type ?? "", money(e.amount), e.narration ?? "", fmt(e.createdAt),
         ]);
-        return sendExcel(res, "Manual_Ledger", headers, rows);
+        return sendExcel(res, "Manual_Ledger", headers, rows, { total: true });
       }
 
       // D8 — Sub-Ledger by Asset (depreciation log + cost allocations)
@@ -1327,7 +1385,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             fmt(lastPeriod),
           ];
         });
-        return sendExcel(res, "Sub_Ledger_by_Asset", headers, rows);
+        return sendExcel(res, "Sub_Ledger_by_Asset", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1360,7 +1418,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             r.createdBy?.name ?? "", r.notes ?? "",
           ];
         });
-        return sendExcel(res, "Capex_Budget_vs_Actual", headers, rows);
+        return sendExcel(res, "Capex_Budget_vs_Actual", headers, rows, { total: true });
       }
 
       // E2 — Cost per Asset (Total Cost of Ownership)
@@ -1391,7 +1449,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             money(tco), money(a.depreciation?.currentBookValue),
           ];
         });
-        return sendExcel(res, "Cost_per_Asset_TCO", headers, rows);
+        return sendExcel(res, "Cost_per_Asset_TCO", headers, rows, { total: true });
       }
 
       // E3 — Maintenance Spend by Department / Category
@@ -1418,7 +1476,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const rows: Row[] = Array.from(agg.values())
           .sort((a, b) => b.cost - a.cost)
           .map(v => [v.department, v.category, v.count, money(v.cost)]);
-        return sendExcel(res, "Maintenance_Spend", headers, rows);
+        return sendExcel(res, "Maintenance_Spend", headers, rows, { total: true });
       }
 
       // E4 — Capex vs Opex Split
@@ -1467,7 +1525,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const rows: Row[] = Array.from(agg.values())
           .sort((a, b) => b.value - a.value)
           .map(v => [v.name, v.gst, v.pos, money(v.value)]);
-        return sendExcel(res, "Top_Vendors_by_Spend", headers, rows);
+        return sendExcel(res, "Top_Vendors_by_Spend", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1521,8 +1579,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           ])
         );
         return sendMultiSheetExcel(res, "Purchase_Orders", [
-          { name: "POs",   headers: masterHeaders, rows: masterRows },
-          { name: "Lines", headers: lineHeaders,   rows: lineRows },
+          { name: "POs",   headers: masterHeaders, rows: masterRows, total: true },
+          { name: "Lines", headers: lineHeaders,   rows: lineRows,   total: true },
           { name: "GRNs",  headers: grnHeaders,    rows: grnRows },
         ]);
       }
@@ -1574,7 +1632,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           r.approvedBy?.name ?? "", fmt(r.approvedAt),
           fmt(r.expectedDelivery), fmt(r.createdAt),
         ]);
-        return sendExcel(res, "Material_Requests", headers, rows);
+        return sendExcel(res, "Material_Requests", headers, rows, { total: true });
       }
 
       // F4 — Asset Indents
@@ -1600,7 +1658,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           money(i.estimatedBudget), fmt(i.requiredByDate),
           i.specifications ?? "", i.status ?? "", fmt(i.createdAt),
         ]);
-        return sendExcel(res, "Asset_Indents", headers, rows);
+        return sendExcel(res, "Asset_Indents", headers, rows, { total: true });
       }
 
       // F5 — Store Stock Position
@@ -1655,7 +1713,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             return [s.name, s.stockQuantity ?? "", s.reorderLevel ?? "", money(s.cost), usage, usage === 0 ? "NON-MOVING" : usage <= 2 ? "SLOW" : "MOVING"];
           })
           .filter(r => r[5] !== "MOVING");
-        return sendExcel(res, "Slow_Moving_Spares", headers, rows);
+        return sendExcel(res, "Slow_Moving_Spares", headers, rows, { total: true });
       }
 
       // F8 — Reorder List
@@ -1749,7 +1807,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           const paid = paidByVendor.get(v.id) || 0;
           return [v.name, v.gstNumber ?? "", money(poVal), money(inv), money(paid), money(inv - paid)];
         });
-        return sendExcel(res, "Vendor_Outstanding", headers, rows);
+        return sendExcel(res, "Vendor_Outstanding", headers, rows, { total: true });
       }
 
       // G4 — Price Variance (PO rate vs Invoice rate)
@@ -1763,7 +1821,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           i.invoiceNo, fmt(i.invoiceDate), i.vendor?.name ?? "", i.asset?.assetId ?? "",
           money(i.invoiceAmount ?? i.netAmount), money(i.netAmount), money(i.gstAmount),
         ]);
-        return sendExcel(res, "Price_Variance", headers, rows);
+        return sendExcel(res, "Price_Variance", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1803,8 +1861,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           fmt(c.settledAt), c.reason ?? "",
         ]);
         return sendMultiSheetExcel(res, "Insurance_Policies", [
-          { name: "Policies", headers: policyHeaders, rows: policyRows },
-          { name: "Claims",   headers: claimHeaders,  rows: claimRows },
+          { name: "Policies", headers: policyHeaders, rows: policyRows, total: true },
+          { name: "Claims",   headers: claimHeaders,  rows: claimRows,  total: true },
         ]);
       }
 
@@ -1824,7 +1882,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const rows: Row[] = Array.from(agg.entries())
           .sort()
           .map(([fy, v]) => [fy, v.count, money(v.premium), money(v.coverage)]);
-        return sendExcel(res, "Premium_Paid_by_FY", headers, rows);
+        return sendExcel(res, "Premium_Paid_by_FY", headers, rows, { total: true });
       }
 
       // H3 — Claims Raised vs Settled
@@ -1869,7 +1927,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           fmt(c.claimDate), money(c.claimAmount), c.status,
           c.claimDate ? Math.floor((now - new Date(c.claimDate).getTime()) / (1000 * 60 * 60 * 24)) : "",
         ]);
-        return sendExcel(res, "Pending_Claims", headers, rows);
+        return sendExcel(res, "Pending_Claims", headers, rows, { total: true });
       }
 
       // H5 — Insurance Coverage Gaps (assets without an active policy)
@@ -1889,7 +1947,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           a.assetId, a.assetName, a.assetCategory?.name ?? "", a.department?.name ?? "",
           money(a.purchaseCost), a.status ?? "",
         ]);
-        return sendExcel(res, "Insurance_Coverage_Gaps", headers, rows);
+        return sendExcel(res, "Insurance_Coverage_Gaps", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -1947,7 +2005,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             money(c.contractValue ?? c.value), c.coverage ?? "", c.serviceWindow ?? "",
           ];
         });
-        return sendExcel(res, "Service_Contracts", headers, rows);
+        return sendExcel(res, "Service_Contracts", headers, rows, { total: true });
       }
 
       // I3 — Warranty Utilisation (claims raised vs expired unused)
@@ -1990,7 +2048,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           a.assetId, a.assetName, a.assetCategory?.name ?? "", a.department?.name ?? "",
           money(a.purchaseCost), a.status ?? "",
         ]);
-        return sendExcel(res, "AMC_Coverage_Gaps", headers, rows);
+        return sendExcel(res, "AMC_Coverage_Gaps", headers, rows, { total: true });
       }
 
       // I5 — AMC Renewal Cost Projection (contracts expiring in next 12 months)
@@ -2007,7 +2065,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           c.asset?.assetName ?? "", c.asset?.assetCategory?.name ?? "", c.vendor?.name ?? "",
           money(c.contractValue ?? c.value), fmt(c.endDate), fyLabelFromDate(c.endDate),
         ]);
-        return sendExcel(res, "AMC_Renewal_Projection", headers, rows);
+        return sendExcel(res, "AMC_Renewal_Projection", headers, rows, { total: true });
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -2086,11 +2144,11 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         ]);
 
         return sendMultiSheetExcel(res, "Asset_Master", [
-          { name: "Master",              headers: masterHeaders, rows: masterRows },
+          { name: "Master",              headers: masterHeaders, rows: masterRows, total: true },
           { name: "Assignments",         headers: assignHeaders, rows: assignRows },
           { name: "Sub-Assets",          headers: subHeaders,    rows: subRows },
           { name: "Documents",           headers: docHeaders,    rows: docRows },
-          { name: "Maintenance History", headers: mhHeaders,     rows: mhRows },
+          { name: "Maintenance History", headers: mhHeaders,     rows: mhRows,     total: true },
         ]);
       }
 
@@ -2193,7 +2251,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           e.status, e.assetCondition ?? "", yn(e.dataWiped), e.dataWipeMethod ?? "", fmt(e.createdAt),
         ]);
         return sendMultiSheetExcel(res, "Disposal_EWaste", [
-          { name: "Disposals", headers: dHeaders, rows: dRows },
+          { name: "Disposals", headers: dHeaders, rows: dRows, total: true },
           { name: "E-Waste",   headers: eHeaders, rows: eRows },
         ]);
       }
@@ -2256,8 +2314,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           ])
         );
         return sendMultiSheetExcel(res, "Work_Orders", [
-          { name: "Work Orders", headers: woHeaders, rows: woRows },
-          { name: "WCCs",        headers: wccHeaders, rows: wccRows },
+          { name: "Work Orders", headers: woHeaders, rows: woRows,  total: true },
+          { name: "WCCs",        headers: wccHeaders, rows: wccRows, total: true },
         ]);
       }
 
