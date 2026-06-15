@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
-import { sendEmail } from "../../utilis/notificationHelper";
+import { sendEmail, notify } from "../../utilis/notificationHelper";
 
 // ─── Create Notification ───────────────────────────────────────────────────────
 export const createNotification = async (req: AuthenticatedRequest, res: Response) => {
@@ -27,40 +27,45 @@ export const createNotification = async (req: AuthenticatedRequest, res: Respons
       return;
     }
 
-    const notification = await prisma.notification.create({
-      data: {
-        type,
-        title,
-        message,
-        priority,
-        channel,
-        assetId: assetId ? Number(assetId) : undefined,
-        ticketId: ticketId ? Number(ticketId) : undefined,
-        gatePassId: gatePassId ? Number(gatePassId) : undefined,
-        insuranceId: insuranceId ? Number(insuranceId) : undefined,
-        claimId: claimId ? Number(claimId) : undefined,
-        employeeId: employeeId ? Number(employeeId) : undefined,
-        createdById: req.user?.employeeDbId,
-        dedupeKey: dedupeKey ?? undefined,
-        recipients: recipientIds?.length
-          ? {
-              create: (recipientIds as number[]).map((empId) => ({
-                employeeId: empId,
-              })),
-            }
-          : undefined,
-      },
-      include: {
-        recipients: { include: { employee: { select: { name: true, employeeID: true } } } },
-      },
+    // Recipients: prefer recipientIds[], else the single employeeId.
+    const ids: number[] =
+      Array.isArray(recipientIds) && recipientIds.length
+        ? (recipientIds as any[]).map(Number).filter(Boolean)
+        : employeeId
+        ? [Number(employeeId)]
+        : [];
+
+    if (!ids.length) {
+      res.status(400).json({ message: "recipientIds (or employeeId) is required" });
+      return;
+    }
+
+    // Single delivery path: in-app + push + email, honoring each recipient's
+    // notification preferences and dedupeKey. (Was: in-app only.)
+    const notification = await notify({
+      type,
+      title,
+      message,
+      priority,
+      channel,
+      assetId: assetId ? Number(assetId) : undefined,
+      ticketId: ticketId ? Number(ticketId) : undefined,
+      gatePassId: gatePassId ? Number(gatePassId) : undefined,
+      insuranceId: insuranceId ? Number(insuranceId) : undefined,
+      claimId: claimId ? Number(claimId) : undefined,
+      createdById: req.user?.employeeDbId,
+      dedupeKey: dedupeKey ?? undefined,
+      recipientIds: ids,
     });
+
+    if (!notification) {
+      // No recipients delivered (all opted out of this category, or dedupe hit).
+      res.status(200).json({ success: true, delivered: false });
+      return;
+    }
 
     res.status(201).json(notification);
   } catch (error: any) {
-    if (error?.code === "P2002") {
-      res.status(409).json({ message: "Duplicate notification (dedupeKey already exists)" });
-      return;
-    }
     console.error("createNotification error:", error);
     res.status(500).json({ message: "Failed to create notification" });
   }

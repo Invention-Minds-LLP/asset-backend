@@ -1114,6 +1114,43 @@ export const updateAssetSpecification = async (req: Request, res: Response) => {
   }
 };
 
+// Public, lightweight lookup for the QR scan landing — returns only what's
+// shown before login (name + asset code). The full getAssetScanDetails below
+// is auth-gated; this one intentionally is not.
+export const getAssetScanSummary = async (req: Request, res: Response) => {
+  try {
+    const { assetId } = req.params;
+
+    if (!assetId || !String(assetId).trim()) {
+      res.status(400).json({ message: "assetId is required" });
+      return;
+    }
+
+    const asset = await prisma.asset.findFirst({
+      where: { assetId: String(assetId).trim() },
+      select: { id: true, assetId: true, assetName: true },
+    });
+
+    if (!asset) {
+      res.status(404).json({ success: false, message: "Asset not found" });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: "Asset summary fetched successfully",
+      data: asset,
+    });
+  } catch (err: any) {
+    console.error("getAssetScanSummary error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching asset summary",
+      error: err.message,
+    });
+  }
+};
+
 export const getAssetScanDetails = async (req: Request, res: Response) => {
   try {
     const { assetId } = req.params;

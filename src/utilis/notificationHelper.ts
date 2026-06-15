@@ -63,7 +63,13 @@ export const sendEmail = async (options: {
 
     const transportConfig: any = smtpConfig
       ? { host: smtpConfig.host, port: smtpConfig.port, secure: smtpConfig.secure, auth: { user: smtpConfig.username, pass: smtpConfig.password } }
-      : { host: process.env.SMTP_HOST || "smtp.hostinger.com", port: Number(process.env.SMTP_PORT) || 465, secure: true, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } };
+      : {
+          service: "gmail",
+          host: process.env.SMTP_HOST || "smtp.gmail.com",
+          port: Number(process.env.SMTP_PORT) || 587,
+          secure: false, // 587 uses STARTTLS; secure must be false for that port
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        };
 
     const transporter = nodemailer.createTransport(transportConfig);
     const fromName = smtpConfig?.fromName || "Smart Assets";
@@ -163,6 +169,7 @@ export const notify = async (params: {
   ticketId?: number;
   gatePassId?: number;
   insuranceId?: number;
+  claimId?: number;
   createdById?: number;
   dedupeKey?: string;     // when set, a repeat call with the same key is skipped
   emailSubject?: string;
@@ -173,7 +180,7 @@ export const notify = async (params: {
   bcc?: string[];         // BCC email addresses
 }) => {
   try {
-    if (!params.recipientIds || params.recipientIds.length === 0) return;
+    if (!params.recipientIds || params.recipientIds.length === 0) return null;
 
     const channel = params.channel || "IN_APP";
     const uniqueIds = [...new Set(params.recipientIds)];
@@ -195,7 +202,7 @@ export const notify = async (params: {
       return pref[prefField] !== false;
     });
 
-    if (allowedIds.length === 0) return;
+    if (allowedIds.length === 0) return null;
 
     // Create notification record (+ recipient rows for category-allowed employees)
     let notification;
@@ -211,6 +218,7 @@ export const notify = async (params: {
           ticketId: params.ticketId ?? null,
           gatePassId: params.gatePassId ?? null,
           insuranceId: params.insuranceId ?? null,
+          claimId: params.claimId ?? null,
           createdById: params.createdById ?? null,
           dedupeKey: params.dedupeKey ?? null,
           recipients: {
@@ -220,7 +228,7 @@ export const notify = async (params: {
       });
     } catch (err: any) {
       // P2002 = dedupeKey already used → this alert was already sent. Skip silently.
-      if (err?.code === "P2002") return;
+      if (err?.code === "P2002") return null;
       throw err;
     }
 
@@ -276,9 +284,12 @@ export const notify = async (params: {
         route: "/notifications",
       });
     }
+
+    return notification;
   } catch (err) {
     // Never break the main flow
     console.error("Notification failed (non-blocking):", err);
+    return null;
   }
 };
 

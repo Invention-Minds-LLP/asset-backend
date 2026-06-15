@@ -12,7 +12,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getAssetScanDetails = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.hodApproveAsset = exports.createAsset = exports.getAssetById = exports.getAllAssetsForDropdown = exports.getAllAssets = void 0;
+exports.getAssetScanDetails = exports.getAssetScanSummary = exports.updateAssetSpecification = exports.getAssetSpecifications = exports.createAssetSpecification = exports.updateAssetAssignment = exports.uploadAssetImage = exports.getAssetByAssetId = exports.deleteAsset = exports.updateAsset = exports.hodApproveAsset = exports.createAsset = exports.getAssetById = exports.getAllAssetsForDropdown = exports.getAllAssets = void 0;
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const formidable_1 = __importDefault(require("formidable"));
 const fs_1 = __importDefault(require("fs"));
@@ -1010,6 +1010,40 @@ const updateAssetSpecification = (req, res) => __awaiter(void 0, void 0, void 0,
     }
 });
 exports.updateAssetSpecification = updateAssetSpecification;
+// Public, lightweight lookup for the QR scan landing — returns only what's
+// shown before login (name + asset code). The full getAssetScanDetails below
+// is auth-gated; this one intentionally is not.
+const getAssetScanSummary = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { assetId } = req.params;
+        if (!assetId || !String(assetId).trim()) {
+            res.status(400).json({ message: "assetId is required" });
+            return;
+        }
+        const asset = yield prismaClient_1.default.asset.findFirst({
+            where: { assetId: String(assetId).trim() },
+            select: { id: true, assetId: true, assetName: true },
+        });
+        if (!asset) {
+            res.status(404).json({ success: false, message: "Asset not found" });
+            return;
+        }
+        res.json({
+            success: true,
+            message: "Asset summary fetched successfully",
+            data: asset,
+        });
+    }
+    catch (err) {
+        console.error("getAssetScanSummary error:", err);
+        res.status(500).json({
+            success: false,
+            message: "Error fetching asset summary",
+            error: err.message,
+        });
+    }
+});
+exports.getAssetScanSummary = getAssetScanSummary;
 const getAssetScanDetails = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
         const { assetId } = req.params;

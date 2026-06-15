@@ -2,6 +2,7 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { notify, getAdminIds } from "../../utilis/notificationHelper";
+import { buildAuditMap, computeNextItem } from "../../utilis/auditMap";
 
 // Accept categoryIds as number[], single value, or comma-separated string.
 const normalizeIds = (raw: any): number[] => {
@@ -25,7 +26,8 @@ type AuditorRow =
 // the master don't rewrite history on past audits.
 const buildAuditorRows = async (
   auditorType: any,
-  auditors: any
+  auditors: any,
+  addedById?: number
 ): Promise<{ rows: AuditorRow[]; touchedMasterIds: number[]; error?: string }> => {
   if (!auditorType) return { rows: [], touchedMasterIds: [] }; // optional — no auditor assigned
   if (!["INTERNAL", "EXTERNAL", "BOTH"].includes(auditorType)) {
@@ -36,6 +38,7 @@ const buildAuditorRows = async (
   const internals: AuditorRow[] = [];
   const externals: AuditorRow[] = [];
   const masterIdsToLookup: number[] = [];
+  const inlineExternals: { name: string; email: string; organization: string | null; phone: string | null }[] = [];
 
   for (const a of list) {
     if (a?.type === "INTERNAL" && a.employeeId != null && Number(a.employeeId) > 0) {
@@ -46,18 +49,50 @@ const buildAuditorRows = async (
         masterIdsToLookup.push(Number(a.externalAuditorId));
         continue;
       }
-      // Inline path: existing shape, no master row created.
+      // Inline path: free-typed details. Email is lowercased so it matches the
+      // ExternalAuditor master (which stores lowercase) — that's what the
+      // external login + portal scope check compare against.
       const name = (a.name || "").trim();
-      const email = (a.email || "").trim();
+      const email = (a.email || "").trim().toLowerCase();
       if (name && email) {
-        externals.push({
-          type: "EXTERNAL",
+        inlineExternals.push({
           name,
           email,
           organization: (a.organization || "").trim() || null,
           phone: (a.phone || "").trim() || null,
         });
       }
+    }
+  }
+
+  // Auto-provision an ExternalAuditor master record for each inline external
+  // auditor so they can actually log in (the OTP login + portal require a
+  // master row with status=ACTIVE). Existing records are reactivated and
+  // touched; admin-curated name/org/phone are left intact.
+  if (inlineExternals.length) {
+    if (!addedById) {
+      return { rows: [], touchedMasterIds: [], error: "Unauthorized: cannot register external auditor" };
+    }
+    for (const ext of inlineExternals) {
+      const master = await prisma.externalAuditor.upsert({
+        where: { email: ext.email },
+        update: { status: "ACTIVE", lastUsedAt: new Date() },
+        create: {
+          email: ext.email,
+          name: ext.name,
+          organization: ext.organization,
+          phone: ext.phone,
+          status: "ACTIVE",
+          addedById,
+        },
+      });
+      externals.push({
+        type: "EXTERNAL",
+        name: master.name,
+        email: master.email,
+        organization: master.organization,
+        phone: master.phone,
+      });
     }
   }
 
@@ -259,8 +294,9 @@ export const createAudit = async (
     }
 
     // Build/validate the auditor rows from the chosen type. Async because
-    // master-ref external auditors trigger a DB lookup.
-    const auditorRows = await buildAuditorRows(auditorType, auditors);
+    // master-ref external auditors trigger a DB lookup, and inline external
+    // auditors are auto-provisioned into the ExternalAuditor master.
+    const auditorRows = await buildAuditorRows(auditorType, auditors, req.user?.userId);
     if (auditorRows.error) {
       res.status(400).json({ message: auditorRows.error });
       return;
@@ -689,101 +725,6 @@ export const getScopePreview = async (req: AuthenticatedRequest, res: Response) 
 // Floor map + next-asset routing
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CONNECTOR_RE = /lobby|veranda|verandah|corridor|passage|foyer|hallway|hall|walkway|reception/i;
-const isConnector = (room?: string | null) => !!room && CONNECTOR_RE.test(room);
-
-type MappedItem = {
-  itemId: number;
-  assetId: number;
-  assetCode: string | null;
-  assetName: string | null;
-  category: string;
-  status: string;
-  scannedAt: Date | null;
-  room: string | null;
-  planX: number | null;
-  planY: number | null;
-};
-
-// Shared loader: resolves the audit's floor plan and maps every item to its
-// current pin coordinates (read from the location module's AssetLocation rows).
-const buildAuditMap = async (auditId: number) => {
-  const audit = await prisma.assetAudit.findUnique({ where: { id: auditId } });
-  if (!audit) return null;
-
-  const items = await prisma.assetAuditItem.findMany({
-    where: { auditId },
-    include: {
-      asset: {
-        select: {
-          id: true,
-          assetId: true,
-          assetName: true,
-          assetCategory: { select: { name: true } },
-        },
-      },
-    },
-  });
-
-  const assetIds = items.map((i) => i.assetId);
-  const locs = assetIds.length
-    ? await prisma.assetLocation.findMany({
-        where: { assetId: { in: assetIds }, isActive: true },
-        select: {
-          assetId: true,
-          room: true,
-          planX: true,
-          planY: true,
-          floorPlanId: true,
-        },
-        orderBy: { id: "desc" },
-      })
-    : [];
-
-  // Latest active location per asset.
-  const locByAsset = new Map<number, (typeof locs)[number]>();
-  for (const l of locs) if (!locByAsset.has(l.assetId)) locByAsset.set(l.assetId, l);
-
-  // Resolve the plan: prefer the audit's stored floorPlanId, else the modal
-  // floorPlanId across the items' pins.
-  let planId = (audit as any).floorPlanId ?? null;
-  if (!planId) {
-    const counts = new Map<number, number>();
-    for (const l of locs) if (l.floorPlanId) counts.set(l.floorPlanId, (counts.get(l.floorPlanId) ?? 0) + 1);
-    let best = 0;
-    for (const [pid, n] of counts) if (n > best) { best = n; planId = pid; }
-  }
-  const plan = planId
-    ? await (prisma as any).floorPlan.findUnique({ where: { id: planId } })
-    : null;
-
-  const placed: MappedItem[] = [];
-  const unplaced: MappedItem[] = [];
-  for (const it of items) {
-    const l = locByAsset.get(it.assetId);
-    const base: MappedItem = {
-      itemId: it.id,
-      assetId: it.assetId,
-      assetCode: it.asset?.assetId ?? null,
-      assetName: it.asset?.assetName ?? null,
-      category: it.asset?.assetCategory?.name ?? "",
-      status: it.status,
-      scannedAt: it.scannedAt,
-      room: l?.room ?? null,
-      planX: null,
-      planY: null,
-    };
-    const pinnedHere = l && l.planX != null && l.planY != null && (!plan || l.floorPlanId === plan.id);
-    if (pinnedHere) {
-      placed.push({ ...base, planX: l!.planX, planY: l!.planY });
-    } else {
-      unplaced.push(base);
-    }
-  }
-
-  return { audit, plan, placed, unplaced };
-};
-
 // GET /asset-audit/:id/floor-map
 export const getFloorMap = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -822,117 +763,8 @@ export const getNextItem = async (req: AuthenticatedRequest, res: Response) => {
       res.status(404).json({ message: "Audit not found" });
       return;
     }
-    const { plan, placed } = result;
-
-    const W = plan?.width || 100;
-    const H = plan?.height || 100;
-    const norm = (i: MappedItem) => ({ x: ((i.planX ?? 0) / 100) * W, y: ((i.planY ?? 0) / 100) * H });
-
-    // Pending pinned items, decorated with normalized coords.
-    const pending = placed
-      .filter((i) => i.status === "PENDING")
-      .map((i) => ({ ...i, _x: norm(i).x, _y: norm(i).y }));
-
-    if (!pending.length) {
-      res.json({ data: { next: null, route: [] } });
-      return;
-    }
-
-    const dist = (a: { x: number; y: number }, b: { x: number; y: number }) =>
-      Math.hypot(a.x - b.x, a.y - b.y);
-    type P = (typeof pending)[number];
-    const nearest = (cur: { x: number; y: number }, arr: P[]): P =>
-      arr.reduce<{ item: P; d: number }>(
-        (best, i) => {
-          const d = dist(cur, { x: i._x, y: i._y });
-          return d < best.d ? { item: i, d } : best;
-        },
-        { item: arr[0], d: Infinity }
-      ).item;
-    const centroid = (arr: P[]) => ({
-      x: arr.reduce((s, i) => s + i._x, 0) / arr.length,
-      y: arr.reduce((s, i) => s + i._y, 0) / arr.length,
-    });
-    const groupByRoom = (arr: P[]) => {
-      const m = new Map<string, P[]>();
-      for (const i of arr) {
-        const k = i.room || "__none__";
-        if (!m.has(k)) m.set(k, []);
-        m.get(k)!.push(i);
-      }
-      return [...m.entries()].map(([room, items]) => ({
-        room: room === "__none__" ? null : room,
-        items,
-      }));
-    };
-
-    const pickNext = (cur: { x: number; y: number; room: string | null }, remaining: P[]): P => {
-      // 1. Finish the current (real) room first.
-      if (cur.room && !isConnector(cur.room)) {
-        const sameRoom = remaining.filter((i) => i.room === cur.room);
-        if (sameRoom.length) return nearest(cur, sameRoom);
-      }
-      // 2. Choose the next room by centroid distance; connectors only if nothing else.
-      const groups = groupByRoom(remaining);
-      const real = groups.filter((g) => !isConnector(g.room));
-      const pool = real.length ? real : groups;
-      let bestGroup = pool[0];
-      let bestD = Infinity;
-      for (const g of pool) {
-        const d = dist(cur, centroid(g.items));
-        if (d < bestD) { bestD = d; bestGroup = g; }
-      }
-      return nearest(cur, bestGroup.items);
-    };
-
-    // Starting position.
     const fromItemId = req.query.fromItemId ? Number(req.query.fromItemId) : null;
-    let cur: { x: number; y: number; room: string | null } | null = null;
-    if (fromItemId) {
-      const f = placed.find((i) => i.itemId === fromItemId);
-      if (f) cur = { x: norm(f).x, y: norm(f).y, room: f.room };
-    }
-    if (!cur) {
-      const scanned = placed
-        .filter((i) => i.scannedAt)
-        .sort((a, b) => (b.scannedAt!.getTime() - a.scannedAt!.getTime()));
-      if (scanned[0]) cur = { x: norm(scanned[0]).x, y: norm(scanned[0]).y, room: scanned[0].room };
-    }
-    if (!cur) {
-      // Nothing scanned yet: start from a connector (entrance) centroid if any,
-      // else the pending pin closest to the image origin.
-      const conn = pending.filter((i) => isConnector(i.room));
-      if (conn.length) {
-        cur = { ...centroid(conn), room: null };
-      } else {
-        const start = nearest({ x: 0, y: 0 }, pending);
-        cur = { x: start._x, y: start._y, room: start.room };
-      }
-    }
-
-    // Build the full ordered route.
-    const route: P[] = [];
-    let remaining = [...pending];
-    let pos = cur;
-    while (remaining.length) {
-      const nxt = pickNext(pos, remaining);
-      route.push(nxt);
-      remaining = remaining.filter((i) => i.itemId !== nxt.itemId);
-      pos = { x: nxt._x, y: nxt._y, room: nxt.room };
-    }
-
-    const strip = (i: P) => ({
-      itemId: i.itemId,
-      assetId: i.assetId,
-      assetCode: i.assetCode,
-      assetName: i.assetName,
-      category: i.category,
-      room: i.room,
-      planX: i.planX,
-      planY: i.planY,
-    });
-
-    res.json({ data: { next: strip(route[0]), route: route.map(strip) } });
+    res.json({ data: computeNextItem(result.plan, result.placed, fromItemId) });
   } catch (error: any) {
     console.error("Error computing next audit item:", error);
     res.status(500).json({ message: "Internal server error", error: error.message });

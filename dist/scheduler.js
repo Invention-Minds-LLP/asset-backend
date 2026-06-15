@@ -15,6 +15,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.startScheduler = startScheduler;
 const node_cron_1 = __importDefault(require("node-cron"));
 const cron_jobs_controller_1 = require("./api/cron-jobs/cron-jobs.controller");
+const directory_1 = require("./utilis/directory");
 // In-process daily scheduler for the alert / expiry checks.
 // Runs every day at 08:00 server time. Each individual check is also still
 // exposed as a POST endpoint under /api/cron-jobs for manual / external runs.
@@ -31,4 +32,12 @@ function startScheduler() {
         }
     }));
     console.log("[scheduler] daily alert checks scheduled for 08:00 server time");
+    // Nightly push of Employee IDs + external-auditor emails to the tenant
+    // directory (multi-tenant routing). No-ops if DIRECTORY_URL isn't configured.
+    node_cron_1.default.schedule("30 2 * * *", () => __awaiter(this, void 0, void 0, function* () {
+        console.log("[scheduler] directory sync started");
+        const result = yield (0, directory_1.syncAllToDirectory)();
+        console.log("[scheduler] directory sync result:", JSON.stringify(result));
+    }));
+    console.log("[scheduler] directory sync scheduled for 02:30 server time");
 }

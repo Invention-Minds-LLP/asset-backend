@@ -11,7 +11,10 @@ router.get("/", authMiddleware_1.authenticateToken, assets_controller_1.getAllAs
 router.get("/all-dropdown", authMiddleware_1.authenticateToken, assets_controller_1.getAllAssetsForDropdown);
 router.get('/:assetId', authMiddleware_1.authenticateToken, assets_controller_1.getAssetByAssetId);
 router.patch("/:id/assignment", authMiddleware_1.authenticateToken, assets_controller_1.updateAssetAssignment);
-router.get("/scan/:assetId", assets_controller_1.getAssetScanDetails);
+// Public: name + code only, shown on the QR scan landing before login.
+router.get("/scan/:assetId/summary", assets_controller_1.getAssetScanSummary);
+// Full details require login.
+router.get("/scan/:assetId", authMiddleware_1.authenticateToken, assets_controller_1.getAssetScanDetails);
 router.get("/:id", authMiddleware_1.authenticateToken, assets_controller_1.getAssetById);
 router.post("/", authMiddleware_1.authenticateToken, assets_controller_1.createAsset);
 router.put("/:id", authMiddleware_1.authenticateToken, assets_controller_1.updateAsset);

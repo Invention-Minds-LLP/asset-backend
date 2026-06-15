@@ -2850,7 +2850,13 @@ model AssetAuditItem {
   actualCondition String?
   remarks         String?
 
+  // Set when an internal User (employee auditor) verifies the item.
   verifiedById Int?
+  // Set when an external auditor (ExternalAuditor master row) verifies the
+  // item via /api/external-audit/audit-items/:itemId/verify. Mutually
+  // exclusive with verifiedById in practice; either, both null, or one is
+  // populated depending on who verified.
+  verifiedByExternalAuditorId Int?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt

@@ -12,46 +12,37 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.mobileVerifyOtp = exports.mobileRequestOtp = exports.getMobileProfile = exports.mobileRaiseTicket = exports.getMobileAssetList = exports.getMobileDashboard = exports.mobileLogin = void 0;
+exports.externalVerifyOtp = exports.externalRequestOtp = exports.mobileVerifyOtp = exports.mobileRequestOtp = exports.getMobileProfile = exports.mobileRaiseTicket = exports.getMyAssets = exports.getMobileAssetList = exports.getMobileDashboard = exports.mobileLogin = void 0;
 const crypto_1 = __importDefault(require("crypto"));
 const prismaClient_1 = __importDefault(require("../../prismaClient"));
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const notificationHelper_1 = require("../../utilis/notificationHelper");
 const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
-// Mobile Login — returns token + user profile + assigned assets summary
+// Password login (no OTP) — Employee ID + password. Re-added for QA / Google
+// Play review. Authenticates against User.passwordHash (same password as the
+// web admin) and returns the same shape as the OTP verify success.
 const mobileLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o;
+    var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m;
     try {
-        const { employeeId, password, deviceId, deviceType, pushToken } = req.body;
+        const { employeeId, password, deviceType } = req.body || {};
         if (!employeeId || !password) {
             res.status(400).json({ message: "Employee ID and password are required" });
             return;
         }
         const user = yield prismaClient_1.default.user.findUnique({
             where: { employeeID: employeeId },
-            include: {
-                employee: {
-                    include: {
-                        department: { select: { id: true, name: true } },
-                    },
-                },
-            },
+            include: { employee: { include: { department: { select: { id: true, name: true } } } } },
         });
-        if (!user) {
+        if (!user || !(yield bcrypt_1.default.compare(password, user.passwordHash))) {
+            if (user) {
+                yield prismaClient_1.default.loginHistory.create({
+                    data: { userId: user.id, success: false, ipAddress: req.ip, userAgent: `mobile-pw-${deviceType || "unknown"}` },
+                });
+            }
             res.status(401).json({ message: "Invalid credentials" });
             return;
         }
-        const isValid = yield bcrypt_1.default.compare(password, user.passwordHash);
-        if (!isValid) {
-            // Log failed attempt
-            yield prismaClient_1.default.loginHistory.create({
-                data: { userId: user.id, success: false, ipAddress: req.ip, userAgent: req.headers["user-agent"] || "mobile" },
-            });
-            res.status(401).json({ message: "Invalid credentials" });
-            return;
-        }
-        // Generate token
         const token = jsonwebtoken_1.default.sign({
             userId: user.id,
             employeeID: user.employeeID,
@@ -59,17 +50,13 @@ const mobileLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             role: user.role,
             name: (_b = user.employee) === null || _b === void 0 ? void 0 : _b.name,
             departmentId: (_c = user.employee) === null || _c === void 0 ? void 0 : _c.departmentId,
-        }, JWT_SECRET, { expiresIn: "30d" } // Mobile tokens last longer
-        );
-        // Update last login
+            userType: "INTERNAL",
+        }, JWT_SECRET, { expiresIn: "30d" });
         yield prismaClient_1.default.user.update({ where: { id: user.id }, data: { lastLogin: new Date() } });
-        // Log successful login
         yield prismaClient_1.default.loginHistory.create({
-            data: { userId: user.id, success: true, ipAddress: req.ip, userAgent: `mobile-${deviceType || "unknown"}` },
+            data: { userId: user.id, success: true, ipAddress: req.ip, userAgent: `mobile-pw-${deviceType || "unknown"}` },
         });
-        // Get summary counts for the user
         const employeeDbId = (_d = user.employee) === null || _d === void 0 ? void 0 : _d.id;
-        const departmentId = (_e = user.employee) === null || _e === void 0 ? void 0 : _e.departmentId;
         const [myAssetsCount, myTicketsCount, pendingAckCount, unreadNotifs] = yield Promise.all([
             employeeDbId ? prismaClient_1.default.asset.count({ where: { allottedToId: employeeDbId } }) : Promise.resolve(0),
             employeeDbId ? prismaClient_1.default.ticket.count({ where: { raisedById: employeeDbId, status: { notIn: ["CLOSED", "RESOLVED"] } } }) : Promise.resolve(0),
@@ -81,14 +68,14 @@ const mobileLogin = (req, res) => __awaiter(void 0, void 0, void 0, function* ()
             user: {
                 id: user.id,
                 employeeID: user.employeeID,
-                employeeDbId: (_f = user.employee) === null || _f === void 0 ? void 0 : _f.id,
-                name: (_g = user.employee) === null || _g === void 0 ? void 0 : _g.name,
-                email: (_h = user.employee) === null || _h === void 0 ? void 0 : _h.email,
-                phone: (_j = user.employee) === null || _j === void 0 ? void 0 : _j.phone,
-                designation: (_k = user.employee) === null || _k === void 0 ? void 0 : _k.designation,
+                employeeDbId: (_e = user.employee) === null || _e === void 0 ? void 0 : _e.id,
+                name: (_f = user.employee) === null || _f === void 0 ? void 0 : _f.name,
+                email: (_g = user.employee) === null || _g === void 0 ? void 0 : _g.email,
+                phone: (_h = user.employee) === null || _h === void 0 ? void 0 : _h.phone,
+                designation: (_j = user.employee) === null || _j === void 0 ? void 0 : _j.designation,
                 role: user.role,
-                departmentId: (_l = user.employee) === null || _l === void 0 ? void 0 : _l.departmentId,
-                departmentName: (_o = (_m = user.employee) === null || _m === void 0 ? void 0 : _m.department) === null || _o === void 0 ? void 0 : _o.name,
+                departmentId: (_k = user.employee) === null || _k === void 0 ? void 0 : _k.departmentId,
+                departmentName: (_m = (_l = user.employee) === null || _l === void 0 ? void 0 : _l.department) === null || _m === void 0 ? void 0 : _m.name,
             },
             summary: {
                 myAssets: myAssetsCount,
@@ -132,10 +119,19 @@ const getMobileDashboard = (req, res) => __awaiter(void 0, void 0, void 0, funct
                 id: true, ticketId: true, issueType: true, priority: true, status: true,
                 createdAt: true,
                 asset: { select: { assetId: true, assetName: true } },
+                assignedTo: { select: { name: true } },
             },
             orderBy: { createdAt: "desc" },
             take: 20,
         });
+        // Exact counts (not limited by the take:20 lists above) for summary tiles.
+        const CLOSED_STATUSES = ["CLOSED", "RESOLVED", "TERMINATED"];
+        const RESOLVED_STATUSES = ["RESOLVED", "CLOSED"];
+        const [openTicketsCount, resolvedTicketsCount, totalAssetsCount] = yield Promise.all([
+            prismaClient_1.default.ticket.count({ where: { raisedById: employeeDbId, status: { notIn: CLOSED_STATUSES } } }),
+            prismaClient_1.default.ticket.count({ where: { raisedById: employeeDbId, status: { in: RESOLVED_STATUSES } } }),
+            prismaClient_1.default.asset.count({ where: { allottedToId: employeeDbId } }),
+        ]);
         // Pending acknowledgements
         const pendingAcks = yield prismaClient_1.default.assetAssignment.findMany({
             where: { assignedToId: employeeDbId, status: "PENDING", isActive: true },
@@ -159,6 +155,11 @@ const getMobileDashboard = (req, res) => __awaiter(void 0, void 0, void 0, funct
         res.json({
             myAssets,
             myTickets,
+            counts: {
+                assets: totalAssetsCount,
+                openTickets: openTicketsCount,
+                resolvedTickets: resolvedTicketsCount,
+            },
             pendingAcknowledgements: pendingAcks,
             notifications: notifications.map(n => ({
                 id: n.notification.id,
@@ -197,6 +198,40 @@ const getMobileAssetList = (req, res) => __awaiter(void 0, void 0, void 0, funct
     }
 });
 exports.getMobileAssetList = getMobileAssetList;
+// GET /api/mobile/assets/mine
+// The caller's "own" assets, role-aware:
+//   SUPERVISOR → assets they supervise (supervisorId) OR are allotted (allottedToId)
+//   everyone else (EXECUTIVE / regular staff) → assets allotted to them (allottedToId)
+// Used by the raise-ticket picker for non-privileged roles.
+const getMyAssets = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    var _a, _b;
+    try {
+        const empId = (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId;
+        if (!empId) {
+            res.status(401).json({ message: "Unauthorized" });
+            return;
+        }
+        const role = (((_b = req.user) === null || _b === void 0 ? void 0 : _b.role) || "").toUpperCase();
+        const ownerWhere = role === "SUPERVISOR"
+            ? { OR: [{ supervisorId: empId }, { allottedToId: empId }] }
+            : { allottedToId: empId };
+        const assets = yield prismaClient_1.default.asset.findMany({
+            where: Object.assign(Object.assign({}, ownerWhere), { status: { notIn: ["DISPOSED", "SCRAPPED"] } }),
+            select: {
+                id: true, assetId: true, assetName: true, serialNumber: true,
+                currentLocation: true, status: true,
+                department: { select: { name: true } },
+                assetCategory: { select: { name: true } },
+            },
+            orderBy: { assetName: "asc" },
+        });
+        res.json(assets);
+    }
+    catch (error) {
+        res.status(500).json({ message: "Failed to load assets" });
+    }
+});
+exports.getMyAssets = getMyAssets;
 // Quick raise ticket from mobile
 const mobileRaiseTicket = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     try {
@@ -297,6 +332,8 @@ const OTP_RESEND_COOLDOWN_MS = 60 * 1000; // 60 seconds
 const OTP_MAX_ATTEMPTS = 5;
 const OTP_BCRYPT_COST = 10;
 const INTERNAL_IDENTIFIER_TYPE = "EMPLOYEE_ID";
+const EXTERNAL_IDENTIFIER_TYPE = "EXTERNAL_EMAIL";
+const EXTERNAL_JWT_TTL = "8h";
 // POST /api/mobile/login/request-otp
 // Body: { employeeId }
 // Always responds 200 success — even if the employee doesn't exist or has no
@@ -331,10 +368,18 @@ const mobileRequestOtp = (req, res) => __awaiter(void 0, void 0, void 0, functio
             include: { employee: { select: { email: true, name: true } } },
         });
         const email = (_a = user === null || user === void 0 ? void 0 : user.employee) === null || _a === void 0 ? void 0 : _a.email;
-        // No employee or no email → still respond success so we don't leak which
-        // employee IDs exist. The code below is skipped silently.
-        if (!user || !email) {
+        // Unknown employee ID → still respond success so we don't leak which IDs
+        // exist (enumeration protection).
+        if (!user) {
             res.json({ success: true });
+            return;
+        }
+        // Known employee but no email on file → nowhere to send the OTP, so surface
+        // a clear error instead of a silent success the user can't act on.
+        if (!email) {
+            res.status(400).json({
+                message: "No email is registered for your account. Please contact your administrator to add one.",
+            });
             return;
         }
         const otp = String(crypto_1.default.randomInt(100000, 1000000));
@@ -424,9 +469,6 @@ const mobileVerifyOtp = (req, res) => __awaiter(void 0, void 0, void 0, function
             res.status(401).json({ message: "Account no longer available." });
             return;
         }
-        // Response shape mirrors mobileLogin. Kept duplicated rather than extracted
-        // so the password flow stays bit-identical through Batch A. Will be
-        // reconciled when the password endpoint is removed in Batch B cleanup.
         const token = jsonwebtoken_1.default.sign({
             userId: user.id,
             employeeID: user.employeeID,
@@ -480,3 +522,140 @@ const mobileVerifyOtp = (req, res) => __awaiter(void 0, void 0, void 0, function
     }
 });
 exports.mobileVerifyOtp = mobileVerifyOtp;
+// ── OTP login (external auditors) ─────────────────────────────────────────
+// Parallel flow to the internal one, but the identifier is an email looked up
+// against the ExternalAuditor master (status=ACTIVE only). Tokens carry
+// userType=EXTERNAL and a much shorter TTL than internal employees.
+// POST /api/mobile/external/request-otp
+// Body: { email }
+// Always 200 — even if the email isn't registered or is INACTIVE — so we
+// can't be used to enumerate which addresses are valid auditors.
+const externalRequestOtp = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { email } = req.body || {};
+        if (!email || typeof email !== "string") {
+            res.status(400).json({ message: "Email is required" });
+            return;
+        }
+        const normalizedEmail = email.trim().toLowerCase();
+        // Rate limit check before any other work.
+        const recent = yield prismaClient_1.default.loginOtp.findFirst({
+            where: {
+                identifier: normalizedEmail,
+                identifierType: EXTERNAL_IDENTIFIER_TYPE,
+                createdAt: { gt: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        if (recent) {
+            const retryAfterSec = Math.ceil((recent.createdAt.getTime() + OTP_RESEND_COOLDOWN_MS - Date.now()) / 1000);
+            res.setHeader("Retry-After", String(Math.max(retryAfterSec, 1)));
+            res.status(429).json({ message: "Please wait before requesting another code." });
+            return;
+        }
+        const auditor = yield prismaClient_1.default.externalAuditor.findUnique({
+            where: { email: normalizedEmail },
+        });
+        // Unknown email OR INACTIVE auditor → silent success, no email sent.
+        // Prevents enumeration of which addresses are registered or active.
+        if (!auditor || auditor.status !== "ACTIVE") {
+            res.json({ success: true });
+            return;
+        }
+        const otp = String(crypto_1.default.randomInt(100000, 1000000));
+        const otpHash = yield bcrypt_1.default.hash(otp, OTP_BCRYPT_COST);
+        yield prismaClient_1.default.loginOtp.create({
+            data: {
+                identifier: normalizedEmail,
+                identifierType: EXTERNAL_IDENTIFIER_TYPE,
+                otpHash,
+                expiresAt: new Date(Date.now() + OTP_TTL_MS),
+            },
+        });
+        yield (0, notificationHelper_1.sendEmail)({
+            to: auditor.email,
+            subject: "Your Smart Assets auditor login code",
+            html: `<p>Hi ${auditor.name},</p>
+             <p>Your Smart Assets login code is:</p>
+             <p style="font-size:24px;font-weight:bold;letter-spacing:4px">${otp}</p>
+             <p>This code expires in 5 minutes. If you didn't request it, ignore this email.</p>
+             <p>— Smart Assets</p>`,
+        });
+        res.json({ success: true });
+    }
+    catch (error) {
+        console.error("externalRequestOtp error:", error);
+        res.status(500).json({ message: "Failed to send login code" });
+    }
+});
+exports.externalRequestOtp = externalRequestOtp;
+// POST /api/mobile/external/verify-otp
+// Body: { email, otp }
+// Success → JWT with userType=EXTERNAL, externalAuditorId, email, 8h TTL.
+const externalVerifyOtp = (req, res) => __awaiter(void 0, void 0, void 0, function* () {
+    try {
+        const { email, otp } = req.body || {};
+        if (!email || !otp) {
+            res.status(400).json({ message: "Email and code are required" });
+            return;
+        }
+        const normalizedEmail = String(email).trim().toLowerCase();
+        const record = yield prismaClient_1.default.loginOtp.findFirst({
+            where: {
+                identifier: normalizedEmail,
+                identifierType: EXTERNAL_IDENTIFIER_TYPE,
+                consumedAt: null,
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        if (!record || record.expiresAt < new Date()) {
+            res.status(401).json({ message: "Code expired. Request a new one." });
+            return;
+        }
+        if (record.attempts >= OTP_MAX_ATTEMPTS) {
+            res.status(401).json({ message: "Too many attempts. Request a new code." });
+            return;
+        }
+        const isMatch = yield bcrypt_1.default.compare(String(otp), record.otpHash);
+        if (!isMatch) {
+            yield prismaClient_1.default.loginOtp.update({
+                where: { id: record.id },
+                data: { attempts: { increment: 1 } },
+            });
+            res.status(401).json({ message: "Incorrect code." });
+            return;
+        }
+        // Even if the OTP was right, re-check the auditor's status NOW. If they
+        // were deactivated between request-otp and verify-otp, deny entry.
+        const auditor = yield prismaClient_1.default.externalAuditor.findUnique({
+            where: { email: normalizedEmail },
+        });
+        if (!auditor || auditor.status !== "ACTIVE") {
+            res.status(401).json({ message: "Account no longer available." });
+            return;
+        }
+        yield prismaClient_1.default.loginOtp.update({
+            where: { id: record.id },
+            data: { consumedAt: new Date() },
+        });
+        const token = jsonwebtoken_1.default.sign({
+            userType: "EXTERNAL",
+            externalAuditorId: auditor.id,
+            email: auditor.email,
+        }, JWT_SECRET, { expiresIn: EXTERNAL_JWT_TTL });
+        res.json({
+            token,
+            auditor: {
+                id: auditor.id,
+                email: auditor.email,
+                name: auditor.name,
+                organization: auditor.organization,
+            },
+        });
+    }
+    catch (error) {
+        console.error("externalVerifyOtp error:", error);
+        res.status(500).json({ message: "Login failed" });
+    }
+});
+exports.externalVerifyOtp = externalVerifyOtp;

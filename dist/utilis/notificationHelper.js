@@ -56,7 +56,13 @@ const sendEmail = (options) => __awaiter(void 0, void 0, void 0, function* () {
         const smtpConfig = yield prismaClient_1.default.smtpConfig.findFirst({ where: { isActive: true } });
         const transportConfig = smtpConfig
             ? { host: smtpConfig.host, port: smtpConfig.port, secure: smtpConfig.secure, auth: { user: smtpConfig.username, pass: smtpConfig.password } }
-            : { host: process.env.SMTP_HOST || "smtp.hostinger.com", port: Number(process.env.SMTP_PORT) || 465, secure: true, auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } };
+            : {
+                service: "gmail",
+                host: process.env.SMTP_HOST || "smtp.gmail.com",
+                port: Number(process.env.SMTP_PORT) || 587,
+                secure: false, // 587 uses STARTTLS; secure must be false for that port
+                auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+            };
         const transporter = nodemailer_1.default.createTransport(transportConfig);
         const fromName = (smtpConfig === null || smtpConfig === void 0 ? void 0 : smtpConfig.fromName) || "Smart Assets";
         const fromEmail = (smtpConfig === null || smtpConfig === void 0 ? void 0 : smtpConfig.fromEmail) || process.env.SMTP_USER;
@@ -140,10 +146,10 @@ const PREF_FIELD_BY_TYPE = {
 // Honours each recipient's NotificationPreference (category + email channel) and,
 // when a dedupeKey is supplied, silently skips if the same alert was already sent.
 const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
-    var _a, _b, _c, _d, _e, _f;
+    var _a, _b, _c, _d, _e, _f, _g;
     try {
         if (!params.recipientIds || params.recipientIds.length === 0)
-            return;
+            return null;
         const channel = params.channel || "IN_APP";
         const uniqueIds = [...new Set(params.recipientIds)];
         // ── Apply per-employee notification preferences ──
@@ -163,7 +169,7 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
             return pref[prefField] !== false;
         });
         if (allowedIds.length === 0)
-            return;
+            return null;
         // Create notification record (+ recipient rows for category-allowed employees)
         let notification;
         try {
@@ -178,8 +184,9 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
                     ticketId: (_b = params.ticketId) !== null && _b !== void 0 ? _b : null,
                     gatePassId: (_c = params.gatePassId) !== null && _c !== void 0 ? _c : null,
                     insuranceId: (_d = params.insuranceId) !== null && _d !== void 0 ? _d : null,
-                    createdById: (_e = params.createdById) !== null && _e !== void 0 ? _e : null,
-                    dedupeKey: (_f = params.dedupeKey) !== null && _f !== void 0 ? _f : null,
+                    claimId: (_e = params.claimId) !== null && _e !== void 0 ? _e : null,
+                    createdById: (_f = params.createdById) !== null && _f !== void 0 ? _f : null,
+                    dedupeKey: (_g = params.dedupeKey) !== null && _g !== void 0 ? _g : null,
                     recipients: {
                         create: allowedIds.map(empId => ({ employeeId: empId })),
                     },
@@ -189,7 +196,7 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
         catch (err) {
             // P2002 = dedupeKey already used → this alert was already sent. Skip silently.
             if ((err === null || err === void 0 ? void 0 : err.code) === "P2002")
-                return;
+                return null;
             throw err;
         }
         // Broadcast via SSE to each category-allowed recipient
@@ -243,10 +250,12 @@ const notify = (params) => __awaiter(void 0, void 0, void 0, function* () {
                 route: "/notifications",
             });
         }
+        return notification;
     }
     catch (err) {
         // Never break the main flow
         console.error("Notification failed (non-blocking):", err);
+        return null;
     }
 });
 exports.notify = notify;

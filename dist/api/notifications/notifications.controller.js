@@ -25,40 +25,41 @@ const createNotification = (req, res) => __awaiter(void 0, void 0, void 0, funct
             res.status(400).json({ message: "type and message are required" });
             return;
         }
-        const notification = yield prismaClient_1.default.notification.create({
-            data: {
-                type,
-                title,
-                message,
-                priority,
-                channel,
-                assetId: assetId ? Number(assetId) : undefined,
-                ticketId: ticketId ? Number(ticketId) : undefined,
-                gatePassId: gatePassId ? Number(gatePassId) : undefined,
-                insuranceId: insuranceId ? Number(insuranceId) : undefined,
-                claimId: claimId ? Number(claimId) : undefined,
-                employeeId: employeeId ? Number(employeeId) : undefined,
-                createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
-                dedupeKey: dedupeKey !== null && dedupeKey !== void 0 ? dedupeKey : undefined,
-                recipients: (recipientIds === null || recipientIds === void 0 ? void 0 : recipientIds.length)
-                    ? {
-                        create: recipientIds.map((empId) => ({
-                            employeeId: empId,
-                        })),
-                    }
-                    : undefined,
-            },
-            include: {
-                recipients: { include: { employee: { select: { name: true, employeeID: true } } } },
-            },
+        // Recipients: prefer recipientIds[], else the single employeeId.
+        const ids = Array.isArray(recipientIds) && recipientIds.length
+            ? recipientIds.map(Number).filter(Boolean)
+            : employeeId
+                ? [Number(employeeId)]
+                : [];
+        if (!ids.length) {
+            res.status(400).json({ message: "recipientIds (or employeeId) is required" });
+            return;
+        }
+        // Single delivery path: in-app + push + email, honoring each recipient's
+        // notification preferences and dedupeKey. (Was: in-app only.)
+        const notification = yield (0, notificationHelper_1.notify)({
+            type,
+            title,
+            message,
+            priority,
+            channel,
+            assetId: assetId ? Number(assetId) : undefined,
+            ticketId: ticketId ? Number(ticketId) : undefined,
+            gatePassId: gatePassId ? Number(gatePassId) : undefined,
+            insuranceId: insuranceId ? Number(insuranceId) : undefined,
+            claimId: claimId ? Number(claimId) : undefined,
+            createdById: (_a = req.user) === null || _a === void 0 ? void 0 : _a.employeeDbId,
+            dedupeKey: dedupeKey !== null && dedupeKey !== void 0 ? dedupeKey : undefined,
+            recipientIds: ids,
         });
+        if (!notification) {
+            // No recipients delivered (all opted out of this category, or dedupe hit).
+            res.status(200).json({ success: true, delivered: false });
+            return;
+        }
         res.status(201).json(notification);
     }
     catch (error) {
-        if ((error === null || error === void 0 ? void 0 : error.code) === "P2002") {
-            res.status(409).json({ message: "Duplicate notification (dedupeKey already exists)" });
-            return;
-        }
         console.error("createNotification error:", error);
         res.status(500).json({ message: "Failed to create notification" });
     }
