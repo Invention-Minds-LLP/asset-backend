@@ -9,8 +9,12 @@ import {
   updateConsumable,
   deleteConsumable
 } from "./inventory.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
+
+// All inventory endpoints require a valid login.
+router.use(authenticateToken);
 
 // ================= SPARE PARTS =================
 router.post("/spare-parts", createSparePart);

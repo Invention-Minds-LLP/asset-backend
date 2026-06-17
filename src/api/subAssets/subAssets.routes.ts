@@ -9,8 +9,12 @@ import {
   replaceSubAsset,
   getReplacementHistory,
 } from "./subAssets.controller";
+import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = Router();
+
+// All sub-asset endpoints require a valid login.
+router.use(authenticateToken);
 
 // dropdown options
 router.get("/parent-options", getParentOptions);

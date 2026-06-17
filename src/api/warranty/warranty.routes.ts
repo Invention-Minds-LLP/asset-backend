@@ -21,8 +21,8 @@ router.get("/:id",authenticateToken, getWarrantyById);
 router.post("/",authenticateToken, createWarranty);
 router.put("/:id",authenticateToken, updateWarranty);
 router.delete("/:id",authenticateToken, deleteWarranty);
-router.post("/:assetId/renew", renewWarranty);
-router.get("/:assetId/history", getWarrantyHistoryByAssetId);
+router.post("/:assetId/renew", authenticateToken, renewWarranty);
+router.get("/:assetId/history", authenticateToken, getWarrantyHistoryByAssetId);
 
 
 

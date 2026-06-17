@@ -18,10 +18,10 @@ router.get("/:id",authenticateToken, getAssetById);
 router.post("/",authenticateToken, createAsset);
 router.put("/:id",authenticateToken, updateAsset);
 router.delete("/:id",authenticateToken, deleteAsset);
-router.post('/:assetId/upload-image', uploadAssetImage);
+router.post('/:assetId/upload-image', authenticateToken, uploadAssetImage);
 router.post('/:id/hod-approval', authenticateToken, hodApproveAsset);
-router.get('/:assetId/specifications', getAssetSpecifications);
-router.post('/specifications', createAssetSpecification);
-router.put('/specifications/:id', updateAssetSpecification);
+router.get('/:assetId/specifications', authenticateToken, getAssetSpecifications);
+router.post('/specifications', authenticateToken, createAssetSpecification);
+router.put('/specifications/:id', authenticateToken, updateAssetSpecification);
 
 export default router;

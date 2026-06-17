@@ -84,7 +84,6 @@ import path from "path";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startScheduler } from "./scheduler";
-import { moduleAccessGuard } from "./middleware/moduleAccessMiddleware";
 
 const app = express();
 const port = 3001;
@@ -118,8 +117,14 @@ const loginLimiter = rateLimit({
 });
 app.use("/api/users/login", loginLimiter);
 
-// Server-side module-access enforcement (runs before the feature routers).
-app.use(moduleAccessGuard);
+// NOTE: Module access is enforced on the FRONTEND only (sidebar + route guards).
+// It governs UI navigation — which screens/menus a user can open. It must NOT gate
+// the API, because screens legitimately reuse other modules' endpoints (e.g. the
+// Store screen reads /api/assets), which made a URL-prefix→module guard produce
+// false 403s. API authorization is per-route: authenticateToken + role/ownership
+// scoping inside each controller. The old global `moduleAccessGuard` was removed
+// for this reason. (The middleware file is retained should selective, per-route
+// gating ever be wanted.)
 
 // Mount routers
 app.use("/api/assets", assetRoutes);
