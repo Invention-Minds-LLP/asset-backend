@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { importAssetsExcel, importChecklistWorkbook, downloadLegacyTemplate, downloadChecklistTemplate } from "./asset-import.controller";
 import { downloadSubAssetTemplate, importSubAssetsExcel } from "./sub-asset-import.controller";
 import { downloadLocationTemplate, importLocationsExcel } from "./location-import.controller";
+import { downloadDepartmentTemplate, importDepartmentsExcel } from "./department-import.controller";
 import { authenticateToken } from '../../middleware/authMiddleware';
 import { excelUpload, handleUploadError } from "../../utilis/excelImportHelpers";
 
@@ -19,5 +20,9 @@ router.post('/sub-assets-excel', excelUpload.single('file'), handleUploadError, 
 // ── Asset location bulk import (asset-wise) ──
 router.get('/locations-template', authenticateToken, downloadLocationTemplate);
 router.post('/locations-excel', excelUpload.single('file'), handleUploadError, importLocationsExcel);
+
+// ── Asset department & assignment bulk import (asset-wise) ──
+router.get('/departments-template', authenticateToken, downloadDepartmentTemplate);
+router.post('/departments-excel', excelUpload.single('file'), handleUploadError, importDepartmentsExcel);
 
 export default router;
