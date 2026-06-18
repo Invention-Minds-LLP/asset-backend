@@ -543,30 +543,25 @@ export const checkLowStock = async (_req: Request, res: Response) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ASSET ACTIVATION — IN_STORE → ACTIVE on depreciation start date
+//  ASSET ACTIVATION — IN_STORE → ACTIVE once the installed date is reached
 // ═════════════════════════════════════════════════════════════════════════════
 async function checkAssetActivationInternal() {
   const today = new Date();
   today.setHours(23, 59, 59, 999);
 
-  const candidates = await prisma.assetDepreciation.findMany({
+  const candidates = await prisma.asset.findMany({
     where: {
-      isActive: true,
-      depreciationStart: { lte: today },
-      asset: { status: "IN_STORE" },
+      status: "IN_STORE",
+      installedAt: { not: null, lte: today },
     },
-    select: {
-      assetId: true,
-      depreciationStart: true,
-      asset: { select: { id: true, assetId: true, assetName: true } },
-    },
+    select: { id: true, assetId: true, assetName: true, installedAt: true },
   });
 
   if (!candidates.length) {
     return { type: "assetActivation", activated: 0, assets: [] };
   }
 
-  const assetDbIds = candidates.map(c => c.assetId);
+  const assetDbIds = candidates.map(c => c.id);
 
   await prisma.asset.updateMany({
     where: { id: { in: assetDbIds }, status: "IN_STORE" },
@@ -574,13 +569,13 @@ async function checkAssetActivationInternal() {
   });
 
   const activatedAssets = candidates.map(c => ({
-    id: c.asset.id,
-    assetId: c.asset.assetId,
-    assetName: c.asset.assetName,
-    depreciationStart: c.depreciationStart,
+    id: c.id,
+    assetId: c.assetId,
+    assetName: c.assetName,
+    installedAt: c.installedAt,
   }));
 
-  console.log(`[Asset Activation] ${activatedAssets.length} asset(s) moved to ACTIVE:`,
+  console.log(`[Asset Activation] ${activatedAssets.length} asset(s) moved to ACTIVE (installed date reached):`,
     activatedAssets.map(a => a.assetId).join(", "));
 
   return { type: "assetActivation", activated: activatedAssets.length, assets: activatedAssets };

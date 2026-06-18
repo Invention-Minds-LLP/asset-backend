@@ -993,7 +993,8 @@ export const updateAssetAssignment = async (req: Request, res: Response) => {
       updateData.allottedTo = { connect: { id: Number(allottedToId) } };
     }
 
-    updateData.status = 'ACTIVE'
+    // Assignment alone no longer activates the asset — it stays IN_STORE until the
+    // end user acknowledges or the installed date is reached.
     const updated = await prisma.asset.update({
       where: { id },
       data: updateData,

@@ -399,11 +399,11 @@ export const receiveTransfer = async (req: AuthenticatedRequest, res: Response) 
         // ASSET transfer: relocate within the store network, or deploy into a department.
         if (transferItem.itemType === "ASSET" && transferItem.assetId) {
           if (transfer.transferType === "STORE_TO_DEPARTMENT") {
-            // Deployed into service: asset leaves the store network and goes ACTIVE.
+            // Handed to the department but NOT activated — stays IN_STORE until the
+            // end user acknowledges or the installed date is reached.
             await tx.asset.update({
               where: { id: transferItem.assetId },
               data: {
-                status: "ACTIVE",
                 currentStoreId: null,
                 currentStoreSince: null,
                 ...(transfer.toDepartmentId ? { departmentId: transfer.toDepartmentId } : {}),

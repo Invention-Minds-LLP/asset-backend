@@ -493,6 +493,23 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       }
     }
 
+    // End-user acknowledgement puts the asset into service → ACTIVE.
+    // (HOD / supervisor / target-HOD stages leave it IN_STORE.)
+    if (assignment.stage === AssignmentStage.END_USER) {
+      const a = await prisma.asset.findUnique({
+        where: { id: assignment.assetId },
+        select: { installedAt: true },
+      });
+      await prisma.asset.update({
+        where: { id: assignment.assetId },
+        data: {
+          status: "ACTIVE",
+          // Stamp the in-service date if it wasn't already set.
+          ...(a?.installedAt ? {} : { installedAt: new Date() }),
+        },
+      });
+    }
+
     res.json({
       message: "Acknowledged with checklist",
       assignment: updatedAssignment,
