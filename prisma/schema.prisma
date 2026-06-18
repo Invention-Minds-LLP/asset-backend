@@ -237,6 +237,11 @@ model Asset {
   slaNextDueAt       DateTime?
   slaBreached        Boolean?
   slaCategory        AssetSlaCategory?
+  // CATEGORY = SLA times inherited from the AssetSlaMatrix for this category;
+  // CUSTOM = times entered manually on the asset.
+  slaMode            String?           @default("CATEGORY")
+  // Chosen matrix level (L1/L2/L3) — used to pick the SLA matrix row in CATEGORY mode.
+  slaLevel           String?
   lastSlaServiceDate DateTime?
 
   // Audit / verification

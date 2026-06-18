@@ -27,6 +27,18 @@ export const createAssetSlaMatrix = async (req: Request, res: Response) => {
             return;
         }
 
+        // One SLA rule per (category, slaCategory, level) — otherwise the asset
+        // form's lookup just picks the first match and results are order-dependent.
+        const existing = await prisma.assetSlaMatrix.findFirst({
+            where: { assetCategoryId: Number(assetCategoryId), slaCategory, level }
+        });
+        if (existing) {
+            res.status(400).json({
+                message: `An SLA rule already exists for this category / ${slaCategory} / ${level}. Edit it instead.`
+            });
+            return;
+        }
+
         const created = await prisma.assetSlaMatrix.create({
             data: {
                 assetCategoryId: Number(assetCategoryId),

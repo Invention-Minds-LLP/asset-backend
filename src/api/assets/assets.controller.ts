@@ -674,6 +674,8 @@ export const updateAsset = async (req: Request, res: Response) => {
       expectedLifetimeUnit: data.expectedLifetimeUnit || null,
 
       slaCategory: data.slaCategory || null,
+      slaMode: data.slaMode || "CATEGORY",
+      slaLevel: data.slaLevel || null,
 
 
       // SLA
