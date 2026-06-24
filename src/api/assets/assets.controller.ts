@@ -31,6 +31,10 @@ export const getAllAssets = async (req: Request, res: Response) => {
     const role = user?.role;
     const departmentId = user?.departmentId;
     const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
+    const targetDepartmentId = user?.departmentId;
+    const exportCsv = req.query as any;
+    const page = "1";
+    const limit = "25";
 
     let where: any = {};
 
@@ -44,9 +48,17 @@ export const getAllAssets = async (req: Request, res: Response) => {
     if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
       where = {};
     } else if (role === 'HOD') {
-      where = {
+      where ={
         departmentId: Number(departmentId)
-      };
+      }
+      // where = {
+      //   OR: [
+      //     { departmentId: Number(departmentId) },
+      //   ],
+      //   NOT: {
+      //     targetDepartmentId: Number(departmentId)
+      //   }
+      // }
     } else if (role === 'SUPERVISOR') {
       where = {
         supervisorId: Number(employeeDbId)
@@ -63,6 +75,9 @@ export const getAllAssets = async (req: Request, res: Response) => {
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
 
+    const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
+    const take = parseInt(String(limit));
+
     const assets = await prisma.asset.findMany({
       where,
       include: {
@@ -71,9 +86,31 @@ export const getAllAssets = async (req: Request, res: Response) => {
         department: true,
         allottedTo: true,
         supervisor: true,
-        currentStore: { select: { id: true, name: true, code: true } }
-      }
+        currentStore: { select: { id: true, name: true, code: true } },
+        subAssets: { select: { id: true } }, // to indicate if it has sub-assets without fetching them all
+      },
+      ...(exportCsv !== "true" ? { skip, take } : {}),
     });
+
+    if (exportCsv === "true") {
+      console.log("dowloading");
+      const csvRows = assets.map((a: any) => ({
+        Asset_ID: a.asset?.assetId || "",
+        AssetStorID: a.asset?.storeAssetId || "",
+        AssetRefCode: a.asset?.referenceCode || "",
+        AssetName: a.asset?.assetName || "",
+        Department: a.asset.department?.name || "",
+        AssetType: a.asset?.assetType || "",
+        AssetCategory: a.asset.assetCategory?.name || "",
+      }));
+
+      const headers = Object.keys(csvRows[0] || {}).join(",");
+      const rows = csvRows.map((r: any) => Object.values(r).join(",")).join("\n");
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment: filename=assets.csv");
+      res.send(headers + "\n" + rows);
+      return;
+    }
 
     res.json(assets);
   } catch (error) {
@@ -369,34 +406,34 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
           const latestSched = schedules[0] ?? null;
 
           if (latestSched) {
-            const assetCost      = Number(data.purchaseCost);
-            const poolGross      = Number(latestSched.closingGrossBlock);
-            const poolAccDep     = Number(latestSched.closingAccumulatedDep);
-            const shareRatio     = poolGross > 0 ? assetCost / poolGross : 0;
-            const openingAccDep  = Math.round(poolAccDep * shareRatio);
-            const openingBV      = Math.max(0, assetCost - openingAccDep);
-            const depMethod      = data.depreciationMethod || "SL";
-            const depRate        = data.depreciationRate ?? Number(latestSched.depreciationRate);
-            const depStart       = data.depreciationStart
+            const assetCost = Number(data.purchaseCost);
+            const poolGross = Number(latestSched.closingGrossBlock);
+            const poolAccDep = Number(latestSched.closingAccumulatedDep);
+            const shareRatio = poolGross > 0 ? assetCost / poolGross : 0;
+            const openingAccDep = Math.round(poolAccDep * shareRatio);
+            const openingBV = Math.max(0, assetCost - openingAccDep);
+            const depMethod = data.depreciationMethod || "SL";
+            const depRate = data.depreciationRate ?? Number(latestSched.depreciationRate);
+            const depStart = data.depreciationStart
               ? new Date(data.depreciationStart)
               : (data.purchaseDate ? new Date(data.purchaseDate) : new Date(latestSched.financialYearEnd));
 
             await prisma.assetDepreciation.create({
               data: {
-                assetId:                asset.id,
-                depreciationMethod:     depMethod,
-                depreciationRate:       String(depRate),
-                expectedLifeYears:      data.expectedLifeYears ? Number(data.expectedLifeYears) : 10,
-                depreciationStart:      depStart,
-                depreciationFrequency:  data.depreciationFrequency || "YEARLY",
-                salvageValue:           null,
+                assetId: asset.id,
+                depreciationMethod: depMethod,
+                depreciationRate: String(depRate),
+                expectedLifeYears: data.expectedLifeYears ? Number(data.expectedLifeYears) : 10,
+                depreciationStart: depStart,
+                depreciationFrequency: data.depreciationFrequency || "YEARLY",
+                salvageValue: null,
                 accumulatedDepreciation: String(openingAccDep),
-                currentBookValue:       String(openingBV),
-                lastCalculatedAt:       null,
-                roundOff:               false,
-                decimalPlaces:          2,
-                isActive:               true,
-                createdById:            (req as any).user?.employeeDbId ?? null,
+                currentBookValue: String(openingBV),
+                lastCalculatedAt: null,
+                roundOff: false,
+                decimalPlaces: 2,
+                isActive: true,
+                createdById: (req as any).user?.employeeDbId ?? null,
               },
             });
           }

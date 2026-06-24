@@ -88,6 +88,7 @@ export const getWorkOrderById = async (req: AuthenticatedRequest, res: Response)
       include: {
         asset: { select: { id: true, assetId: true, assetName: true, status: true } },
         ticket: { select: { id: true, ticketId: true, issueType: true, status: true } },
+        // department: { select: {  name: true } },
         materialIssues: {
           include: {
             store: { select: { id: true, name: true } },
@@ -96,6 +97,7 @@ export const getWorkOrderById = async (req: AuthenticatedRequest, res: Response)
           },
           orderBy: { issuedAt: "desc" },
         },
+        // departmentId: true,
         wcc: true,
       },
     });

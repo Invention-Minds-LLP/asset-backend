@@ -22,6 +22,7 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "department-assets", label: "Department Assets",  path: "/department-assets", icon: "pi pi-building",  sortOrder: 7 },
           { name: "revenue-log",       label: "Revenue Log",        path: "/revenue-log",       icon: "pi pi-chart-line",sortOrder: 8 },
           { name: "asset-disposal",    label: "Asset Disposal",     path: "/disposal",          icon: "pi pi-trash",     sortOrder: 9 },
+          { name: "e-waste",           label: "E-Waste Management", path: "/e-waste",           icon: "pi pi-recycle",   sortOrder: 10 },
         ]
       },
       { name: "asset-indent", label: "Asset Indent", icon: "pi pi-list-check", path: "/asset-indent", sortOrder: 4, items: [] },

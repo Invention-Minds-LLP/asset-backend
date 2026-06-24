@@ -159,6 +159,7 @@ export const updateUser = async (req: Request, res: Response) => {
       }
       data.role = r;
     }
+    console.log("updateUser data:", data);
     if (Object.keys(data).length === 0) {
       res.status(400).json({ message: "No editable fields provided" });
       return;
