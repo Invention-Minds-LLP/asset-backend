@@ -46,7 +46,7 @@ export const getAllGoodsReceipts = async (req: AuthenticatedRequest, res: Respon
     if (purchaseOrderId) where.purchaseOrderId = Number(purchaseOrderId);
 
     // Department-based scoping for non-admin users via linked PO
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptPOs = await prisma.purchaseOrder.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },

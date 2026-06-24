@@ -54,7 +54,7 @@ export const getAllWorkOrders = async (req: AuthenticatedRequest, res: Response)
     if (departmentId) where.departmentId = Number(departmentId);
 
     // Department-based scoping for non-admin users
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId && !departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId && !departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 

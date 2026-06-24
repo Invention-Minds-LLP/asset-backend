@@ -688,7 +688,7 @@ export const evaluateAllAssets = async (
     };
 
     // Role-based filtering: scope non-ADMIN users to their department
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 
@@ -877,7 +877,7 @@ export const getDashboardSummary = async (
     };
 
     // Scope non-ADMIN users to their department
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.departmentId = Number(user.departmentId);
     }
 

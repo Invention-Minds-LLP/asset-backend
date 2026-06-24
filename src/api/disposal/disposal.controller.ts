@@ -30,7 +30,7 @@ export const getAllDisposals = async (
 
     // Department-based scoping for non-admin users via asset
     const user = (req as any).user;
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },

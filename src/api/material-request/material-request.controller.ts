@@ -26,7 +26,7 @@ export const listMaterialRequests = async (req: AuthenticatedRequest, res: Respo
     if (status) where.status = String(status);
 
     // Department scoping for non-admin users
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       where.ticket = { departmentId: Number(user.departmentId) };
     }
 

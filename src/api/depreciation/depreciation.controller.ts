@@ -818,8 +818,8 @@ export const getDepreciationSchedule = async (req: AuthenticatedRequest, res: Re
 export const batchDepreciationPreview = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
-    if (req.user.role !== "FINANCE") {
-      res.status(403).json({ message: "Only FINANCE role can access batch depreciation" }); return;
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can access batch depreciation" }); return;
     }
 
     const filters: DepreciationFilters = {
@@ -844,8 +844,8 @@ export const batchDepreciationPreview = async (req: AuthenticatedRequest, res: R
 export const runBatchDepreciation = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
-    if (req.user.role !== "FINANCE") {
-      res.status(403).json({ message: "Only FINANCE role can run batch depreciation" }); return;
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can run batch depreciation" }); return;
     }
 
     const employeeId = req.user.employeeDbId;
@@ -959,8 +959,8 @@ export const getBatchRuns = async (req: AuthenticatedRequest, res: Response) => 
 export const runAssetDepreciation = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
-    if (req.user.role !== "FINANCE") {
-      res.status(403).json({ message: "Only FINANCE role can run per-asset depreciation" }); return;
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can run per-asset depreciation" }); return;
     }
 
     const employeeId = req.user.employeeDbId;
@@ -1116,8 +1116,8 @@ export const getDepreciableAssets = async (req: AuthenticatedRequest, res: Respo
 export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
-    if (req.user.role !== "FINANCE") {
-      res.status(403).json({ message: "Only FINANCE role can approve batch depreciation" }); return;
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can approve batch depreciation" }); return;
     }
 
     const runId = Number(req.params.runId);
@@ -1230,8 +1230,8 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
 export const rejectBatchRun = async (req: AuthenticatedRequest, res: Response) => {
   try {
     if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
-    if (req.user.role !== "FINANCE") {
-      res.status(403).json({ message: "Only FINANCE role can reject batch depreciation" }); return;
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can reject batch depreciation" }); return;
     }
 
     const runId = Number(req.params.runId);

@@ -58,8 +58,8 @@ export async function getVoucher(req: AuthenticatedRequest, res: Response) {
 
 // POST /api/finance/vouchers  (manual entry)
 export async function createVoucher(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { voucherDate, narration, sourceType = "MANUAL", departmentId, lines } = req.body;
   if (!lines || !Array.isArray(lines) || lines.length < 2) {
@@ -106,8 +106,8 @@ export async function createVoucher(req: AuthenticatedRequest, res: Response) {
 
 // POST /api/finance/vouchers/:id/approve
 export async function approveVoucher(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   try {
     const v = await prisma.financeVoucher.findUnique({ where: { id: Number(req.params.id) } });
@@ -129,8 +129,8 @@ export async function approveVoucher(req: AuthenticatedRequest, res: Response) {
 
 // POST /api/finance/vouchers/:id/reject
 export async function rejectVoucher(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { reason } = req.body;
   try {
@@ -150,8 +150,8 @@ export async function rejectVoucher(req: AuthenticatedRequest, res: Response) {
 
 // POST /api/finance/vouchers/:id/void
 export async function voidVoucher(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   try {
     const v = await prisma.financeVoucher.findUnique({ where: { id: Number(req.params.id) } });

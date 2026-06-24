@@ -34,7 +34,7 @@ export const getAllEWaste = async (req: AuthenticatedRequest, res: Response) => 
     if (status) where.status = String(status);
 
     // Scope non-admin to their department
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS", "SECURITY"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS", "SECURITY"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },

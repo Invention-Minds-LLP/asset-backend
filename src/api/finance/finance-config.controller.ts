@@ -20,8 +20,8 @@ export async function getFinanceConfig(req: AuthenticatedRequest, res: Response)
 
 // PUT /api/finance/config
 export async function updateFinanceConfig(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { accountingMode, exportTarget, autoVoucher, requireApproval, fyStartMonth, defaultCurrency } = req.body;
   try {

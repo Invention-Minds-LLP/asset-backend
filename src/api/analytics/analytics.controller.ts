@@ -10,7 +10,7 @@ export const getAssetTCO = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { assetId, categoryId, departmentId, level = "asset" } = req.query;
     const user = (req as any).user;
-    const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role);
+    const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
 
     // ── Single asset TCO ──────────────────────────────────
     if (assetId) {
@@ -277,7 +277,7 @@ export const getAssetTurnover = async (req: AuthenticatedRequest, res: Response)
       status: { notIn: ["DISPOSED", "SCRAPPED"] },
       purchaseCost: { not: null, gt: 0 },
     };
-    const broadAccessTurnover = ["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role);
+    const broadAccessTurnover = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
     if (categoryId) where.assetCategoryId = Number(categoryId);
     if (departmentId) {
       where.departmentId = Number(departmentId);
@@ -370,7 +370,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
     const { departmentId } = req.query;
     const user = (req as any).user;
     // Auto-inject departmentId for non-admin users
-    const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role);
+    const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
     const deptFilter = departmentId
       ? Number(departmentId)
       : (!broadAccess && user?.departmentId ? Number(user.departmentId) : undefined);
@@ -575,7 +575,7 @@ export const getIdleCapitalAnalysis = async (req: AuthenticatedRequest, res: Res
 
     // Department-based scoping for non-admin users
     const deptScope: Prisma.AssetWhereInput = {};
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       deptScope.departmentId = Number(user.departmentId);
     }
 
@@ -777,7 +777,7 @@ export const getCooDashboard = async (req: AuthenticatedRequest, res: Response) 
 
     // Auto-inject departmentId for non-admin users
     const user = (req as any).user;
-    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId ? Number(user.departmentId) : undefined;
+    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId ? Number(user.departmentId) : undefined;
     const deptAssetWhere = deptFilter ? { departmentId: deptFilter } : {};
     const deptWhere = deptFilter ? { departmentId: deptFilter } : {};
     const deptAssetNestedWhere = deptFilter ? { asset: { departmentId: deptFilter } } : {};
@@ -1106,7 +1106,7 @@ export const getCooDashboard = async (req: AuthenticatedRequest, res: Response) 
 export const getInStoreAging = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = (req as any).user;
-    const deptScope = !["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId ? Number(user.departmentId) : undefined;
+    const deptScope = !["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId ? Number(user.departmentId) : undefined;
 
     const assets = await prisma.asset.findMany({
       where: {
@@ -1174,7 +1174,7 @@ export const getUncoveredAssets = async (req: AuthenticatedRequest, res: Respons
     const assetWhere: Prisma.AssetWhereInput = {
       status: { notIn: ["DISPOSED", "SCRAPPED"] },
     };
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       assetWhere.departmentId = Number(user.departmentId);
     }
 
@@ -1281,7 +1281,7 @@ export const getUncoveredAssets = async (req: AuthenticatedRequest, res: Respons
 export const getMaintenanceByCategory = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = (req as any).user;
-    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId
+    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId
       ? Number(user.departmentId) : undefined;
     const deptAssetWhere = deptFilter ? { departmentId: deptFilter } : {};
 
@@ -1405,7 +1405,7 @@ export const getMaintenanceByCategory = async (req: AuthenticatedRequest, res: R
 export const getAssetValueBuckets = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = (req as any).user;
-    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE"].includes(user?.role) && user?.departmentId
+    const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO"].includes(user?.role) && user?.departmentId
       ? { departmentId: Number(user.departmentId) } : {};
 
     const activeWhere = { status: { notIn: ["DISPOSED", "SCRAPPED", "CONDEMNED"] }, ...deptFilter };

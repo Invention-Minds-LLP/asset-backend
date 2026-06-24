@@ -94,7 +94,7 @@ export const getAllWarranties = async (req: Request, res: Response) => {
 
     // Department scoping: non-admin sees only their department's assets
     let scopedAssetIds: number[] | undefined;
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({
         where: { departmentId: Number(user.departmentId) },
         select: { id: true },
@@ -617,7 +617,7 @@ export const getWarrantyStats = async (req: Request, res: Response) => {
 
     // Department scoping
     let scope: any = {};
-    if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
+    if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       const deptAssets = await prisma.asset.findMany({ where: { departmentId: Number(user.departmentId) }, select: { id: true } });
       scope = { assetId: { in: deptAssets.map(a => a.id) } };
     }

@@ -331,7 +331,7 @@ export const getAllTickets = async (req: any, res: Response) => {
       });
       if (!me?.departmentId) { res.json(exportCsv ? [] : []); return; }
       where.departmentId = me.departmentId;
-    } else if (!["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"].includes(role)) {
+    } else if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(role)) {
       where.OR = [{ assignedToId: employeeDbId }, { raisedById: employeeDbId }];
     }
 

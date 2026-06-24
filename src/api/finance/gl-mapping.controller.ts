@@ -39,8 +39,8 @@ export async function getGLMappingByCategory(req: AuthenticatedRequest, res: Res
 
 // PUT /api/finance/gl-mappings/:categoryId  (upsert)
 export async function upsertGLMapping(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const categoryId = Number(req.params.categoryId);
   const { fixedAssetAccountId, accDepAccountId, depExpenseAccountId, disposalAccountId, maintenanceAccountId, insuranceAccountId } = req.body;

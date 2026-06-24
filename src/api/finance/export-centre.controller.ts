@@ -31,8 +31,8 @@ export async function listExportBatches(req: AuthenticatedRequest, res: Response
 
 // POST /api/finance/export-batches
 export async function createExportBatch(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { from, to, exportTarget } = req.body;
   if (!from || !to || !exportTarget) { res.status(400).json({ error: "from, to, exportTarget required" }); return; }
@@ -273,8 +273,8 @@ export async function getChartOfAccounts(req: AuthenticatedRequest, res: Respons
 
 // PUT /api/finance/chart-of-accounts/:id/external-codes
 export async function updateExternalCodes(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { tallyLedger, sapGlCode, zohoAccount } = req.body;
   try {

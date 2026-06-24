@@ -32,9 +32,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
     const departmentId = user?.departmentId;
     const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
     const targetDepartmentId = user?.departmentId;
-    const exportCsv = req.query as any;
-    const page = "1";
-    const limit = "25";
+    const exportCsv = (req.query as any).exportCsv;
 
     let where: any = {};
 
@@ -45,7 +43,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
       if (dept?.name?.toUpperCase().includes('STORE')) isStoreDept = true;
     }
 
-    if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
+    if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'CFO' || role === 'OPERATIONS' || isStoreDept) {
       where = {};
     } else if (role === 'HOD') {
       where ={
@@ -75,33 +73,37 @@ export const getAllAssets = async (req: Request, res: Response) => {
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
 
-    const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
-    const take = parseInt(String(limit));
-
+    // Slim payload: only the columns the list/export actually use. Avoids
+    // pulling every Asset column (incl. Text blobs, qrCode, assetPhoto of
+    // unshown rows) plus full related records for ~4k rows.
     const assets = await prisma.asset.findMany({
       where,
-      include: {
-        assetCategory: true,
-        vendor: true,
-        department: true,
-        allottedTo: true,
-        supervisor: true,
-        currentStore: { select: { id: true, name: true, code: true } },
-        subAssets: { select: { id: true } }, // to indicate if it has sub-assets without fetching them all
+      select: {
+        id: true,
+        assetId: true,
+        storeAssetId: true,
+        referenceCode: true,
+        assetName: true,
+        assetType: true,
+        status: true,
+        assetPhoto: true,
+        hodApprovalStatus: true,
+        assetCategory: { select: { name: true } },
+        department: { select: { name: true } },
+        allottedTo: { select: { name: true } },
       },
-      ...(exportCsv !== "true" ? { skip, take } : {}),
     });
 
     if (exportCsv === "true") {
       console.log("dowloading");
       const csvRows = assets.map((a: any) => ({
-        Asset_ID: a.asset?.assetId || "",
-        AssetStorID: a.asset?.storeAssetId || "",
-        AssetRefCode: a.asset?.referenceCode || "",
-        AssetName: a.asset?.assetName || "",
-        Department: a.asset.department?.name || "",
-        AssetType: a.asset?.assetType || "",
-        AssetCategory: a.asset.assetCategory?.name || "",
+        Asset_ID: a.assetId || "",
+        AssetStorID: a.storeAssetId || "",
+        AssetRefCode: a.referenceCode || "",
+        AssetName: a.assetName || "",
+        Department: a.department?.name || "",
+        AssetType: a.assetType || "",
+        AssetCategory: a.assetCategory?.name || "",
       }));
 
       const headers = Object.keys(csvRows[0] || {}).join(",");

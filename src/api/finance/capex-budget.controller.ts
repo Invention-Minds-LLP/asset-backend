@@ -29,8 +29,8 @@ export async function listCapexBudgets(req: AuthenticatedRequest, res: Response)
 
 // POST /api/finance/capex-budgets
 export async function createCapexBudget(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || (req.user.role !== "FINANCE" && req.user.role !== "CEO_COO")) {
-    res.status(403).json({ error: "FINANCE or CEO_COO role required" }); return;
+  if (!req.user || (req.user.role !== "FINANCE" && req.user.role !== "CFO" && req.user.role !== "CEO_COO")) {
+    res.status(403).json({ error: "FINANCE, CFO, or CEO_COO role required" }); return;
   }
   const { fiscalYear, departmentId, categoryId, budgetAmount, notes } = req.body;
   try {
@@ -48,8 +48,8 @@ export async function createCapexBudget(req: AuthenticatedRequest, res: Response
 
 // PUT /api/finance/capex-budgets/:id
 export async function updateCapexBudget(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || (req.user.role !== "FINANCE" && req.user.role !== "CEO_COO")) {
-    res.status(403).json({ error: "FINANCE or CEO_COO role required" }); return;
+  if (!req.user || (req.user.role !== "FINANCE" && req.user.role !== "CFO" && req.user.role !== "CEO_COO")) {
+    res.status(403).json({ error: "FINANCE, CFO, or CEO_COO role required" }); return;
   }
   const { budgetAmount, notes } = req.body;
   try {

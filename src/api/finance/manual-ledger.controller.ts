@@ -32,8 +32,8 @@ export async function listManualLedger(req: AuthenticatedRequest, res: Response)
 
 // POST /api/finance/manual-ledger
 export async function createManualLedger(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   const { entryDate, narration, amount, entryType, referenceNo, attachmentUrl } = req.body;
   if (!entryDate || !narration || !amount || !entryType) {
@@ -54,8 +54,8 @@ export async function createManualLedger(req: AuthenticatedRequest, res: Respons
 
 // DELETE /api/finance/manual-ledger/:id
 export async function deleteManualLedger(req: AuthenticatedRequest, res: Response) {
-  if (!req.user || req.user.role !== "FINANCE") {
-    res.status(403).json({ error: "FINANCE role required" }); return;
+  if (!req.user || req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+    res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   try {
     await prisma.manualLedgerEntry.delete({ where: { id: Number(req.params.id) } });
