@@ -13,7 +13,7 @@ export const createTemplate = async (req: any, res: Response) => {
   try {
     mustUser(req);
 
-    const { name, description, assetCategoryId, assetId } = req.body;
+    const { name, description, assetCategoryId, assetId, assetName } = req.body;
 
     if (!name) {
        res.status(400).json({ message: "name required" });
@@ -24,9 +24,11 @@ export const createTemplate = async (req: any, res: Response) => {
       data: {
         name,
         description,
-        assetCategoryId: assetCategoryId ?? null,
-        assetId: assetId ?? null,
+        assetCategoryId: assetCategoryId ? Number(assetCategoryId) : null,
       },
+      include: {
+        assetCategory: { select: { name: true } },
+      }
     });
 
     res.status(201).json(template);
@@ -98,7 +100,7 @@ export const createChecklistRun = async (req: any, res: Response) => {
   try {
     const user = mustUser(req);
 
-    const { assetId, templateId, scheduledDue } = req.body;
+    const { assetId, templateId, scheduledDue, assetName } = req.body;
 
     if (!assetId || !templateId || !scheduledDue) {
        res.status(400).json({ message: "Missing required fields" });
@@ -108,6 +110,7 @@ export const createChecklistRun = async (req: any, res: Response) => {
     const run = await prisma.preventiveChecklistRun.create({
       data: {
         assetId,
+        assetName,
         templateId,
         scheduledDue: new Date(scheduledDue),
         status: "DUE",
@@ -158,9 +161,11 @@ export const submitChecklistRun = async (req: any, res: Response) => {
           data: {
             runId,
             itemId: r.itemId,
+            // itemTitle: r.itemTitle,
+            // description: r.description,
             result: r.result,
             remarks: r.remarks ?? null,
-            photoProof: r.photoProof ?? null,
+            // photoProof: r.photoProof ?? null,
           },
         });
       }
@@ -199,6 +204,12 @@ export const getRunsByAsset = async (req: Request, res: Response) => {
           item: true,
         },
       },
+      asset:{
+        select:{
+          assetId: true,
+          assetName: true,
+        }
+      }
     },
     orderBy: { scheduledDue: "desc" },
   });

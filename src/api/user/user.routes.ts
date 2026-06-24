@@ -23,10 +23,11 @@ const resetPasswordSchema = z.object({
 
 router.get("/", authenticateToken, getAllUsers);
 router.post("/", validateBody(createUserSchema), createUser);
-router.put("/:id", authenticateToken, updateUser);
-router.delete("/:id", authenticateToken, deleteUser);
 
 router.put("/reset-password", authenticateToken, validateBody(resetPasswordSchema), resetPassword);
 router.post("/login", validateBody(loginSchema), loginUser);
+
+router.put("/:id", authenticateToken, updateUser);
+router.delete("/:id", authenticateToken, deleteUser);
 
 export default router;

@@ -108,14 +108,14 @@ enum AcknowledgementPurpose {
 }
 
 model Asset {
-  id                Int           @id @default(autoincrement())
-  assetId           String        @unique
+  id           Int         @id @default(autoincrement())
+  assetId      String      @unique
   // Permanent stores reference. Format: STR-{ORG}-{CAT}-FY{YYYY}-{YY}-{NNNNN}
   // Generated when stores user fills basic details, never overwritten.
-  storeAssetId      String?       @unique
-  assetName         String
-  assetType         String
-  assetNature       AssetNature  @default(TANGIBLE)
+  storeAssetId String?     @unique
+  assetName    String
+  assetType    String
+  assetNature  AssetNature @default(TANGIBLE)
 
   // Intangible-specific
   intangibleSubType     IntangibleSubType?
@@ -147,14 +147,14 @@ model Asset {
   installedAt DateTime?
 
   // PURCHASE
-  invoiceNumber        String?
-  purchaseOrderNo      String?
-  purchaseOrderDate    DateTime?
-  deliveryDate         DateTime?
-  purchaseCost         Decimal?  @db.Decimal(12, 2)
-  purchaseVoucherNo    String?
-  purchaseVoucherDate  DateTime?
-  purchaseVoucherId    Int?
+  invoiceNumber       String?
+  purchaseOrderNo     String?
+  purchaseOrderDate   DateTime?
+  deliveryDate        DateTime?
+  purchaseCost        Decimal?  @db.Decimal(12, 2)
+  purchaseVoucherNo   String?
+  purchaseVoucherDate DateTime?
+  purchaseVoucherId   Int?
 
   // DONATION
   donorName        String?
@@ -217,32 +217,32 @@ model Asset {
   status          String
   assetPhoto      String?
 
-  sourceType         String? // NEW | INVENTORY
-  sourceReference    String?
-  remarks            String?           @db.Text
+  sourceType             String? // NEW | INVENTORY
+  sourceReference        String?
+  remarks                String?           @db.Text
   // Sub-asset flagged because its value is >= 40% of its parent's value.
   // Created as a sub-asset anyway, but surfaced in the UI for review.
-  exceedsParentThreshold Boolean? @default(false)
+  exceedsParentThreshold Boolean?          @default(false)
   // Hospital-critical classification (optional)
-  criticalityLevel   String? // LOW | MEDIUM | HIGH | LIFE_SUPPORT
-  riskClass          String? // CLASS_I | CLASS_II | CLASS_III
+  criticalityLevel       String? // LOW | MEDIUM | HIGH | LIFE_SUPPORT
+  riskClass              String? // CLASS_I | CLASS_II | CLASS_III
   // Condition/health (optional)
-  workingCondition   String? // WORKING | PARTIAL | NOT_WORKING
-  healthScore        Int?
-  lastInspectionDate DateTime?
-  slaExpectedValue   Int?
-  slaExpectedUnit    String?
-  slaResolutionValue Int?
-  slaResolutionUnit  String?
-  slaNextDueAt       DateTime?
-  slaBreached        Boolean?
-  slaCategory        AssetSlaCategory?
+  workingCondition       String? // WORKING | PARTIAL | NOT_WORKING
+  healthScore            Int?
+  lastInspectionDate     DateTime?
+  slaExpectedValue       Int?
+  slaExpectedUnit        String?
+  slaResolutionValue     Int?
+  slaResolutionUnit      String?
+  slaNextDueAt           DateTime?
+  slaBreached            Boolean?
+  slaCategory            AssetSlaCategory?
   // CATEGORY = SLA times inherited from the AssetSlaMatrix for this category;
   // CUSTOM = times entered manually on the asset.
-  slaMode            String?           @default("CATEGORY")
+  slaMode                String?           @default("CATEGORY")
   // Chosen matrix level (L1/L2/L3) — used to pick the SLA matrix row in CATEGORY mode.
-  slaLevel           String?
-  lastSlaServiceDate DateTime?
+  slaLevel               String?
+  lastSlaServiceDate     DateTime?
 
   // Audit / verification
   lastAuditDate  DateTime?
@@ -291,8 +291,8 @@ model Asset {
   // Staging store for an IN_STORE (not-yet-deployed) asset — which warehouse/sub-store
   // it physically sits in. Set on goods receipt, updated by store transfers, and
   // cleared when the asset is deployed into a department.
-  currentStoreId Int?
-  currentStore   Store? @relation("AssetCurrentStore", fields: [currentStoreId], references: [id])
+  currentStoreId    Int?
+  currentStore      Store?    @relation("AssetCurrentStore", fields: [currentStoreId], references: [id])
   // When the asset entered its current store — drives "days in store" aging.
   currentStoreSince DateTime?
 
@@ -349,7 +349,7 @@ model Asset {
   workOrderCapexRef WorkOrder?     @relation("CapExAssets", fields: [workOrderCapexId], references: [id])
 
   // Accounts module — purchase vouchers where this asset is referenced as the subject
-  purchaseVouchers PurchaseVoucher[]    @relation("AssetPurchaseVouchers")
+  purchaseVouchers PurchaseVoucher[] @relation("AssetPurchaseVouchers")
 
   // Work orders on this asset
   workOrders      WorkOrder[]           @relation("AssetWorkOrders")
@@ -364,34 +364,34 @@ model Asset {
   // ── Legacy Asset Onboarding ──────────────────────────────────────────────
   // Used when onboarding assets from companies with 2+ years of existing history.
   // Captures all pre-system costs as opening balances so dashboards show true TCO.
-  isLegacyAsset              Boolean?  @default(false)
-  dataAvailableSince         DateTime? // date from which live tracking begins in this system
-  historicalMaintenanceCost  Decimal?  @db.Decimal(12, 2) // total repair/service spend before system
-  historicalSparePartsCost   Decimal?  @db.Decimal(12, 2) // total spare parts/consumables before system
-  historicalOtherCost        Decimal?  @db.Decimal(12, 2) // misc historical costs (transport, calibration etc.)
-  historicalCostAsOf         DateTime? // "costs as of this date" — the closing date of pre-system history
-  historicalCostNote         String?   @db.Text           // free text explanation / source of figures
+  isLegacyAsset             Boolean?  @default(false)
+  dataAvailableSince        DateTime? // date from which live tracking begins in this system
+  historicalMaintenanceCost Decimal?  @db.Decimal(12, 2) // total repair/service spend before system
+  historicalSparePartsCost  Decimal?  @db.Decimal(12, 2) // total spare parts/consumables before system
+  historicalOtherCost       Decimal?  @db.Decimal(12, 2) // misc historical costs (transport, calibration etc.)
+  historicalCostAsOf        DateTime? // "costs as of this date" — the closing date of pre-system history
+  historicalCostNote        String?   @db.Text // free text explanation / source of figures
 
   // ── Legacy Migration (audit cut-off freeze) ─────────────────────────────
   // For 5+ year old institutes onboarding with audited FA register.
   // Engine NEVER computes depreciation for periods before migrationDate.
-  migrationMode               String?   // GRANULAR | PROPORTIONAL | CARRY_AS_NEW
+  migrationMode               String? // GRANULAR | PROPORTIONAL | CARRY_AS_NEW
   migrationDate               DateTime? // cut-off date; opening balances frozen as of this date
   originalPurchaseDate        DateTime? // pre-migration acquisition date (for half-year decision in migration FY)
   originalCost                Decimal?  @db.Decimal(14, 2) // pre-migration gross block
   accDepAtMigration           Decimal?  @db.Decimal(14, 2) // accumulated dep frozen at migration
   openingWdvAtMigration       Decimal?  @db.Decimal(14, 2) // opening WDV at migration (= cost − accDep)
   auditedBookValueAtMigration Decimal?  @db.Decimal(14, 2) // for variance reconciliation
-  auditReferenceId            String?   // auditor sign-off ref (firm + report no)
-  migrationApprovedById       Int?      // CFO who signed off
+  auditReferenceId            String? // auditor sign-off ref (firm + report no)
+  migrationApprovedById       Int? // CFO who signed off
   migrationApprovedAt         DateTime?
   migrationNotes              String?   @db.Text
 
   // ── Asset Pool (phased digitization) ────────────────────────────────────
   // When an asset is extracted from a bulk pool and individually entered, link it back.
-  assetPoolId                Int?
-  financialYearAdded         String?   // FY in which this individual record was digitized, e.g. "FY2023-24"
-  assetPool                  AssetPool? @relation(fields: [assetPoolId], references: [id])
+  assetPoolId        Int?
+  financialYearAdded String? // FY in which this individual record was digitized, e.g. "FY2023-24"
+  assetPool          AssetPool? @relation(fields: [assetPoolId], references: [id])
 
   @@index([status])
   @@index([assetCategoryId])
@@ -551,8 +551,9 @@ model Ticket {
   materialRequests          MaterialRequest[]
   workOrders                WorkOrder[]               @relation("TicketWorkOrders")
 
-  serviceInvoices      ServiceInvoice[]
-  gatePasses           GatePass[]
+  serviceInvoices ServiceInvoice[]
+  gatePasses      GatePass[]
+
   @@index([assetId, createdAt])
   @@index([departmentId, status])
   @@map("ticket")
@@ -590,22 +591,22 @@ model MaintenanceHistory {
   serviceContractId Int?
   serviceContract   ServiceContract? @relation(fields: [serviceContractId], references: [id])
 
-  scheduledDue  DateTime
-  actualDoneAt  DateTime?
-  wasLate       Boolean
-  performedBy   String
+  scheduledDue          DateTime
+  actualDoneAt          DateTime?
+  wasLate               Boolean
+  performedBy           String
   // Who performed the service
-  performedByType       String?  // INTERNAL | VENDOR | EXTERNAL_SERVICE
+  performedByType       String? // INTERNAL | VENDOR | EXTERNAL_SERVICE
   vendorId              Int?
-  vendor                Vendor?  @relation(fields: [vendorId], references: [id])
-  externalServiceCenter String?  // free-text name when no vendor master record
-  notes         String?
-  serviceReport String?
+  vendor                Vendor?   @relation(fields: [vendorId], references: [id])
+  externalServiceCenter String? // free-text name when no vendor master record
+  notes                 String?
+  serviceReport         String?
   // Cost capture for finance excel
-  serviceType   String? // WARRANTY | AMC | CMC | PAID | INTERNAL
-  serviceCost   Decimal?  @db.Decimal(12, 2)
-  partsCost     Decimal?  @db.Decimal(12, 2)
-  totalCost     Decimal?  @db.Decimal(12, 2)
+  serviceType           String? // WARRANTY | AMC | CMC | PAID | INTERNAL
+  serviceCost           Decimal?  @db.Decimal(12, 2)
+  partsCost             Decimal?  @db.Decimal(12, 2)
+  totalCost             Decimal?  @db.Decimal(12, 2)
 
   createdById Int?
   updatedById Int?
@@ -656,24 +657,24 @@ model LoginHistory {
 }
 
 model AssetCategory {
-  id                            Int                            @id @default(autoincrement())
-  name                          String                         @unique
-  code                          String?                        @unique
-  description                   String?
-  isActive                      Boolean                        @default(true)
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  code        String? @unique
+  description String?
+  isActive    Boolean @default(true)
 
   // Whether assets in this category must have a serial number.
   // Set false for non-serialized items (Office Equipment, Furniture, Stationery, etc.)
-  serialRequired                Boolean                        @default(true)
+  serialRequired Boolean @default(true)
 
   // Drives which placement fields the Location tab shows for assets of this category.
   // ROOM (default) | NETWORK | CAMERA | OUTDOOR | GENERIC
-  locationProfile               String?    @default("ROOM")
+  locationProfile String? @default("ROOM")
 
   // Default depreciation config — auto-applied to imported / new assets when not specified
-  defaultDepreciationMethod     String?    // "SL" | "DB"
-  defaultDepreciationRate       Decimal?   @db.Decimal(5, 2)   // e.g. 15.00 for 15%
-  defaultLifeYears              Int?       // useful life in years (mainly for SL)
+  defaultDepreciationMethod     String? // "SL" | "DB"
+  defaultDepreciationRate       Decimal?                       @db.Decimal(5, 2) // e.g. 15.00 for 15%
+  defaultLifeYears              Int? // useful life in years (mainly for SL)
   assets                        Asset[]
   createdById                   Int?
   updatedById                   Int?
@@ -725,7 +726,7 @@ model Department {
   assetPools         AssetPool[]             @relation("AssetPoolDepartment")
 
   // Vendors that serve this department (M2M inverse).
-  vendors            Vendor[]                @relation("VendorDepartments")
+  vendors Vendor[] @relation("VendorDepartments")
 
   @@map("department")
 }
@@ -821,24 +822,24 @@ model Employee {
   batchDepreciationApprovals BatchDepreciationRun[] @relation("BatchApprovedBy")
 
   // Finance Engine relations
-  financeConfigUpdates       FinanceConfig[]        @relation("FinanceConfigUpdatedBy")
-  financeVouchersCreated     FinanceVoucher[]       @relation("FVCreatedBy")
-  financeVouchersApproved    FinanceVoucher[]       @relation("FVApprovedBy")
-  exportBatchesCreated       ExportBatch[]          @relation("ExportBatchCreatedBy")
-  capexBudgetsCreated        CapexBudget[]          @relation("CapexBudgetCreatedBy")
-  manualLedgerEntries        ManualLedgerEntry[]    @relation("MLECreatedBy")
-  assetPoolsCreated          AssetPool[]                        @relation("AssetPoolCreatedBy")
-  assetPoolAdjustments       AssetPoolAdjustment[]              @relation("AssetPoolAdjCreatedBy")
-  assetPoolDepSchedules      AssetPoolDepreciationSchedule[]    @relation("AssetPoolDepSchedCreatedBy")
-  eWasteHodSigns             EWasteRecord[]                     @relation("EWasteHodSign")
-  eWasteOpsSigns             EWasteRecord[]                     @relation("EWasteOpsSign")
-  eWasteSecSigns             EWasteRecord[]                     @relation("EWasteSecSign")
-  eWasteCreated              EWasteRecord[]                     @relation("EWasteCreatedBy")
-  serviceInvoicesCreated     ServiceInvoice[]                   @relation("ServiceInvoiceCreatedBy")
-  serviceInvoicesApproved    ServiceInvoice[]                   @relation("ServiceInvoiceApprovedBy")
-  reconciliationsCreated     ReconciliationSnapshot[]           @relation("ReconCreatedBy")
-  reconciliationsResolved    ReconciliationSnapshot[]           @relation("ReconResolvedBy")
-  deviceTokens               DeviceToken[]
+  financeConfigUpdates    FinanceConfig[]                 @relation("FinanceConfigUpdatedBy")
+  financeVouchersCreated  FinanceVoucher[]                @relation("FVCreatedBy")
+  financeVouchersApproved FinanceVoucher[]                @relation("FVApprovedBy")
+  exportBatchesCreated    ExportBatch[]                   @relation("ExportBatchCreatedBy")
+  capexBudgetsCreated     CapexBudget[]                   @relation("CapexBudgetCreatedBy")
+  manualLedgerEntries     ManualLedgerEntry[]             @relation("MLECreatedBy")
+  assetPoolsCreated       AssetPool[]                     @relation("AssetPoolCreatedBy")
+  assetPoolAdjustments    AssetPoolAdjustment[]           @relation("AssetPoolAdjCreatedBy")
+  assetPoolDepSchedules   AssetPoolDepreciationSchedule[] @relation("AssetPoolDepSchedCreatedBy")
+  eWasteHodSigns          EWasteRecord[]                  @relation("EWasteHodSign")
+  eWasteOpsSigns          EWasteRecord[]                  @relation("EWasteOpsSign")
+  eWasteSecSigns          EWasteRecord[]                  @relation("EWasteSecSign")
+  eWasteCreated           EWasteRecord[]                  @relation("EWasteCreatedBy")
+  serviceInvoicesCreated  ServiceInvoice[]                @relation("ServiceInvoiceCreatedBy")
+  serviceInvoicesApproved ServiceInvoice[]                @relation("ServiceInvoiceApprovedBy")
+  reconciliationsCreated  ReconciliationSnapshot[]        @relation("ReconCreatedBy")
+  reconciliationsResolved ReconciliationSnapshot[]        @relation("ReconResolvedBy")
+  deviceTokens            DeviceToken[]
 
   @@map("employee")
 }
@@ -869,8 +870,8 @@ model Vendor {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @default(now()) @updatedAt
 
-  serviceContracts    ServiceContract[]
-  spareParts          SparePart[]
+  serviceContracts     ServiceContract[]
+  spareParts           SparePart[]
   maintenanceHistories MaintenanceHistory[]
 
   calibrationSchedules    CalibrationSchedule[]   @relation("VendorCalibrationSchedule")
@@ -879,9 +880,9 @@ model Vendor {
   warranties              Warranty[]
   purchaseOrders          PurchaseOrder[]
   goodsReceipts           GoodsReceipt[]
-  purchaseVouchers        PurchaseVoucher[] @relation("VendorPurchaseVouchers")
-  paymentVouchers         PaymentVoucher[]  @relation("VendorPaymentVouchers")
-  serviceInvoices         ServiceInvoice[]  @relation("ServiceInvoiceVendor")
+  purchaseVouchers        PurchaseVoucher[]       @relation("VendorPurchaseVouchers")
+  paymentVouchers         PaymentVoucher[]        @relation("VendorPaymentVouchers")
+  serviceInvoices         ServiceInvoice[]        @relation("ServiceInvoiceVendor")
 
   // Departments this vendor serves. Drives department-scoped vendor performance.
   departments Department[] @relation("VendorDepartments")
@@ -950,20 +951,20 @@ model DepreciationLog {
   bookValueAfter     Decimal  @db.Decimal(12, 2)
 
   // ── Split-method breakdown (Indian IT Act compliant) ────────────────────
-  fyLabel            String?  // e.g. "FY2024-25"
-  openingWdv         Decimal? @db.Decimal(14, 2) // WDV at start of this period (= prior closing)
-  depOnOpening       Decimal? @db.Decimal(14, 2) // dep computed on opening WDV @ full rate
-  depOnAdditions     Decimal? @db.Decimal(14, 2) // dep on additions in this FY (full or half rate)
-  additionsAmount    Decimal? @db.Decimal(14, 2) // gross additions in this FY (per asset = its cost in Y1)
-  effectiveRate      Decimal? @db.Decimal(8, 4)  // final % rate applied (after half-year adjust)
-  halfYearApplied    Boolean? @default(false)    // true if 50% rule used
-  isFirstFY          Boolean? @default(false)    // true if this is the asset's first FY of dep
-  openingWdvSource   String?  // PRIOR_LOG | PURCHASE_COST | MIGRATION
+  fyLabel          String? // e.g. "FY2024-25"
+  openingWdv       Decimal? @db.Decimal(14, 2) // WDV at start of this period (= prior closing)
+  depOnOpening     Decimal? @db.Decimal(14, 2) // dep computed on opening WDV @ full rate
+  depOnAdditions   Decimal? @db.Decimal(14, 2) // dep on additions in this FY (full or half rate)
+  additionsAmount  Decimal? @db.Decimal(14, 2) // gross additions in this FY (per asset = its cost in Y1)
+  effectiveRate    Decimal? @db.Decimal(8, 4) // final % rate applied (after half-year adjust)
+  halfYearApplied  Boolean? @default(false) // true if 50% rule used
+  isFirstFY        Boolean? @default(false) // true if this is the asset's first FY of dep
+  openingWdvSource String? // PRIOR_LOG | PURCHASE_COST | MIGRATION
 
   doneById Int?
   doneBy   Employee? @relation(fields: [doneById], references: [id])
 
-  reason String?
+  reason     String?
   batchRunId Int?
   batchRun   BatchDepreciationRun? @relation(fields: [batchRunId], references: [id])
 
@@ -976,20 +977,20 @@ model DepreciationLog {
 // ── Batch Depreciation Run ─────────────────────────────────────────────────
 // Each run starts as DRAFT, CFO approves → APPROVED (values committed), or REJECTED
 model BatchDepreciationRun {
-  id          Int      @id @default(autoincrement())
-  runNumber   String   @unique // BDR-2025-001
-  status      String   @default("DRAFT") // DRAFT | APPROVED | REJECTED
-  fiscalYear  Int      // e.g. 2025 = FY 2025-26
-  periodLabel String?  // e.g. "FY 2025-26 Q1"
+  id          Int     @id @default(autoincrement())
+  runNumber   String  @unique // BDR-2025-001
+  status      String  @default("DRAFT") // DRAFT | APPROVED | REJECTED
+  fiscalYear  Int // e.g. 2025 = FY 2025-26
+  periodLabel String? // e.g. "FY 2025-26 Q1"
 
-  totalAssets      Int     @default(0)
-  totalDepreciation Decimal @db.Decimal(14, 2) @default(0)
+  totalAssets       Int     @default(0)
+  totalDepreciation Decimal @default(0) @db.Decimal(14, 2)
 
-  notes          String?  @db.Text
+  notes           String? @db.Text
   rejectionReason String? @db.Text
 
-  runById    Int
-  runBy      Employee @relation("BatchRunBy", fields: [runById], references: [id])
+  runById Int
+  runBy   Employee @relation("BatchRunBy", fields: [runById], references: [id])
 
   approvedById Int?
   approvedBy   Employee? @relation("BatchApprovedBy", fields: [approvedById], references: [id])
@@ -999,7 +1000,7 @@ model BatchDepreciationRun {
   updatedAt DateTime @default(now()) @updatedAt
 
   logs            DepreciationLog[]
-  financeVouchers FinanceVoucher[] @relation("VoucherBatchRun")
+  financeVouchers FinanceVoucher[]  @relation("VoucherBatchRun")
 
   @@map("batchdepreciationrun")
 }
@@ -1112,21 +1113,21 @@ model AssetLocation {
   // they actually sit. All optional; existing room-based assets are unaffected.
   // Per-asset profile chosen on the Location tab (overrides the category default).
   placementProfile String? // ROOM | CAMERA | NETWORK | OUTDOOR | GENERIC
-  placementType  String?  // ROOM | RACK | MOUNTED | AREA | OUTDOOR
-  placementLabel String?  @db.Text // free text, e.g. "Above main entrance, facing reception"
-  mountType      String?  // WALL | CEILING | POLE | DESK | RACK | FLOOR
-  rackCode       String?  // network gear: rack identifier
-  rackUnit       String?  // network gear: U-position, e.g. "U23"
-  portRef        String?  // network gear: panel/port reference
-  coverageArea   String?  @db.Text // cameras/sensors: area covered
-  latitude       Decimal? @db.Decimal(10, 7) // outdoor / GPS-tagged assets
-  longitude      Decimal? @db.Decimal(10, 7)
+  placementType    String? // ROOM | RACK | MOUNTED | AREA | OUTDOOR
+  placementLabel   String?  @db.Text // free text, e.g. "Above main entrance, facing reception"
+  mountType        String? // WALL | CEILING | POLE | DESK | RACK | FLOOR
+  rackCode         String? // network gear: rack identifier
+  rackUnit         String? // network gear: U-position, e.g. "U23"
+  portRef          String? // network gear: panel/port reference
+  coverageArea     String?  @db.Text // cameras/sensors: area covered
+  latitude         Decimal? @db.Decimal(10, 7) // outdoor / GPS-tagged assets
+  longitude        Decimal? @db.Decimal(10, 7)
 
   // ── Floor-plan pin (Phase 3) — position on an uploaded floor-plan image ──
   floorPlanId Int?
   floorPlan   FloorPlan? @relation(fields: [floorPlanId], references: [id])
-  planX       Float?  // pin X as a 0–100 percentage of image width
-  planY       Float?  // pin Y as a 0–100 percentage of image height
+  planX       Float? // pin X as a 0–100 percentage of image width
+  planY       Float? // pin Y as a 0–100 percentage of image height
 
   employeeResponsibleId Int?
   employeeResponsible   Employee? @relation(fields: [employeeResponsibleId], references: [id])
@@ -1164,15 +1165,15 @@ model AssetLocation {
 // ── Floor-plan images (Phase 3) — one per branch/block/floor ──
 // Assets are pinned onto these via AssetLocation.floorPlanId + planX/planY.
 model FloorPlan {
-  id       Int    @id @default(autoincrement())
+  id       Int     @id @default(autoincrement())
   name     String
   branchId Int
-  branch   Branch @relation(fields: [branchId], references: [id])
+  branch   Branch  @relation(fields: [branchId], references: [id])
   block    String?
   floor    String?
 
-  imageUrl String  // served from /uploads/floor-plans/...
-  width    Int?    // natural image width (px) — optional, for scaling
+  imageUrl String // served from /uploads/floor-plans/...
+  width    Int? // natural image width (px) — optional, for scaling
   height   Int?
 
   isActive    Boolean  @default(true)
@@ -1275,21 +1276,22 @@ model MaintenanceSchedule {
   frequencyValue Int
   frequencyUnit  String // DAYS | MONTHS | YEARS
 
-  startDate DateTime?  // the date from which the schedule begins
+  startDate DateTime? // the date from which the schedule begins
   nextDueAt DateTime
-  isActive  Boolean  @default(true)
+  isActive  Boolean   @default(true)
 
   createdBy   String?
   createdById Int?
   reason      String?
-  description String?  @db.Text
+  description String? @db.Text
 
   reminderDays Int? @default(7)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  serviceInvoices      ServiceInvoice[]
+  serviceInvoices ServiceInvoice[]
+
   @@index([assetId, nextDueAt])
   @@map("maintenanceschedule")
 }
@@ -1421,15 +1423,15 @@ model GatePass {
   vehicleType    String? // HOSPITAL_VEHICLE | OUTSIDE_VEHICLE
 
   // ── Approval workflow (mandatory for both RETURNABLE & NON_RETURNABLE) ─────
-  approvalStatus  String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPROVED
-  requestedById   Int?
-  requestedBy     Employee? @relation("GatePassRequester", fields: [requestedById], references: [id])
-  requestedAt     DateTime?
-  approvedById    Int?
+  approvalStatus     String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPROVED
+  requestedById      Int?
+  requestedBy        Employee? @relation("GatePassRequester", fields: [requestedById], references: [id])
+  requestedAt        DateTime?
+  approvedById       Int?
   approvedByEmployee Employee? @relation("GatePassApprover", fields: [approvedById], references: [id])
-  approvedAt      DateTime?
-  approvalRemarks String?
-  rejectionReason String?
+  approvedAt         DateTime?
+  approvalRemarks    String?
+  rejectionReason    String?
 
   // Free-text fallbacks (kept for backwards compat with existing rows)
   approvedBy String?
@@ -1522,7 +1524,7 @@ model SparePart {
   usages               SparePartUsage[]
   transactions         InventoryTransaction[]
   subAssetReplacements SubAssetReplacement[]
-  materialIssues       MaterialIssue[]  @relation("MaterialIssueSparePart")
+  materialIssues       MaterialIssue[]        @relation("MaterialIssueSparePart")
 
   @@index([vendorId])
   @@map("sparepart")
@@ -1600,7 +1602,7 @@ model Consumable {
 
   batches        ConsumableBatch[]
   transactions   InventoryTransaction[]
-  materialIssues MaterialIssue[] @relation("MaterialIssueConsumable")
+  materialIssues MaterialIssue[]        @relation("MaterialIssueConsumable")
 
   @@unique([name])
   @@map("consumable")
@@ -1887,7 +1889,7 @@ model SmtpConfig {
 model LoginOtp {
   id             Int       @id @default(autoincrement())
   identifier     String
-  identifierType String    // "EMPLOYEE_ID" | "EXTERNAL_EMAIL"
+  identifierType String // "EMPLOYEE_ID" | "EXTERNAL_EMAIL"
   otpHash        String
   expiresAt      DateTime
   attempts       Int       @default(0)
@@ -1913,7 +1915,7 @@ model ExternalAuditor {
   organization String?
   phone        String?
   status       String    @default("ACTIVE") // ACTIVE | INACTIVE
-  addedById    Int       // User.id of the admin who added this auditor
+  addedById    Int // User.id of the admin who added this auditor
   lastUsedAt   DateTime? // updated each time the auditor is attached to a new audit
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @default(now()) @updatedAt
@@ -2087,7 +2089,7 @@ model CalibrationSchedule {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  histories CalibrationHistory[]
+  histories       CalibrationHistory[]
   serviceInvoices ServiceInvoice[]
 
   @@index([assetId, nextDueAt])
@@ -2670,12 +2672,11 @@ model AssetDisposal {
   rejectedAt      DateTime?
   rejectionReason String?   @db.Text
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @default(now()) @updatedAt
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @default(now()) @updatedAt
+  eWasteRecord EWasteRecord?
 
   @@index([assetId])
-  eWasteRecord  EWasteRecord?
-
   @@index([status])
   @@map("assetdisposal")
 }
@@ -2685,9 +2686,9 @@ model AssetDisposal {
 // Triggered automatically when AssetDisposal (type=SCRAP) is COMPLETED.
 // ═══════════════════════════════════════════════════════════════════════════════
 model EWasteRecord {
-  id              Int          @id @default(autoincrement())
-  eWasteRefNo     String       @unique // EW-2026-00001
-  assetDisposalId Int          @unique
+  id              Int           @id @default(autoincrement())
+  eWasteRefNo     String        @unique // EW-2026-00001
+  assetDisposalId Int           @unique
   assetDisposal   AssetDisposal @relation(fields: [assetDisposalId], references: [id])
   assetId         Int
   asset           Asset         @relation(fields: [assetId], references: [id])
@@ -2701,23 +2702,23 @@ model EWasteRecord {
   assetDescription String? @db.Text
 
   // Data sanitisation (for IT assets)
-  dataWiped          Boolean @default(false)
-  dataWipeMethod     String? // DBAN | SECURE_ERASE | PHYSICAL_DESTRUCTION | NA
-  dataWipeCertUrl    String? // upload URL
+  dataWiped       Boolean @default(false)
+  dataWipeMethod  String? // DBAN | SECURE_ERASE | PHYSICAL_DESTRUCTION | NA
+  dataWipeCertUrl String? // upload URL
 
   // Recycler details
-  recyclerName       String?
-  recyclerAuthNo     String? // CPCB authorization number
-  recyclerContact    String?
-  handoverDate       DateTime?
-  eWasteCertUrl      String? // certificate from recycler
+  recyclerName    String?
+  recyclerAuthNo  String? // CPCB authorization number
+  recyclerContact String?
+  handoverDate    DateTime?
+  eWasteCertUrl   String? // certificate from recycler
 
   // ── Stage 1: HOD sign ──────────────────────────────────────────
-  hodSignedById   Int?
-  hodSignedBy     Employee? @relation("EWasteHodSign", fields: [hodSignedById], references: [id])
-  hodSignedAt     DateTime?
-  hodSignature    String?   @db.LongText  // base64 PNG of drawn signature
-  hodRemarks      String?   @db.Text
+  hodSignedById Int?
+  hodSignedBy   Employee? @relation("EWasteHodSign", fields: [hodSignedById], references: [id])
+  hodSignedAt   DateTime?
+  hodSignature  String?   @db.LongText // base64 PNG of drawn signature
+  hodRemarks    String?   @db.Text
 
   // ── Stage 2: Operations sign ────────────────────────────────────
   operationsSignedById Int?
@@ -2732,7 +2733,7 @@ model EWasteRecord {
   securitySignedAt   DateTime?
   securitySignature  String?   @db.LongText
   securityRemarks    String?   @db.Text
-  gatePassNo         String?   // legacy free-text reference (kept for backfill)
+  gatePassNo         String? // legacy free-text reference (kept for backfill)
   gatePassId         Int?
   gatePass           GatePass? @relation(fields: [gatePassId], references: [id])
 
@@ -2804,8 +2805,8 @@ model AssetAudit {
 
   completedAt DateTime?
 
-  items     AssetAuditItem[]
-  auditors  AssetAuditor[]
+  items    AssetAuditItem[]
+  auditors AssetAuditor[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -2856,7 +2857,7 @@ model AssetAuditItem {
   remarks         String?
 
   // Set when an internal User (employee auditor) verifies the item.
-  verifiedById Int?
+  verifiedById                Int?
   // Set when an external auditor (ExternalAuditor master row) verifies the
   // item via /api/external-audit/audit-items/:itemId/verify. Mutually
   // exclusive with verifiedById in practice; either, both null, or one is
@@ -3204,24 +3205,24 @@ model PurchaseOrder {
   currency    String   @default("INR")
 
   // Approval chain (amount-based routing)
-  hodApprovedById   Int?
-  hodApprovedAt     DateTime?
-  hodRemarks        String?   @db.Text
-  mgmtApprovedById  Int?
-  mgmtApprovedAt    DateTime?
-  mgmtRemarks       String?   @db.Text
-  cooApprovedById   Int?
-  cooApprovedAt     DateTime?
-  cooRemarks        String?   @db.Text
-  cfoApprovedById   Int?
-  cfoApprovedAt     DateTime?
-  cfoRemarks        String?   @db.Text
-  approvalLevel     String?   // HOD | MANAGEMENT | COO | CFO — highest level needed based on amount
+  hodApprovedById  Int?
+  hodApprovedAt    DateTime?
+  hodRemarks       String?   @db.Text
+  mgmtApprovedById Int?
+  mgmtApprovedAt   DateTime?
+  mgmtRemarks      String?   @db.Text
+  cooApprovedById  Int?
+  cooApprovedAt    DateTime?
+  cooRemarks       String?   @db.Text
+  cfoApprovedById  Int?
+  cfoApprovedAt    DateTime?
+  cfoRemarks       String?   @db.Text
+  approvalLevel    String? // HOD | MANAGEMENT | COO | CFO — highest level needed based on amount
 
   // Amendment tracking
-  amendmentCount    Int       @default(0)
-  isAmended         Boolean   @default(false)
-  originalAmount    Decimal?  @db.Decimal(14, 2)
+  amendmentCount Int      @default(0)
+  isAmended      Boolean  @default(false)
+  originalAmount Decimal? @db.Decimal(14, 2)
 
   deliveryDate    DateTime?
   paymentTerms    String?   @db.Text
@@ -3235,7 +3236,7 @@ model PurchaseOrder {
 
   lines         PurchaseOrderLine[]
   goodsReceipts GoodsReceipt[]
-  assets        Asset[]             @relation("POAssets")
+  assets        Asset[]                  @relation("POAssets")
   amendments    PurchaseOrderAmendment[]
 
   @@index([vendorId])
@@ -3249,22 +3250,22 @@ model PurchaseOrderAmendment {
   purchaseOrderId Int
   purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
 
-  amendmentNumber Int           // 1, 2, 3...
-  reason          String        @db.Text
-  previousAmount  Decimal       @db.Decimal(14, 2)
-  newAmount       Decimal       @db.Decimal(14, 2)
-  changeAmount    Decimal       @db.Decimal(14, 2) // newAmount - previousAmount (can be negative)
+  amendmentNumber Int // 1, 2, 3...
+  reason          String  @db.Text
+  previousAmount  Decimal @db.Decimal(14, 2)
+  newAmount       Decimal @db.Decimal(14, 2)
+  changeAmount    Decimal @db.Decimal(14, 2) // newAmount - previousAmount (can be negative)
 
   // Snapshot of what changed
-  changesJson     Json?         // { linesAdded: [], linesModified: [], linesRemoved: [] }
+  changesJson Json? // { linesAdded: [], linesModified: [], linesRemoved: [] }
 
-  status          String        @default("PENDING") // PENDING | APPROVED | REJECTED
-  approvedById    Int?
-  approvedAt      DateTime?
-  remarks         String?       @db.Text
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  approvedById Int?
+  approvedAt   DateTime?
+  remarks      String?   @db.Text
 
-  createdById     Int?
-  createdAt       DateTime      @default(now())
+  createdById Int?
+  createdAt   DateTime @default(now())
 
   @@index([purchaseOrderId])
   @@map("purchaseorderamendment")
@@ -3342,8 +3343,8 @@ model GoodsReceipt {
   updatedAt   DateTime @default(now()) @updatedAt
 
   lines            GoodsReceiptLine[]
-  assets           Asset[]           @relation("GRAAssets")
-  purchaseVouchers PurchaseVoucher[] @relation("GRAPurchaseVouchers")
+  assets           Asset[]            @relation("GRAAssets")
+  purchaseVouchers PurchaseVoucher[]  @relation("GRAPurchaseVouchers")
 
   @@index([purchaseOrderId])
   @@index([status])
@@ -3546,7 +3547,7 @@ model StoreTransfer {
   transferNumber String @unique
 
   fromStoreId Int
-  fromStore   Store @relation("TransferFromStore", fields: [fromStoreId], references: [id])
+  fromStore   Store  @relation("TransferFromStore", fields: [fromStoreId], references: [id])
   toStoreId   Int?
   toStore     Store? @relation("TransferToStore", fields: [toStoreId], references: [id])
 
@@ -3627,26 +3628,26 @@ model AssetRateCard {
   asset   Asset @relation("AssetRateCard", fields: [assetId], references: [id])
 
   // Revenue rate
-  avgRevenuePerUnit  Decimal  @db.Decimal(12, 2) // average revenue per procedure/use/hour
-  revenueUnit        String   @default("PER_USE") // PER_USE | PER_HOUR | PER_DAY | PER_PROCEDURE | PER_TEST | PER_BED_DAY
-  currency           String   @default("INR")
+  avgRevenuePerUnit Decimal @db.Decimal(12, 2) // average revenue per procedure/use/hour
+  revenueUnit       String  @default("PER_USE") // PER_USE | PER_HOUR | PER_DAY | PER_PROCEDURE | PER_TEST | PER_BED_DAY
+  currency          String  @default("INR")
 
   // Capacity configuration
-  maxHoursPerDay     Decimal  @db.Decimal(5, 2) @default(24)  // max operable hours per day
-  maxUsesPerDay      Int?     // max procedures/tests per day (if applicable)
-  plannedHoursPerDay Decimal  @db.Decimal(5, 2) @default(8)   // planned/scheduled hours per day
+  maxHoursPerDay     Decimal @default(24) @db.Decimal(5, 2) // max operable hours per day
+  maxUsesPerDay      Int? // max procedures/tests per day (if applicable)
+  plannedHoursPerDay Decimal @default(8) @db.Decimal(5, 2) // planned/scheduled hours per day
 
   // Operating schedule
-  operatingDaysPerWeek  Int   @default(6)  // 5, 6, or 7
-  shiftsPerDay          Int   @default(1)  // 1, 2, or 3
-  shiftDurationHours    Decimal @db.Decimal(4, 2) @default(8)
+  operatingDaysPerWeek Int     @default(6) // 5, 6, or 7
+  shiftsPerDay         Int     @default(1) // 1, 2, or 3
+  shiftDurationHours   Decimal @default(8) @db.Decimal(4, 2)
 
   // Benchmarks
-  targetUtilizationPct  Decimal @db.Decimal(5, 2) @default(70)  // target % utilization
-  targetOeeScore        Decimal @db.Decimal(5, 2) @default(80)  // target OEE score (0-100)
+  targetUtilizationPct Decimal @default(70) @db.Decimal(5, 2) // target % utilization
+  targetOeeScore       Decimal @default(80) @db.Decimal(5, 2) // target OEE score (0-100)
 
   // Quality metric (for OEE)
-  qualityPassRatePct    Decimal @db.Decimal(5, 2) @default(98)  // % of output that meets quality standards
+  qualityPassRatePct Decimal @default(98) @db.Decimal(5, 2) // % of output that meets quality standards
 
   createdById Int?
   createdAt   DateTime @default(now())
@@ -3663,32 +3664,32 @@ model AssetDailyUsageLog {
   assetId Int
   asset   Asset @relation("DailyUsageLogs", fields: [assetId], references: [id])
 
-  logDate    DateTime // the day being reported (DATE only, no time)
+  logDate DateTime // the day being reported (DATE only, no time)
 
   // Usage metrics
-  hoursUsed      Decimal  @db.Decimal(5, 2) // actual hours the asset was operated
-  procedureCount Int?     // number of procedures/tests/uses (if applicable)
-  patientsServed Int?     // number of patients (for medical equipment)
+  hoursUsed      Decimal @db.Decimal(5, 2) // actual hours the asset was operated
+  procedureCount Int? // number of procedures/tests/uses (if applicable)
+  patientsServed Int? // number of patients (for medical equipment)
 
   // Shift-wise breakdown (optional granularity)
-  shift1Hours    Decimal? @db.Decimal(4, 2) // morning shift hours
-  shift2Hours    Decimal? @db.Decimal(4, 2) // afternoon shift hours
-  shift3Hours    Decimal? @db.Decimal(4, 2) // night shift hours
+  shift1Hours Decimal? @db.Decimal(4, 2) // morning shift hours
+  shift2Hours Decimal? @db.Decimal(4, 2) // afternoon shift hours
+  shift3Hours Decimal? @db.Decimal(4, 2) // night shift hours
 
   // Revenue from this day's usage
   revenueGenerated Decimal? @db.Decimal(12, 2) // actual revenue (if known)
   estimatedRevenue Decimal? @db.Decimal(12, 2) // calculated: hoursUsed * avgRevenuePerUnit (or procedureCount * rate)
 
   // Downtime tracking
-  downtimeHours      Decimal? @db.Decimal(5, 2) @default(0)
-  downtimeType       String?  // PLANNED | UNPLANNED | MAINTENANCE | CALIBRATION | NO_DEMAND | POWER_OUTAGE | STAFF_UNAVAILABLE
-  downtimeRemarks    String?  @db.Text
+  downtimeHours   Decimal? @default(0) @db.Decimal(5, 2)
+  downtimeType    String? // PLANNED | UNPLANNED | MAINTENANCE | CALIBRATION | NO_DEMAND | POWER_OUTAGE | STAFF_UNAVAILABLE
+  downtimeRemarks String?  @db.Text
 
   // OEE components (computed per day)
-  availabilityPct  Decimal? @db.Decimal(5, 2) // (plannedHours - downtimeHours) / plannedHours * 100
-  performancePct   Decimal? @db.Decimal(5, 2) // actualOutput / theoreticalMaxOutput * 100
-  qualityPct       Decimal? @db.Decimal(5, 2) // goodOutput / totalOutput * 100
-  oeeScore         Decimal? @db.Decimal(5, 2) // availability * performance * quality / 10000
+  availabilityPct Decimal? @db.Decimal(5, 2) // (plannedHours - downtimeHours) / plannedHours * 100
+  performancePct  Decimal? @db.Decimal(5, 2) // actualOutput / theoreticalMaxOutput * 100
+  qualityPct      Decimal? @db.Decimal(5, 2) // goodOutput / totalOutput * 100
+  oeeScore        Decimal? @db.Decimal(5, 2) // availability * performance * quality / 10000
 
   // Condition after use
   conditionAfterUse String? // GOOD | NEEDS_ATTENTION | DEGRADED | CRITICAL
@@ -3698,7 +3699,7 @@ model AssetDailyUsageLog {
   loggedBy     Employee? @relation("UsageLoggedBy", fields: [loggedById], references: [id])
   verifiedById Int?
   verifiedAt   DateTime?
-  status       String   @default("LOGGED") // LOGGED | VERIFIED | FLAGGED
+  status       String    @default("LOGGED") // LOGGED | VERIFIED | FLAGGED
 
   remarks String? @db.Text
 
@@ -3712,31 +3713,31 @@ model AssetDailyUsageLog {
 }
 
 model MaterialRequest {
-  id         Int      @id @default(autoincrement())
-  ticketId   Int
-  ticket     Ticket   @relation(fields: [ticketId], references: [id])
+  id       Int    @id @default(autoincrement())
+  ticketId Int
+  ticket   Ticket @relation(fields: [ticketId], references: [id])
 
-  itemType       String   // SPARE_PART | CONSUMABLE | NEW_MATERIAL
-  sparePartId    Int?
-  consumableId   Int?
-  description    String   @db.Text
-  quantity       Decimal  @db.Decimal(12, 2)
-  estimatedCost  Decimal? @db.Decimal(12, 2)
+  itemType      String // SPARE_PART | CONSUMABLE | NEW_MATERIAL
+  sparePartId   Int?
+  consumableId  Int?
+  description   String   @db.Text
+  quantity      Decimal  @db.Decimal(12, 2)
+  estimatedCost Decimal? @db.Decimal(12, 2)
 
-  status         String   @default("PENDING") // PENDING | OPERATIONS_APPROVED | REJECTED | DELIVERED
+  status String @default("PENDING") // PENDING | OPERATIONS_APPROVED | REJECTED | DELIVERED
 
   // Operations approval
-  approvedById      Int?
-  approvedAt        DateTime?
-  approvalRemarks   String?  @db.Text
+  approvedById    Int?
+  approvedAt      DateTime?
+  approvalRemarks String?   @db.Text
 
   // Delivery timeframe
-  expectedDelivery  DateTime?
-  actualDelivery    DateTime?
-  deliveryRemarks   String?
+  expectedDelivery DateTime?
+  actualDelivery   DateTime?
+  deliveryRemarks  String?
 
-  requestedById  Int?
-  requestedAt    DateTime @default(now())
+  requestedById Int?
+  requestedAt   DateTime @default(now())
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -3747,13 +3748,13 @@ model MaterialRequest {
 }
 
 model ApprovalConfig {
-  id         Int    @id @default(autoincrement())
-  module     String // PURCHASE_ORDER | WORK_ORDER | DISPOSAL | MATERIAL_REQUEST
-  level      Int    // 1, 2, 3...
-  roleName   String // HOD | OPERATIONS | FINANCE | CEO_COO | ADMIN
-  minAmount  Decimal @db.Decimal(14, 2) // from this amount
-  maxAmount  Decimal? @db.Decimal(14, 2) // up to this amount (null = unlimited)
-  isActive   Boolean @default(true)
+  id        Int      @id @default(autoincrement())
+  module    String // PURCHASE_ORDER | WORK_ORDER | DISPOSAL | MATERIAL_REQUEST
+  level     Int // 1, 2, 3...
+  roleName  String // HOD | OPERATIONS | FINANCE | CEO_COO | ADMIN
+  minAmount Decimal  @db.Decimal(14, 2) // from this amount
+  maxAmount Decimal? @db.Decimal(14, 2) // up to this amount (null = unlimited)
+  isActive  Boolean  @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -3823,36 +3824,36 @@ enum PaymentMode {
 // CHART OF ACCOUNTS
 // ═══════════════════════════════════════════════════════════════════════════════
 model ChartOfAccount {
-  id          Int         @id @default(autoincrement())
-  code        String      @unique   // 1001, 2001
+  id          Int              @id @default(autoincrement())
+  code        String           @unique // 1001, 2001
   name        String
   type        AccountType
-  subType     String?               // "Fixed Asset", "Current Liability"
-  description String?     @db.Text
+  subType     String? // "Fixed Asset", "Current Liability"
+  description String?          @db.Text
   parentId    Int?
-  parent      ChartOfAccount?   @relation("COAHierarchy", fields: [parentId], references: [id])
-  children    ChartOfAccount[]  @relation("COAHierarchy")
-  isActive    Boolean     @default(true)
+  parent      ChartOfAccount?  @relation("COAHierarchy", fields: [parentId], references: [id])
+  children    ChartOfAccount[] @relation("COAHierarchy")
+  isActive    Boolean          @default(true)
 
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @default(now()) @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   debitLines  JournalEntryLine[] @relation("DebitAccount")
   creditLines JournalEntryLine[] @relation("CreditAccount")
 
   // Finance Engine GL mapping back-relations
-  glFixedAsset    AssetGLMapping[] @relation("GLFixedAsset")
-  glAccDep        AssetGLMapping[] @relation("GLAccDep")
-  glDepExp        AssetGLMapping[] @relation("GLDepExp")
-  glDisposal      AssetGLMapping[] @relation("GLDisposal")
-  glMaintenance   AssetGLMapping[] @relation("GLMaintenance")
-  glInsurance     AssetGLMapping[] @relation("GLInsurance")
-  fvLines         FinanceVoucherLine[] @relation("FVLineAccount")
+  glFixedAsset  AssetGLMapping[]     @relation("GLFixedAsset")
+  glAccDep      AssetGLMapping[]     @relation("GLAccDep")
+  glDepExp      AssetGLMapping[]     @relation("GLDepExp")
+  glDisposal    AssetGLMapping[]     @relation("GLDisposal")
+  glMaintenance AssetGLMapping[]     @relation("GLMaintenance")
+  glInsurance   AssetGLMapping[]     @relation("GLInsurance")
+  fvLines       FinanceVoucherLine[] @relation("FVLineAccount")
 
   // Export target fields for external systems
-  tallyLedger     String?  // Tally Prime ledger name
-  sapGlCode       String?  // SAP GL account code
-  zohoAccount     String?  // Zoho Books account name
+  tallyLedger String? // Tally Prime ledger name
+  sapGlCode   String? // SAP GL account code
+  zohoAccount String? // Zoho Books account name
 
   @@map("chartofaccount")
 }
@@ -3861,45 +3862,45 @@ model ChartOfAccount {
 // PURCHASE VOUCHER — Accounting entry for asset purchase
 // ═══════════════════════════════════════════════════════════════════════════════
 model PurchaseVoucher {
-  id              Int           @id @default(autoincrement())
-  voucherNo       String        @unique   // PV-FY2025-001
-  voucherDate     DateTime
-  amount          Decimal       @db.Decimal(14, 2)
-  narration       String?       @db.Text
-  status          VoucherStatus @default(DRAFT)
+  id          Int           @id @default(autoincrement())
+  voucherNo   String        @unique // PV-FY2025-001
+  voucherDate DateTime
+  amount      Decimal       @db.Decimal(14, 2)
+  narration   String?       @db.Text
+  status      VoucherStatus @default(DRAFT)
 
   // Standalone — manual asset reference (FK lives here)
-  assetId         Int?
-  asset           Asset?        @relation("AssetPurchaseVouchers", fields: [assetId], references: [id])
+  assetId Int?
+  asset   Asset? @relation("AssetPurchaseVouchers", fields: [assetId], references: [id])
 
   // Procurement link — nullable, auto-filled when goods-receipt is accepted
-  goodsReceiptId  Int?
-  goodsReceipt    GoodsReceipt? @relation("GRAPurchaseVouchers", fields: [goodsReceiptId], references: [id])
+  goodsReceiptId Int?
+  goodsReceipt   GoodsReceipt? @relation("GRAPurchaseVouchers", fields: [goodsReceiptId], references: [id])
 
   // Vendor reference
-  vendorId        Int?
-  vendor          Vendor?       @relation("VendorPurchaseVouchers", fields: [vendorId], references: [id])
+  vendorId Int?
+  vendor   Vendor? @relation("VendorPurchaseVouchers", fields: [vendorId], references: [id])
 
   // Invoice details (can exist without procurement module)
-  invoiceNo       String?
-  invoiceDate     DateTime?
-  invoiceAmount   Decimal?      @db.Decimal(14, 2)
-  attachmentUrl   String?
+  invoiceNo     String?
+  invoiceDate   DateTime?
+  invoiceAmount Decimal?  @db.Decimal(14, 2)
+  attachmentUrl String?
 
   // Approval
   approvedById    Int?
-  approvedBy      Employee?     @relation("PVApprovedBy", fields: [approvedById], references: [id])
+  approvedBy      Employee? @relation("PVApprovedBy", fields: [approvedById], references: [id])
   approvedAt      DateTime?
-  approvalRemarks String?       @db.Text
+  approvalRemarks String?   @db.Text
 
   // Linked payments
   paymentVouchers PaymentVoucher[]
   journalEntries  JournalEntry[]
 
-  createdById     Int?
-  createdBy       Employee?     @relation("PVCreatedBy", fields: [createdById], references: [id])
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @default(now()) @updatedAt
+  createdById Int?
+  createdBy   Employee? @relation("PVCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
   @@index([status])
   @@index([voucherDate])
@@ -3910,34 +3911,34 @@ model PurchaseVoucher {
 // PAYMENT VOUCHER — Records payment against purchase voucher
 // ═══════════════════════════════════════════════════════════════════════════════
 model PaymentVoucher {
-  id                Int           @id @default(autoincrement())
-  voucherNo         String        @unique   // PMT-FY2025-001
-  voucherDate       DateTime
-  amount            Decimal       @db.Decimal(14, 2)
-  paymentMode       PaymentMode   @default(BANK_TRANSFER)
-  bankReference     String?
-  bankName          String?
-  narration         String?       @db.Text
-  status            VoucherStatus @default(DRAFT)
+  id            Int           @id @default(autoincrement())
+  voucherNo     String        @unique // PMT-FY2025-001
+  voucherDate   DateTime
+  amount        Decimal       @db.Decimal(14, 2)
+  paymentMode   PaymentMode   @default(BANK_TRANSFER)
+  bankReference String?
+  bankName      String?
+  narration     String?       @db.Text
+  status        VoucherStatus @default(DRAFT)
 
   purchaseVoucherId Int?
   purchaseVoucher   PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
 
-  vendorId          Int?
-  vendor            Vendor?       @relation("VendorPaymentVouchers", fields: [vendorId], references: [id])
+  vendorId Int?
+  vendor   Vendor? @relation("VendorPaymentVouchers", fields: [vendorId], references: [id])
 
   // Approval
-  approvedById      Int?
-  approvedBy        Employee?     @relation("PMTApprovedBy", fields: [approvedById], references: [id])
-  approvedAt        DateTime?
-  approvalRemarks   String?       @db.Text
+  approvedById    Int?
+  approvedBy      Employee? @relation("PMTApprovedBy", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  approvalRemarks String?   @db.Text
 
-  journalEntries    JournalEntry[]
+  journalEntries JournalEntry[]
 
-  createdById       Int?
-  createdBy         Employee?     @relation("PMTCreatedBy", fields: [createdById], references: [id])
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @default(now()) @updatedAt
+  createdById Int?
+  createdBy   Employee? @relation("PMTCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
   @@index([status])
   @@index([voucherDate])
@@ -3948,41 +3949,41 @@ model PaymentVoucher {
 // JOURNAL ENTRY — Double-entry bookkeeping
 // ═══════════════════════════════════════════════════════════════════════════════
 model JournalEntry {
-  id                  Int      @id @default(autoincrement())
-  entryNo             String   @unique   // JE-FY2025-001
-  entryDate           DateTime
-  narration           String?  @db.Text
-  isAutoGenerated     Boolean  @default(false)
-  totalAmount         Decimal  @db.Decimal(14, 2)
+  id              Int      @id @default(autoincrement())
+  entryNo         String   @unique // JE-FY2025-001
+  entryDate       DateTime
+  narration       String?  @db.Text
+  isAutoGenerated Boolean  @default(false)
+  totalAmount     Decimal  @db.Decimal(14, 2)
 
-  purchaseVoucherId   Int?
-  purchaseVoucher     PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
-  paymentVoucherId    Int?
-  paymentVoucher      PaymentVoucher?  @relation(fields: [paymentVoucherId], references: [id])
+  purchaseVoucherId Int?
+  purchaseVoucher   PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
+  paymentVoucherId  Int?
+  paymentVoucher    PaymentVoucher?  @relation(fields: [paymentVoucherId], references: [id])
 
-  lines               JournalEntryLine[]
+  lines JournalEntryLine[]
 
-  createdById         Int?
-  createdBy           Employee? @relation("JECreatedBy", fields: [createdById], references: [id])
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @default(now()) @updatedAt
+  createdById Int?
+  createdBy   Employee? @relation("JECreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
   @@index([entryDate])
   @@map("journalentry")
 }
 
 model JournalEntryLine {
-  id              Int      @id @default(autoincrement())
-  journalEntryId  Int
-  journalEntry    JournalEntry @relation(fields: [journalEntryId], references: [id])
+  id             Int          @id @default(autoincrement())
+  journalEntryId Int
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id])
 
   debitAccountId  Int?
   debitAccount    ChartOfAccount? @relation("DebitAccount", fields: [debitAccountId], references: [id])
   creditAccountId Int?
   creditAccount   ChartOfAccount? @relation("CreditAccount", fields: [creditAccountId], references: [id])
 
-  amount          Decimal  @db.Decimal(14, 2)
-  narration       String?
+  amount    Decimal @db.Decimal(14, 2)
+  narration String?
 
   @@index([journalEntryId])
   @@map("journalentryline")
@@ -3993,9 +3994,9 @@ model JournalEntryLine {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 enum AccountingMode {
-  STANDALONE  // Full double-entry within this app
-  EXPORT      // Generate vouchers, export to Tally/SAP/Zoho
-  HYBRID      // Both: internal ledger + periodic export
+  STANDALONE // Full double-entry within this app
+  EXPORT // Generate vouchers, export to Tally/SAP/Zoho
+  HYBRID // Both: internal ledger + periodic export
 }
 
 enum VoucherSourceType {
@@ -4033,86 +4034,86 @@ enum ExportBatchStatus {
 
 /// Single-row config per tenant for the Finance module
 model FinanceConfig {
-  id               Int            @id @default(autoincrement())
-  accountingMode   AccountingMode @default(STANDALONE)
-  exportTarget     ExportTarget?
-  autoVoucher      Boolean        @default(true)  // auto-create draft vouchers on asset events
-  requireApproval  Boolean        @default(true)  // FINANCE must approve before POSTED
-  fyStartMonth     Int            @default(4)      // 4 = April (Indian FY)
-  defaultCurrency  String         @default("INR")
-  updatedById      Int?
-  updatedBy        Employee?      @relation("FinanceConfigUpdatedBy", fields: [updatedById], references: [id])
-  updatedAt        DateTime       @default(now()) @updatedAt
+  id              Int            @id @default(autoincrement())
+  accountingMode  AccountingMode @default(STANDALONE)
+  exportTarget    ExportTarget?
+  autoVoucher     Boolean        @default(true) // auto-create draft vouchers on asset events
+  requireApproval Boolean        @default(true) // FINANCE must approve before POSTED
+  fyStartMonth    Int            @default(4) // 4 = April (Indian FY)
+  defaultCurrency String         @default("INR")
+  updatedById     Int?
+  updatedBy       Employee?      @relation("FinanceConfigUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt       DateTime       @default(now()) @updatedAt
 
   @@map("financeconfig")
 }
 
 /// Maps an AssetCategory to its GL accounts so auto-vouchers know which accounts to debit/credit
 model AssetGLMapping {
-  id                    Int            @id @default(autoincrement())
-  assetCategoryId       Int            @unique
-  assetCategory         AssetCategory  @relation(fields: [assetCategoryId], references: [id])
+  id              Int           @id @default(autoincrement())
+  assetCategoryId Int           @unique
+  assetCategory   AssetCategory @relation(fields: [assetCategoryId], references: [id])
 
   // Fixed Asset account (DR on purchase, CR on disposal)
-  fixedAssetAccountId   Int?
-  fixedAssetAccount     ChartOfAccount? @relation("GLFixedAsset", fields: [fixedAssetAccountId], references: [id])
+  fixedAssetAccountId Int?
+  fixedAssetAccount   ChartOfAccount? @relation("GLFixedAsset", fields: [fixedAssetAccountId], references: [id])
 
   // Accumulated Depreciation account (CR on depreciation run)
-  accDepAccountId       Int?
-  accDepAccount         ChartOfAccount? @relation("GLAccDep", fields: [accDepAccountId], references: [id])
+  accDepAccountId Int?
+  accDepAccount   ChartOfAccount? @relation("GLAccDep", fields: [accDepAccountId], references: [id])
 
   // Depreciation Expense account (DR on depreciation run)
-  depExpenseAccountId   Int?
-  depExpenseAccount     ChartOfAccount? @relation("GLDepExp", fields: [depExpenseAccountId], references: [id])
+  depExpenseAccountId Int?
+  depExpenseAccount   ChartOfAccount? @relation("GLDepExp", fields: [depExpenseAccountId], references: [id])
 
   // Disposal account / P&L (DR/CR depending on gain or loss)
-  disposalAccountId     Int?
-  disposalAccount       ChartOfAccount? @relation("GLDisposal", fields: [disposalAccountId], references: [id])
+  disposalAccountId Int?
+  disposalAccount   ChartOfAccount? @relation("GLDisposal", fields: [disposalAccountId], references: [id])
 
   // Maintenance Expense account (DR on maintenance cost)
-  maintenanceAccountId  Int?
-  maintenanceAccount    ChartOfAccount? @relation("GLMaintenance", fields: [maintenanceAccountId], references: [id])
+  maintenanceAccountId Int?
+  maintenanceAccount   ChartOfAccount? @relation("GLMaintenance", fields: [maintenanceAccountId], references: [id])
 
   // Insurance Expense account (DR on premium)
-  insuranceAccountId    Int?
-  insuranceAccount      ChartOfAccount? @relation("GLInsurance", fields: [insuranceAccountId], references: [id])
+  insuranceAccountId Int?
+  insuranceAccount   ChartOfAccount? @relation("GLInsurance", fields: [insuranceAccountId], references: [id])
 
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @default(now()) @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@map("assetglmapping")
 }
 
 /// A Finance Voucher — unified model for auto-generated and manual accounting entries
 model FinanceVoucher {
-  id           Int                  @id @default(autoincrement())
-  voucherNo    String               @unique  // FV-FY2025-001
-  voucherDate  DateTime
-  narration    String?              @db.Text
-  sourceType   VoucherSourceType    @default(MANUAL)
-  sourceId     Int?                 // FK to Asset, AssetDisposal, BatchDepreciationRun, etc.
-  totalDebit   Decimal              @db.Decimal(14, 2)
-  totalCredit  Decimal              @db.Decimal(14, 2)
-  status       FinanceVoucherStatus @default(DRAFT)
+  id          Int                  @id @default(autoincrement())
+  voucherNo   String               @unique // FV-FY2025-001
+  voucherDate DateTime
+  narration   String?              @db.Text
+  sourceType  VoucherSourceType    @default(MANUAL)
+  sourceId    Int? // FK to Asset, AssetDisposal, BatchDepreciationRun, etc.
+  totalDebit  Decimal              @db.Decimal(14, 2)
+  totalCredit Decimal              @db.Decimal(14, 2)
+  status      FinanceVoucherStatus @default(DRAFT)
 
   departmentId Int?
-  department   Department?          @relation("VoucherDept", fields: [departmentId], references: [id])
+  department   Department? @relation("VoucherDept", fields: [departmentId], references: [id])
 
-  batchRunId   Int?
-  batchRun     BatchDepreciationRun? @relation("VoucherBatchRun", fields: [batchRunId], references: [id])
+  batchRunId Int?
+  batchRun   BatchDepreciationRun? @relation("VoucherBatchRun", fields: [batchRunId], references: [id])
 
-  rejectionReason String?           @db.Text
+  rejectionReason String? @db.Text
 
-  lines        FinanceVoucherLine[]
-  exportItems  ExportBatchItem[]
+  lines       FinanceVoucherLine[]
+  exportItems ExportBatchItem[]
 
   createdById  Int?
-  createdBy    Employee?            @relation("FVCreatedBy", fields: [createdById], references: [id])
+  createdBy    Employee? @relation("FVCreatedBy", fields: [createdById], references: [id])
   approvedById Int?
-  approvedBy   Employee?            @relation("FVApprovedBy", fields: [approvedById], references: [id])
+  approvedBy   Employee? @relation("FVApprovedBy", fields: [approvedById], references: [id])
   approvedAt   DateTime?
-  createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @default(now()) @updatedAt
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
 
   @@index([voucherDate])
   @@index([sourceType, sourceId])
@@ -4122,19 +4123,19 @@ model FinanceVoucher {
 
 /// Individual DR/CR lines of a Finance Voucher
 model FinanceVoucherLine {
-  id              Int             @id @default(autoincrement())
-  voucherId       Int
-  voucher         FinanceVoucher  @relation(fields: [voucherId], references: [id])
+  id        Int            @id @default(autoincrement())
+  voucherId Int
+  voucher   FinanceVoucher @relation(fields: [voucherId], references: [id])
 
-  accountId       Int
-  account         ChartOfAccount  @relation("FVLineAccount", fields: [accountId], references: [id])
+  accountId Int
+  account   ChartOfAccount @relation("FVLineAccount", fields: [accountId], references: [id])
 
-  debit           Decimal         @db.Decimal(14, 2) @default(0)
-  credit          Decimal         @db.Decimal(14, 2) @default(0)
-  narration       String?
+  debit     Decimal @default(0) @db.Decimal(14, 2)
+  credit    Decimal @default(0) @db.Decimal(14, 2)
+  narration String?
 
-  costCentreId    Int?
-  costCentre      Department?     @relation("FVLineCostCentre", fields: [costCentreId], references: [id])
+  costCentreId Int?
+  costCentre   Department? @relation("FVLineCostCentre", fields: [costCentreId], references: [id])
 
   @@index([voucherId])
   @@map("financevoucherline")
@@ -4142,34 +4143,34 @@ model FinanceVoucherLine {
 
 /// Groups POSTED vouchers for batch export to Tally/SAP/etc.
 model ExportBatch {
-  id             Int               @id @default(autoincrement())
-  batchNo        String            @unique  // EXP-2025-001
-  exportTarget   ExportTarget
-  status         ExportBatchStatus @default(PENDING)
-  fromDate       DateTime
-  toDate         DateTime
-  totalVouchers  Int               @default(0)
-  totalAmount    Decimal           @db.Decimal(14, 2) @default(0)
-  fileUrl        String?           // generated file path
-  errorLog       String?           @db.Text
+  id            Int               @id @default(autoincrement())
+  batchNo       String            @unique // EXP-2025-001
+  exportTarget  ExportTarget
+  status        ExportBatchStatus @default(PENDING)
+  fromDate      DateTime
+  toDate        DateTime
+  totalVouchers Int               @default(0)
+  totalAmount   Decimal           @default(0) @db.Decimal(14, 2)
+  fileUrl       String? // generated file path
+  errorLog      String?           @db.Text
 
-  items          ExportBatchItem[]
+  items ExportBatchItem[]
 
-  createdById    Int?
-  createdBy      Employee?         @relation("ExportBatchCreatedBy", fields: [createdById], references: [id])
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @default(now()) @updatedAt
+  createdById Int?
+  createdBy   Employee? @relation("ExportBatchCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
 
   @@map("exportbatch")
 }
 
 /// Links a FinanceVoucher to an ExportBatch (many-to-many bridge)
 model ExportBatchItem {
-  id           Int            @id @default(autoincrement())
-  batchId      Int
-  batch        ExportBatch    @relation(fields: [batchId], references: [id])
-  voucherId    Int
-  voucher      FinanceVoucher @relation(fields: [voucherId], references: [id])
+  id        Int            @id @default(autoincrement())
+  batchId   Int
+  batch     ExportBatch    @relation(fields: [batchId], references: [id])
+  voucherId Int
+  voucher   FinanceVoucher @relation(fields: [voucherId], references: [id])
 
   @@unique([batchId, voucherId])
   @@map("exportbatchitem")
@@ -4177,19 +4178,19 @@ model ExportBatchItem {
 
 /// Capex Budget — FINANCE/CEO can set annual capital expenditure budgets per department
 model CapexBudget {
-  id            Int        @id @default(autoincrement())
-  fiscalYear    Int        // 2025
-  departmentId  Int?
-  department    Department? @relation("CapexBudgetDept", fields: [departmentId], references: [id])
-  categoryId    Int?
-  category      AssetCategory? @relation("CapexBudgetCat", fields: [categoryId], references: [id])
-  budgetAmount  Decimal    @db.Decimal(14, 2)
-  actualAmount  Decimal    @db.Decimal(14, 2) @default(0)  // auto-updated from asset purchases
-  notes         String?    @db.Text
-  createdById   Int?
-  createdBy     Employee?  @relation("CapexBudgetCreatedBy", fields: [createdById], references: [id])
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @default(now()) @updatedAt
+  id           Int            @id @default(autoincrement())
+  fiscalYear   Int // 2025
+  departmentId Int?
+  department   Department?    @relation("CapexBudgetDept", fields: [departmentId], references: [id])
+  categoryId   Int?
+  category     AssetCategory? @relation("CapexBudgetCat", fields: [categoryId], references: [id])
+  budgetAmount Decimal        @db.Decimal(14, 2)
+  actualAmount Decimal        @default(0) @db.Decimal(14, 2) // auto-updated from asset purchases
+  notes        String?        @db.Text
+  createdById  Int?
+  createdBy    Employee?      @relation("CapexBudgetCreatedBy", fields: [createdById], references: [id])
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @default(now()) @updatedAt
 
   @@unique([fiscalYear, departmentId, categoryId])
   @@map("capexbudget")
@@ -4198,14 +4199,14 @@ model CapexBudget {
 /// Manual Ledger Entry for adjustments / narration-only entries (no automatic GL effect)
 /// Used in STANDALONE mode for narration / memo entries
 model ManualLedgerEntry {
-  id          Int       @id @default(autoincrement())
-  entryNo     String    @unique  // MLE-2025-001
-  entryDate   DateTime
-  narration   String    @db.Text
-  amount      Decimal   @db.Decimal(14, 2)
-  entryType   String    // NOTE | ADJUSTMENT | MEMO
-  referenceNo String?
-  attachmentUrl String? @db.Text
+  id            Int      @id @default(autoincrement())
+  entryNo       String   @unique // MLE-2025-001
+  entryDate     DateTime
+  narration     String   @db.Text
+  amount        Decimal  @db.Decimal(14, 2)
+  entryType     String // NOTE | ADJUSTMENT | MEMO
+  referenceNo   String?
+  attachmentUrl String?  @db.Text
 
   createdById Int?
   createdBy   Employee? @relation("MLECreatedBy", fields: [createdById], references: [id])
@@ -4221,25 +4222,25 @@ model ManualLedgerEntry {
 // As individual assets are entered they link back via assetPoolId on Asset.
 
 model AssetPool {
-  id                  Int      @id @default(autoincrement())
-  poolCode            String   @unique           // e.g. POOL-ICU-FY2022-23-001
-  financialYear       String                     // e.g. "FY2022-23"
-  categoryId          Int?
-  category            AssetCategory? @relation(fields: [categoryId], references: [id])
-  departmentId        Int?
-  department          Department?    @relation("AssetPoolDepartment", fields: [departmentId], references: [id])
-  description         String?   @db.Text
-  originalQuantity    Int                        // total assets in this pool
-  totalPoolCost       Decimal?  @db.Decimal(14, 2) // total cost captured from balance sheet
-  status              String    @default("PENDING") // PENDING / PARTIAL / COMPLETE
-  notes               String?   @db.Text
-  createdById         Int?
-  createdBy           Employee? @relation("AssetPoolCreatedBy", fields: [createdById], references: [id])
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @default(now()) @updatedAt
+  id               Int            @id @default(autoincrement())
+  poolCode         String         @unique // e.g. POOL-ICU-FY2022-23-001
+  financialYear    String // e.g. "FY2022-23"
+  categoryId       Int?
+  category         AssetCategory? @relation(fields: [categoryId], references: [id])
+  departmentId     Int?
+  department       Department?    @relation("AssetPoolDepartment", fields: [departmentId], references: [id])
+  description      String?        @db.Text
+  originalQuantity Int // total assets in this pool
+  totalPoolCost    Decimal?       @db.Decimal(14, 2) // total cost captured from balance sheet
+  status           String         @default("PENDING") // PENDING / PARTIAL / COMPLETE
+  notes            String?        @db.Text
+  createdById      Int?
+  createdBy        Employee?      @relation("AssetPoolCreatedBy", fields: [createdById], references: [id])
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @default(now()) @updatedAt
 
-  assets              Asset[]
-  adjustments         AssetPoolAdjustment[]
+  assets                Asset[]
+  adjustments           AssetPoolAdjustment[]
   depreciationSchedules AssetPoolDepreciationSchedule[]
 
   @@map("assetpool")
@@ -4249,46 +4250,46 @@ model AssetPool {
 // Stores the auditor-certified gross block, accumulated dep, and net block
 // so the FA schedule report can merge pool balances with individual asset rows.
 model AssetPoolDepreciationSchedule {
-  id                      Int       @id @default(autoincrement())
-  poolId                  Int
-  pool                    AssetPool @relation(fields: [poolId], references: [id])
-  financialYear           String    // "FY2022-23"
-  financialYearEnd        DateTime  // 31-Mar-2023
+  id               Int       @id @default(autoincrement())
+  poolId           Int
+  pool             AssetPool @relation(fields: [poolId], references: [id])
+  financialYear    String // "FY2022-23"
+  financialYearEnd DateTime // 31-Mar-2023
 
-  openingGrossBlock       Decimal   @db.Decimal(14, 2)
-  additions               Decimal   @default(0) @db.Decimal(14, 2)
-  additionsFirstHalf      Decimal   @default(0) @db.Decimal(14, 2) // Apr-Sep (full dep rate)
-  additionsSecondHalf     Decimal   @default(0) @db.Decimal(14, 2) // Oct-Mar (half dep rate)
-  deletions               Decimal   @default(0) @db.Decimal(14, 2)
-  deletionsFirstHalf      Decimal   @default(0) @db.Decimal(14, 2) // Apr-Sep
-  deletionsSecondHalf     Decimal   @default(0) @db.Decimal(14, 2) // Oct-Mar
-  closingGrossBlock       Decimal   @db.Decimal(14, 2)
+  openingGrossBlock   Decimal @db.Decimal(14, 2)
+  additions           Decimal @default(0) @db.Decimal(14, 2)
+  additionsFirstHalf  Decimal @default(0) @db.Decimal(14, 2) // Apr-Sep (full dep rate)
+  additionsSecondHalf Decimal @default(0) @db.Decimal(14, 2) // Oct-Mar (half dep rate)
+  deletions           Decimal @default(0) @db.Decimal(14, 2)
+  deletionsFirstHalf  Decimal @default(0) @db.Decimal(14, 2) // Apr-Sep
+  deletionsSecondHalf Decimal @default(0) @db.Decimal(14, 2) // Oct-Mar
+  closingGrossBlock   Decimal @db.Decimal(14, 2)
 
-  openingAccumulatedDep   Decimal   @default(0) @db.Decimal(14, 2)
-  depreciationRate        Decimal   @db.Decimal(5, 2)   // e.g. 15.00
-  depOnOpeningBlock       Decimal?  @db.Decimal(14, 2)  // dep on opening WDV at full rate
-  depOnAdditions          Decimal?  @db.Decimal(14, 2)  // dep on additions (full + half combined)
-  depreciationForPeriod   Decimal   @db.Decimal(14, 2)  // total = depOnOpening + depOnAdditions
-  closingAccumulatedDep   Decimal   @db.Decimal(14, 2)
+  openingAccumulatedDep Decimal  @default(0) @db.Decimal(14, 2)
+  depreciationRate      Decimal  @db.Decimal(5, 2) // e.g. 15.00
+  depOnOpeningBlock     Decimal? @db.Decimal(14, 2) // dep on opening WDV at full rate
+  depOnAdditions        Decimal? @db.Decimal(14, 2) // dep on additions (full + half combined)
+  depreciationForPeriod Decimal  @db.Decimal(14, 2) // total = depOnOpening + depOnAdditions
+  closingAccumulatedDep Decimal  @db.Decimal(14, 2)
 
-  openingNetBlock         Decimal   @db.Decimal(14, 2)
-  closingNetBlock         Decimal   @db.Decimal(14, 2)
+  openingNetBlock Decimal @db.Decimal(14, 2)
+  closingNetBlock Decimal @db.Decimal(14, 2)
 
-  createdById             Int?
-  createdBy               Employee? @relation("AssetPoolDepSchedCreatedBy", fields: [createdById], references: [id])
-  createdAt               DateTime  @default(now())
+  createdById Int?
+  createdBy   Employee? @relation("AssetPoolDepSchedCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
 
   @@unique([poolId, financialYear])
   @@map("assetpooldepreciationschedule")
 }
 
 model AssetPoolAdjustment {
-  id             Int      @id @default(autoincrement())
+  id             Int       @id @default(autoincrement())
   poolId         Int
   pool           AssetPool @relation(fields: [poolId], references: [id])
-  adjustmentType String                // COST_RECONCILIATION / WRITE_OFF / DISTRIBUTE / OTHER
+  adjustmentType String // COST_RECONCILIATION / WRITE_OFF / DISTRIBUTE / OTHER
   amount         Decimal   @db.Decimal(14, 2)
-  financialYear  String?               // FY in which this adjustment was recorded
+  financialYear  String? // FY in which this adjustment was recorded
   reason         String?   @db.Text
   createdById    Int?
   createdBy      Employee? @relation("AssetPoolAdjCreatedBy", fields: [createdById], references: [id])
@@ -4301,57 +4302,57 @@ model AssetPoolAdjustment {
 // Service Invoice — bills received from vendors for services (repair/PM/AMC etc.)
 // ═══════════════════════════════════════════════════════════════════════════════
 model ServiceInvoice {
-  id              Int       @id @default(autoincrement())
-  invoiceNo       String    // vendor invoice number
-  invoiceDate     DateTime
-  dueDate         DateTime?
+  id          Int       @id @default(autoincrement())
+  invoiceNo   String // vendor invoice number
+  invoiceDate DateTime
+  dueDate     DateTime?
 
   // Link to the service event (only one will be set)
-  ticketId        Int?
-  ticket          Ticket?   @relation(fields: [ticketId], references: [id])
+  ticketId              Int?
+  ticket                Ticket?              @relation(fields: [ticketId], references: [id])
   maintenanceScheduleId Int?
-  maintenanceSchedule MaintenanceSchedule? @relation(fields: [maintenanceScheduleId], references: [id])
+  maintenanceSchedule   MaintenanceSchedule? @relation(fields: [maintenanceScheduleId], references: [id])
   calibrationScheduleId Int?
-  calibrationSchedule CalibrationSchedule? @relation(fields: [calibrationScheduleId], references: [id])
-  serviceContractId Int?
-  serviceContract ServiceContract? @relation(fields: [serviceContractId], references: [id])
+  calibrationSchedule   CalibrationSchedule? @relation(fields: [calibrationScheduleId], references: [id])
+  serviceContractId     Int?
+  serviceContract       ServiceContract?     @relation(fields: [serviceContractId], references: [id])
 
   // Asset & vendor (can be auto-populated from linked event)
-  assetId         Int?
-  asset           Asset?    @relation(fields: [assetId], references: [id])
-  vendorId        Int?
-  vendor          Vendor?   @relation("ServiceInvoiceVendor", fields: [vendorId], references: [id])
+  assetId  Int?
+  asset    Asset?  @relation(fields: [assetId], references: [id])
+  vendorId Int?
+  vendor   Vendor? @relation("ServiceInvoiceVendor", fields: [vendorId], references: [id])
 
   // Amounts
-  invoiceAmount   Decimal   @db.Decimal(15, 2)
-  gstPct          Decimal   @default(18) @db.Decimal(5, 2)
-  gstAmount       Decimal   @default(0)  @db.Decimal(15, 2)
-  netAmount       Decimal   @db.Decimal(15, 2)  // invoiceAmount + gstAmount
-  tdsAmount       Decimal   @default(0)  @db.Decimal(15, 2)
-  payableAmount   Decimal   @db.Decimal(15, 2)  // netAmount - tdsAmount
+  invoiceAmount Decimal @db.Decimal(15, 2)
+  gstPct        Decimal @default(18) @db.Decimal(5, 2)
+  gstAmount     Decimal @default(0) @db.Decimal(15, 2)
+  netAmount     Decimal @db.Decimal(15, 2) // invoiceAmount + gstAmount
+  tdsAmount     Decimal @default(0) @db.Decimal(15, 2)
+  payableAmount Decimal @db.Decimal(15, 2) // netAmount - tdsAmount
 
   serviceDescription String? @db.Text
-  status          String    @default("PENDING_APPROVAL")
+  status             String  @default("PENDING_APPROVAL")
   // PENDING_APPROVAL → APPROVED → PAID | REJECTED
 
   // Payment details (filled when PAID)
-  paidAt          DateTime?
-  paymentMode     String?   // CASH | CHEQUE | NEFT | UPI
-  paymentRef      String?
+  paidAt           DateTime?
+  paymentMode      String? // CASH | CHEQUE | NEFT | UPI
+  paymentRef       String?
   paymentVoucherId Int?
 
   // Document
-  fileUrl         String?
+  fileUrl String?
 
-  remarks         String?   @db.Text
+  remarks String? @db.Text
 
-  createdById     Int?
-  createdBy       Employee? @relation("ServiceInvoiceCreatedBy", fields: [createdById], references: [id])
-  approvedById    Int?
-  approvedBy      Employee? @relation("ServiceInvoiceApprovedBy", fields: [approvedById], references: [id])
+  createdById  Int?
+  createdBy    Employee? @relation("ServiceInvoiceCreatedBy", fields: [createdById], references: [id])
+  approvedById Int?
+  approvedBy   Employee? @relation("ServiceInvoiceApprovedBy", fields: [approvedById], references: [id])
 
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @default(now()) @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
 
   @@index([status])
   @@index([assetId])
@@ -4363,39 +4364,39 @@ model ServiceInvoice {
 // Compares System-computed depreciation/value vs Books (accounts) vs Audit (FA register)
 // Generated at FY-end or on demand for variance reporting and auditor sign-off.
 model ReconciliationSnapshot {
-  id           Int      @id @default(autoincrement())
-  asOfDate     DateTime
-  scope        String   // ASSET | CATEGORY | POOL
-  scopeId      Int      // assetId / categoryId / poolId
-  scopeLabel   String?  // human-readable (e.g. "MEDICAL EQUIPMENTS / FY2024-25")
+  id         Int      @id @default(autoincrement())
+  asOfDate   DateTime
+  scope      String // ASSET | CATEGORY | POOL
+  scopeId    Int // assetId / categoryId / poolId
+  scopeLabel String? // human-readable (e.g. "MEDICAL EQUIPMENTS / FY2024-25")
 
-  systemGrossBlock     Decimal? @db.Decimal(15, 2)
-  systemAccDep         Decimal? @db.Decimal(15, 2)
-  systemNetBlock       Decimal? @db.Decimal(15, 2)
+  systemGrossBlock Decimal? @db.Decimal(15, 2)
+  systemAccDep     Decimal? @db.Decimal(15, 2)
+  systemNetBlock   Decimal? @db.Decimal(15, 2)
 
-  booksGrossBlock      Decimal? @db.Decimal(15, 2)
-  booksAccDep          Decimal? @db.Decimal(15, 2)
-  booksNetBlock        Decimal? @db.Decimal(15, 2)
+  booksGrossBlock Decimal? @db.Decimal(15, 2)
+  booksAccDep     Decimal? @db.Decimal(15, 2)
+  booksNetBlock   Decimal? @db.Decimal(15, 2)
 
-  auditGrossBlock      Decimal? @db.Decimal(15, 2)
-  auditAccDep          Decimal? @db.Decimal(15, 2)
-  auditNetBlock        Decimal? @db.Decimal(15, 2)
+  auditGrossBlock Decimal? @db.Decimal(15, 2)
+  auditAccDep     Decimal? @db.Decimal(15, 2)
+  auditNetBlock   Decimal? @db.Decimal(15, 2)
 
-  varianceVsBooks      Decimal  @default(0) @db.Decimal(15, 2)
-  varianceVsAudit      Decimal  @default(0) @db.Decimal(15, 2)
-  variancePctVsBooks   Decimal? @db.Decimal(8, 2)
-  variancePctVsAudit   Decimal? @db.Decimal(8, 2)
-  varianceFlagged      Boolean  @default(false)
+  varianceVsBooks    Decimal  @default(0) @db.Decimal(15, 2)
+  varianceVsAudit    Decimal  @default(0) @db.Decimal(15, 2)
+  variancePctVsBooks Decimal? @db.Decimal(8, 2)
+  variancePctVsAudit Decimal? @db.Decimal(8, 2)
+  varianceFlagged    Boolean  @default(false)
 
-  status               String   @default("OPEN") // OPEN | RESOLVED | ACCEPTED
-  resolutionNotes      String?  @db.Text
-  resolvedById         Int?
-  resolvedBy           Employee? @relation("ReconResolvedBy", fields: [resolvedById], references: [id])
-  resolvedAt           DateTime?
+  status          String    @default("OPEN") // OPEN | RESOLVED | ACCEPTED
+  resolutionNotes String?   @db.Text
+  resolvedById    Int?
+  resolvedBy      Employee? @relation("ReconResolvedBy", fields: [resolvedById], references: [id])
+  resolvedAt      DateTime?
 
-  createdById          Int?
-  createdBy            Employee? @relation("ReconCreatedBy", fields: [createdById], references: [id])
-  createdAt            DateTime @default(now())
+  createdById Int?
+  createdBy   Employee? @relation("ReconCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
 
   @@index([asOfDate, scope])
   @@index([varianceFlagged])
