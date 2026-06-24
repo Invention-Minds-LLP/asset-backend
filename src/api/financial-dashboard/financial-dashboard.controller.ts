@@ -91,7 +91,8 @@ export const getFinancialSummary = async (req: AuthenticatedRequest, res: Respon
         where: { assetId: { in: assetIds } },
         _sum: { premiumAmount: true },
       }),
-      prisma.serviceContract.aggregate({
+      prisma.serviceContract.groupBy({
+        by: ["contractType"],
         where: { assetId: { in: assetIds } },
         _sum: { cost: true },
       }),
@@ -122,7 +123,14 @@ export const getFinancialSummary = async (req: AuthenticatedRequest, res: Respon
     const totalMaintenanceCost =
       Number(maintenanceSum._sum.totalCost || 0) + Number(ticketCostSum._sum.totalCost || 0);
     const totalInsurancePremiums = Number(insuranceSum._sum.premiumAmount || 0);
-    const totalAmcCmcCost = Number(contractSum._sum.cost || 0);
+    // Split service-contract spend by type (AMC vs CMC); combined total kept for TCO.
+    const totalAmcCost = contractSum
+      .filter((c) => c.contractType === "AMC")
+      .reduce((s, c) => s + Number(c._sum.cost || 0), 0);
+    const totalCmcCost = contractSum
+      .filter((c) => c.contractType === "CMC")
+      .reduce((s, c) => s + Number(c._sum.cost || 0), 0);
+    const totalAmcCmcCost = contractSum.reduce((s, c) => s + Number(c._sum.cost || 0), 0);
     const totalDepreciation = Number(depreciationSum._sum.accumulatedDepreciation || 0);
     const totalSparePartCost = Number(sparePartUsageSum._sum.costAtUse || 0);
 
@@ -170,6 +178,8 @@ export const getFinancialSummary = async (req: AuthenticatedRequest, res: Respon
       totalDonationValue,
       totalMaintenanceCost,
       totalInsurancePremiums,
+      totalAmcCost,
+      totalCmcCost,
       totalAmcCmcCost,
       totalDepreciation,
       totalSparePartCost,
@@ -311,6 +321,158 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
     res.json({ financialYears: tree, view });
   } catch (err: any) {
     console.error("getFYBreakdown error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── 3b. Category Breakdown (Tree Data, grouped by category) ────────────────────
+export const getCategoryBreakdown = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user as any;
+    const query = req.query;
+    const view = (query.view as string) || "purchase";
+
+    const { clause, params } = buildRawWhereClause(query, user);
+
+    // Same per-view aggregations as getFYBreakdown, but grouped by category too.
+    let rows: any[];
+
+    switch (view) {
+      case "maintenance":
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(mh.totalCost),0) + COALESCE(SUM(t.totalCost),0) as total,
+                  COUNT(DISTINCT a.id) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           LEFT JOIN maintenancehistory mh ON mh.assetId = a.id
+           LEFT JOIN ticket t ON t.assetId = a.id
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+
+      case "insurance":
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(ai.premiumAmount),0) as total,
+                  COUNT(DISTINCT a.id) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           LEFT JOIN assetinsurance ai ON ai.assetId = a.id
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+
+      case "amc_cmc":
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(sc.cost),0) as total,
+                  COUNT(DISTINCT a.id) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           LEFT JOIN servicecontract sc ON sc.assetId = a.id
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+
+      case "depreciation":
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(ad.accumulatedDepreciation),0) as total,
+                  COUNT(DISTINCT a.id) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           LEFT JOIN assetdepreciation ad ON ad.assetId = a.id
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+
+      case "total_cost":
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(a.purchaseCost),0) +
+                  COALESCE(SUM(a.leaseAmount),0) +
+                  COALESCE(SUM(a.rentalAmount),0) as total,
+                  COUNT(*) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+
+      case "purchase":
+      default:
+        rows = await prisma.$queryRawUnsafe(
+          `SELECT a.assetCategoryId as catId, ac.name as catName,
+                  YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  COALESCE(SUM(a.purchaseCost),0) as total, COUNT(*) as assetCount
+           FROM asset a
+           LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
+           WHERE ${clause}
+           GROUP BY a.assetCategoryId, ac.name, YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           ORDER BY yr, mo`,
+          ...params
+        );
+        break;
+    }
+
+    // Group rows per category, then build an FY tree for each category.
+    const catMap = new Map<string, { catId: number | null; catName: string; rows: any[] }>();
+    for (const r of rows) {
+      const key = String(r.catId ?? "null");
+      if (!catMap.has(key)) {
+        catMap.set(key, {
+          catId: r.catId != null ? Number(r.catId) : null,
+          catName: r.catName || "Uncategorized",
+          rows: [],
+        });
+      }
+      catMap.get(key)!.rows.push({
+        yr: Number(r.yr),
+        mo: Number(r.mo),
+        total: Number(r.total || 0),
+        assetCount: Number(r.assetCount || 0),
+      });
+    }
+
+    const categories = [...catMap.values()]
+      .map((c) => {
+        const financialYears = buildFYTree(c.rows);
+        const total = financialYears.reduce((s, fy) => s + fy.total, 0);
+        const assetCount = financialYears.reduce((s, fy) => s + fy.assetCount, 0);
+        return {
+          categoryId: c.catId,
+          categoryName: c.catName,
+          total,
+          assetCount,
+          financialYears,
+        };
+      })
+      .sort((a, b) => b.total - a.total);
+
+    res.json({ categories, view });
+  } catch (err: any) {
+    console.error("getCategoryBreakdown error:", err);
     res.status(500).json({ message: err.message });
   }
 };

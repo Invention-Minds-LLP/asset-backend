@@ -35,6 +35,7 @@ enum EmployeeRole {
   EXECUTIVE
   FINANCE
   OPERATIONS
+  CFO
 }
 
 enum AssignmentStage {
@@ -821,6 +822,9 @@ model Employee {
   batchDepreciationRuns      BatchDepreciationRun[] @relation("BatchRunBy")
   batchDepreciationApprovals BatchDepreciationRun[] @relation("BatchApprovedBy")
 
+  depreciationAuditsFinance DepreciationAudit[] @relation("DepAuditFinanceApprovedBy")
+  depreciationAuditsCfo     DepreciationAudit[] @relation("DepAuditCfoApprovedBy")
+
   // Finance Engine relations
   financeConfigUpdates    FinanceConfig[]                 @relation("FinanceConfigUpdatedBy")
   financeVouchersCreated  FinanceVoucher[]                @relation("FVCreatedBy")
@@ -1003,6 +1007,49 @@ model BatchDepreciationRun {
   financeVouchers FinanceVoucher[]  @relation("VoucherBatchRun")
 
   @@map("batchdepreciationrun")
+}
+
+// Per-financial-year depreciation audit sign-off.
+// Flow: FINANCE (Finance HOD) creates → their creation IS their approval →
+// status PENDING. Then CFO and the External CA each approve (parallel, both
+// required). When both cfoApprovedAt and caApprovedAt are set → status AUDITED.
+// Either approver may REJECT (with reason); FINANCE can revise and resubmit.
+model DepreciationAudit {
+  id           Int     @id @default(autoincrement())
+  fiscalYear   Int     @unique // e.g. 2025 = FY 2025-26 (FY start year)
+  status       String  @default("PENDING") // PENDING | AUDITED | REJECTED
+
+  // Snapshot of the depreciation position at creation time (for the record).
+  totalDepreciation Decimal @default(0) @db.Decimal(14, 2)
+  assetCount        Int     @default(0)
+
+  notes String? @db.Text
+
+  // Finance HOD — creates and simultaneously approves.
+  financeApprovedById Int
+  financeApprovedBy   Employee @relation("DepAuditFinanceApprovedBy", fields: [financeApprovedById], references: [id])
+  financeApprovedAt   DateTime @default(now())
+
+  // CFO approval.
+  cfoApprovedById Int?
+  cfoApprovedBy   Employee? @relation("DepAuditCfoApprovedBy", fields: [cfoApprovedById], references: [id])
+  cfoApprovedAt   DateTime?
+
+  // External CA — identified by email (no Employee FK; separate auditor login).
+  caApprovedByEmail String?
+  caApprovedByName  String?
+  caApprovedAt      DateTime?
+
+  // Rejection (by CFO or CA).
+  rejectedByRole String? // CFO | CA
+  rejectedByName String?
+  rejectionReason String? @db.Text
+  rejectedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("depreciationaudit")
 }
 
 model AssetInsurance {
