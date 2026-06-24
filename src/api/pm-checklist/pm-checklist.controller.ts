@@ -100,7 +100,7 @@ export const createChecklistRun = async (req: any, res: Response) => {
   try {
     const user = mustUser(req);
 
-    const { assetId, templateId, scheduledDue, assetName } = req.body;
+    const { assetId, templateId, scheduledDue } = req.body;
 
     if (!assetId || !templateId || !scheduledDue) {
        res.status(400).json({ message: "Missing required fields" });
@@ -110,7 +110,6 @@ export const createChecklistRun = async (req: any, res: Response) => {
     const run = await prisma.preventiveChecklistRun.create({
       data: {
         assetId,
-        assetName,
         templateId,
         scheduledDue: new Date(scheduledDue),
         status: "DUE",
