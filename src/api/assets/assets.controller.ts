@@ -121,6 +121,120 @@ export const getAllAssets = async (req: Request, res: Response) => {
   }
 };
 
+// Role-based visibility scope for assets. Mirrors getAllAssets' inline logic so
+// the new paginated endpoint stays in sync without touching the legacy one.
+async function buildAssetAccessWhere(user: any): Promise<any> {
+  const role = user?.role;
+  const departmentId = user?.departmentId;
+  const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
+
+  let isStoreDept = false;
+  if (departmentId) {
+    const dept = await prisma.department.findUnique({ where: { id: Number(departmentId) }, select: { name: true } });
+    if (dept?.name?.toUpperCase().includes('STORE')) isStoreDept = true;
+  }
+
+  if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
+    return {};
+  } else if (role === 'HOD') {
+    return { departmentId: Number(departmentId) };
+  } else if (role === 'SUPERVISOR') {
+    return { supervisorId: Number(employeeDbId) };
+  } else {
+    // EXECUTIVE — department assets, else own allotted
+    return departmentId ? { departmentId: Number(departmentId) } : { allottedToId: Number(employeeDbId) };
+  }
+}
+
+// GET /assets/paginated — server-side pagination + search for the master table.
+// Returns { data, total, activeCount, page, limit }. Separate from getAllAssets
+// so the 16 array-consuming callers of GET /assets are unaffected.
+export const getAssetsPaginated = async (req: Request, res: Response) => {
+  try {
+    const user = req.user as any;
+
+    const page = Math.max(1, parseInt(String(req.query.page)) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit)) || 10));
+    const search = (req.query.search ? String(req.query.search) : '').trim();
+    const filterField = String(req.query.filterField || 'assetName');
+
+    const accessWhere = await buildAssetAccessWhere(user);
+
+    // Parity with getAllAssets' optional store/status filters.
+    const where: any = { ...accessWhere };
+    const { currentStoreId, status } = req.query;
+    if (currentStoreId) where.currentStoreId = Number(currentStoreId);
+    if (status) where.status = String(status);
+
+    // Search is layered on top of the access scope (MySQL collation = case-insensitive).
+    const searchWhere: any = { ...where };
+    if (search) {
+      // Plain String columns → substring match.
+      const STRING_FIELDS = [
+        'assetName', 'assetId', 'assetType', 'serialNumber', 'referenceCode', 'storeAssetId',
+        'manufacturer', 'invoiceNumber', 'purchaseOrderNo', 'currentLocation',
+        'status', 'modeOfProcurement', 'physicalCondition', 'workingCondition',
+        'warrantyStatus', 'disposalMethod',
+      ];
+      // To-one relations → substring match on the related row's name.
+      const RELATION_FIELDS: Record<string, string> = {
+        categoryName: 'assetCategory',
+        'assetCategory?.name': 'assetCategory',
+        department: 'department',
+        vendor: 'vendor',
+        allottedTo: 'allottedTo',
+        supervisor: 'supervisor',
+        currentStore: 'currentStore',
+      };
+
+      if (filterField === 'assetNature') {
+        // Real enum — must be an exact, valid value or the filter is ignored.
+        const v = search.toUpperCase();
+        if (v === 'TANGIBLE' || v === 'INTANGIBLE') searchWhere.assetNature = v;
+      } else if (RELATION_FIELDS[filterField]) {
+        searchWhere[RELATION_FIELDS[filterField]] = { name: { contains: search } };
+      } else if (STRING_FIELDS.includes(filterField)) {
+        searchWhere[filterField] = { contains: search };
+      } else {
+        searchWhere.assetName = { contains: search };
+      }
+    }
+
+    const select = {
+      id: true,
+      assetId: true,
+      storeAssetId: true,
+      referenceCode: true,
+      assetName: true,
+      assetType: true,
+      status: true,
+      assetPhoto: true,
+      hodApprovalStatus: true,
+      assetCategory: { select: { name: true } },
+      department: { select: { name: true } },
+      allottedTo: { select: { name: true } },
+    } as const;
+
+    const [data, total, activeCount] = await Promise.all([
+      prisma.asset.findMany({
+        where: searchWhere,
+        select,
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.asset.count({ where: searchWhere }),
+      // Scope-wide active count (independent of search) for the summary card.
+      prisma.asset.count({ where: { ...where, status: 'ACTIVE' } }),
+    ]);
+
+    res.json({ data, total, activeCount, page, limit });
+  } catch (error) {
+    console.error('getAssetsPaginated error:', error);
+    res.status(500).json({ message: 'Failed to fetch assets' });
+  }
+};
+
 // GET /assets/all-dropdown — lightweight list of ALL assets for dropdowns (ticket form, etc.)
 export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
   try {

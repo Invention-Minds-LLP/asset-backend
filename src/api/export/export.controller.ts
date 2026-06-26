@@ -2089,7 +2089,8 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
             include: { asset: true, assignedTo: true, assignedBy: true } as any,
             orderBy: { createdAt: "desc" },
           }),
-          (prisma as any).subAsset.findMany({ include: { asset: true } as any }).catch(() => []),
+          // Sub-assets are Asset rows linked to a parent (no separate SubAsset model).
+          prisma.asset.findMany({ where: { parentAssetId: { not: null } }, include: { parentAsset: true } as any }).catch(() => []),
           prisma.document.findMany({ include: { asset: true } as any }).catch(() => []),
           prisma.maintenanceHistory.findMany({
             include: { asset: true } as any,
@@ -2123,10 +2124,10 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           fmt(a.createdAt), a.status, fmt(a.acknowledgedAt),
         ]);
 
-        const subHeaders = ["Asset ID", "Asset Name", "Sub-Asset ID", "Sub-Asset Name", "Type", "Quantity"];
+        const subHeaders = ["Parent Asset ID", "Parent Asset Name", "Sub-Asset ID", "Sub-Asset Name", "Type", "Status"];
         const subRows: Row[] = (subAssets as any[]).map(s => [
-          s.asset?.assetId ?? "", s.asset?.assetName ?? "",
-          s.subAssetId ?? s.id, s.name ?? "", s.type ?? "", s.quantity ?? "",
+          s.parentAsset?.assetId ?? "", s.parentAsset?.assetName ?? "",
+          s.assetId ?? s.id, s.assetName ?? "", s.assetType ?? "", s.status ?? "",
         ]);
 
         const docHeaders = ["Asset ID", "Asset Name", "Document Title", "Type", "File URL", "Uploaded On"];

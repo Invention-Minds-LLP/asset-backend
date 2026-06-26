@@ -1,11 +1,12 @@
 import express from "express";
-import { getAllAssets, getAllAssetsForDropdown, getAssetById, createAsset, updateAsset, deleteAsset, getAssetByAssetId, uploadAssetImage, updateAssetAssignment, getAssetSpecifications, createAssetSpecification, updateAssetSpecification, getAssetScanSummary, getAssetScanDetails, hodApproveAsset } from "./assets.controller";
+import { getAllAssets, getAllAssetsForDropdown, getAssetsPaginated, getAssetById, createAsset, updateAsset, deleteAsset, getAssetByAssetId, uploadAssetImage, updateAssetAssignment, getAssetSpecifications, createAssetSpecification, updateAssetSpecification, getAssetScanSummary, getAssetScanDetails, hodApproveAsset } from "./assets.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = express.Router();
 
 router.get("/",authenticateToken, getAllAssets);
 router.get("/all-dropdown", authenticateToken, getAllAssetsForDropdown);
+router.get("/paginated", authenticateToken, getAssetsPaginated);
 router.get('/:assetId', authenticateToken, getAssetByAssetId);
 router.patch("/:id/assignment", authenticateToken, updateAssetAssignment);
 
