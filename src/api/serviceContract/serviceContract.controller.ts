@@ -73,6 +73,7 @@ export const createServiceContract = async (req: any, res: Response) => {
     const warrantyConflict = await prisma.warranty.findFirst({
       where: {
         assetId: asset.id,
+        isActive: true,            // only the current warranty — ignore expired/superseded rows
         isUnderWarranty: true,
         warrantyEnd: { gte: start },
       },

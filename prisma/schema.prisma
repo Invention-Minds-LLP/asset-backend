@@ -592,6 +592,10 @@ model MaintenanceHistory {
   serviceContractId Int?
   serviceContract   ServiceContract? @relation(fields: [serviceContractId], references: [id])
 
+  // Links a completed PM back to the schedule that triggered it (null for ad-hoc/contract work).
+  maintenanceScheduleId Int?
+  maintenanceSchedule   MaintenanceSchedule? @relation(fields: [maintenanceScheduleId], references: [id])
+
   scheduledDue          DateTime
   actualDoneAt          DateTime?
   wasLate               Boolean
@@ -1338,6 +1342,7 @@ model MaintenanceSchedule {
   updatedAt DateTime @default(now()) @updatedAt
 
   serviceInvoices ServiceInvoice[]
+  maintenanceHistories MaintenanceHistory[]
 
   @@index([assetId, nextDueAt])
   @@map("maintenanceschedule")

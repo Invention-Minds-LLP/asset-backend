@@ -56,6 +56,15 @@ async function checkWarrantyExpiryInternal() {
   const horizon = new Date();
   horizon.setDate(now.getDate() + 60); // widest reminder window
 
+  // Flip any warranty whose end date has passed to inactive, so stale
+  // isActive=true rows don't keep counting as "under warranty" (e.g. blocking
+  // AMC/CMC contracts). The displayed "Expired" badge already uses the date,
+  // but the persisted flag wasn't being updated.
+  const deactivated = await prisma.warranty.updateMany({
+    where: { isActive: true, warrantyEnd: { lt: now } },
+    data: { isActive: false },
+  });
+
   const warranties = await prisma.warranty.findMany({
     where: {
       isActive: true,
@@ -92,7 +101,7 @@ async function checkWarrantyExpiryInternal() {
     alerted++;
   }
 
-  return { type: "warranty", expiringCount: warranties.length, alerted };
+  return { type: "warranty", deactivated: deactivated.count, expiringCount: warranties.length, alerted };
 }
 
 export const checkWarrantyExpiry = async (_req: Request, res: Response) => {

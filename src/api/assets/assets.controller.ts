@@ -73,6 +73,10 @@ export const getAllAssets = async (req: Request, res: Response) => {
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
 
+    // Sub-assets/components (parentAssetId set) belong under their parent's expand
+    // row, not as standalone entries — exclude them unless explicitly requested.
+    if (req.query.includeSubAssets !== "true") where.parentAssetId = null;
+
     // Slim payload: only the columns the list/export actually use. Avoids
     // pulling every Asset column (incl. Text blobs, qrCode, assetPhoto of
     // unshown rows) plus full related records for ~4k rows.
@@ -91,6 +95,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
         assetCategory: { select: { name: true } },
         department: { select: { name: true } },
         allottedTo: { select: { name: true } },
+        _count: { select: { subAssets: true } }, // sub-asset count for the Sub-Assets screen badge
       },
     });
 
@@ -165,6 +170,9 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
     const { currentStoreId, status } = req.query;
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
+
+    // Exclude sub-assets/components — they belong under their parent, not the main list.
+    if (req.query.includeSubAssets !== "true") where.parentAssetId = null;
 
     // Search is layered on top of the access scope (MySQL collation = case-insensitive).
     const searchWhere: any = { ...where };

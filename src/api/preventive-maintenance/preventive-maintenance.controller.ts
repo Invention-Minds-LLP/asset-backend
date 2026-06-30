@@ -145,10 +145,54 @@ export const getAllSchedules = async (_req: Request, res: Response) => {
 
     const data = await prisma.maintenanceSchedule.findMany({
         where,
-        include: { asset: true },
+        include: {
+            asset: true,
+            // Latest completed PM for this schedule (executeMaintenance always sets actualDoneAt).
+            maintenanceHistories: {
+                orderBy: { actualDoneAt: "desc" },
+                take: 1,
+                select: { actualDoneAt: true, wasLate: true, scheduledDue: true },
+            },
+            _count: { select: { maintenanceHistories: true } },
+        },
         orderBy: { nextDueAt: "asc" },
     });
-    res.json(data);
+
+    // Fallback: most maintenance is logged per-asset (maintenanceHistory.create) and
+    // never carries maintenanceScheduleId, so schedule-linked history is usually empty.
+    // Pull the asset's latest completed service so "Last Done / PM Done?" still reflects
+    // real work even when it wasn't logged against this specific schedule.
+    const assetIds = [...new Set(data.map((s: any) => s.assetId))];
+    const lastByAsset = assetIds.length
+        ? await prisma.maintenanceHistory.groupBy({
+              by: ["assetId"],
+              where: { assetId: { in: assetIds }, actualDoneAt: { not: null } },
+              _max: { actualDoneAt: true },
+              _count: { _all: true },
+          })
+        : [];
+    const assetLastMap = new Map(
+        lastByAsset.map((r: any) => [r.assetId, { at: r._max.actualDoneAt, count: r._count._all }])
+    );
+
+    // Flatten the "done?" signal so the UI doesn't have to dig into the relation.
+    const enriched = data.map((s: any) => {
+        const linked = s.maintenanceHistories?.[0] ?? null;
+        const assetLast = assetLastMap.get(s.assetId) ?? null;
+        const { maintenanceHistories, _count, ...rest } = s;
+        const linkedCount = _count?.maintenanceHistories ?? 0;
+        return {
+            ...rest,
+            // Prefer history logged against this schedule; otherwise the asset's latest service.
+            lastDoneAt: linked?.actualDoneAt ?? assetLast?.at ?? null,
+            lastWasLate: linked?.wasLate ?? null,
+            lastScheduledDue: linked?.scheduledDue ?? null,
+            completedCount: linkedCount || assetLast?.count || 0,
+            lastDoneSource: linked ? "schedule" : (assetLast?.at ? "asset" : null),
+        };
+    });
+
+    res.json(enriched);
 };
 
 /** =========================
@@ -224,6 +268,7 @@ export const executeMaintenance = async (req: any, res: Response) => {
           asset: {
             connect: { id: assetId },
           },
+          ...(schedule ? { maintenanceSchedule: { connect: { id: schedule.id } } } : {}),
           scheduledDue: schedule?.nextDueAt ?? new Date(),
           actualDoneAt: new Date(),
           wasLate: schedule ? new Date() > schedule.nextDueAt : false,
