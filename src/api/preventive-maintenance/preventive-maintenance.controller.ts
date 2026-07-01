@@ -315,6 +315,15 @@ export const executeMaintenance = async (req: any, res: Response) => {
 
       // 3️⃣ Consumables
       for (const c of consumables) {
+        // Draw down stock — previously only the ledger row was written, so
+        // Consumable.stockQuantity never decreased on maintenance usage.
+        await tx.consumable.update({
+          where: { id: c.id },
+          data: {
+            stockQuantity: { decrement: c.qty },
+          },
+        });
+
         await tx.inventoryTransaction.create({
           data: {
             type: "OUT",

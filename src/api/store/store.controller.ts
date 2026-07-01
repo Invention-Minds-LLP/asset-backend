@@ -2,6 +2,31 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
+// Role-aware store visibility:
+//  - Admin / leadership / Store-department users → all stores
+//  - HOD → main stores (to draw from) + their own department's sub-stores
+//  - Everyone else → only their own department's sub-stores
+export async function buildStoreAccessWhere(user: any): Promise<any> {
+  const role = user?.role;
+  const deptId = user?.departmentId ? Number(user.departmentId) : null;
+
+  let isStoreDept = false;
+  if (deptId) {
+    const dept = await prisma.department.findUnique({ where: { id: deptId }, select: { name: true } });
+    if (dept?.name?.toUpperCase().includes("STORE")) isStoreDept = true;
+  }
+
+  if (["ADMIN", "CEO_COO", "OPERATIONS", "FINANCE"].includes(role) || isStoreDept) {
+    return {}; // see everything
+  }
+  if (!deptId) return { id: -1 }; // no department → nothing scoped
+  if (role === "HOD") {
+    return { OR: [{ storeType: "MAIN_STORE" }, { departmentId: deptId }] };
+  }
+  // SUPERVISOR / EXECUTIVE / others → only their own department's sub-stores
+  return { storeType: "SUB_STORE", departmentId: deptId };
+}
+
 interface CreateStoreBody {
   name: string;
   code?: string;
@@ -24,7 +49,8 @@ export const getAllStores = async (req: AuthenticatedRequest, res: Response) => 
   try {
     const { storeType } = req.query;
 
-    const where: { isActive: boolean; storeType?: string } = { isActive: true };
+    const access = await buildStoreAccessWhere(req.user);
+    const where: any = { isActive: true, ...access };
     if (storeType) {
       where.storeType = String(storeType);
     }
@@ -50,9 +76,75 @@ export const getAllStores = async (req: AuthenticatedRequest, res: Response) => 
   }
 };
 
+// Lightweight, UN-scoped list of all active stores — for transfer destination
+// dropdowns, so a user can send to any store (their data views stay scoped).
+export const getStoreOptions = async (_req: AuthenticatedRequest, res: Response) => {
+  try {
+    const stores = await prisma.store.findMany({
+      where: { isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, code: true, storeType: true, departmentId: true },
+    });
+    res.json(stores);
+  } catch (error) {
+    console.error("getStoreOptions error:", error);
+    res.status(500).json({ message: "Failed to fetch store options" });
+  }
+};
+
+export async function isStoreDeptUser(user: any): Promise<boolean> {
+  const deptId = user?.departmentId ? Number(user.departmentId) : null;
+  if (!deptId) return false;
+  const dept = await prisma.department.findUnique({ where: { id: deptId }, select: { name: true } });
+  return !!dept?.name?.toUpperCase().includes("STORE");
+}
+
+// Stores the current user may transfer FROM (source):
+//  - Admin/leadership → all stores
+//  - Store-department users → main stores + unassigned stores + their own dept's stores
+//  - Everyone else → only their own department's stores
+export const getTransferSourceStores = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const role = (req.user as any)?.role;
+    const deptId = (req.user as any)?.departmentId ? Number((req.user as any).departmentId) : null;
+    const where: any = { isActive: true };
+
+    if (["ADMIN", "CEO_COO", "OPERATIONS", "FINANCE"].includes(role)) {
+      // all stores
+    } else if (await isStoreDeptUser(req.user)) {
+      where.OR = [
+        { storeType: "MAIN_STORE" },
+        { departmentId: null },
+        ...(deptId ? [{ departmentId: deptId }] : []),
+      ];
+    } else if (deptId) {
+      where.departmentId = deptId;
+    } else {
+      where.id = -1; // no department → nothing
+    }
+
+    const stores = await prisma.store.findMany({
+      where,
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, code: true, storeType: true, departmentId: true },
+    });
+    res.json(stores);
+  } catch (error) {
+    console.error("getTransferSourceStores error:", error);
+    res.status(500).json({ message: "Failed to fetch source stores" });
+  }
+};
+
 export const getStoreById = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id, 10);
+
+    // Guard: can't open a store outside the caller's access scope.
+    const access = await buildStoreAccessWhere(req.user);
+    if (Object.keys(access).length > 0) {
+      const allowed = await prisma.store.findFirst({ where: { id, ...access }, select: { id: true } });
+      if (!allowed) { res.status(403).json({ message: "You don't have access to this store" }); return; }
+    }
 
     const store = await prisma.store.findUnique({
       where: { id },

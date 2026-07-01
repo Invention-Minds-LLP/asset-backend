@@ -2,6 +2,15 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { Prisma } from "@prisma/client";
+import { buildStoreAccessWhere } from "../store/store.controller";
+
+// Returns the store ids the caller may see, or null when they can see all.
+async function accessibleStoreIds(user: any): Promise<number[] | null> {
+  const access = await buildStoreAccessWhere(user);
+  if (Object.keys(access).length === 0) return null; // sees everything
+  const stores = await prisma.store.findMany({ where: { isActive: true, ...access }, select: { id: true } });
+  return stores.map((s) => s.id);
+}
 
 // ═══════════════════════════════════════════════════════════
 // GET STOCK BY STORE
@@ -9,6 +18,13 @@ import { Prisma } from "@prisma/client";
 export const getStockByStore = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const storeId = Number(req.params.storeId);
+
+    // Guard: dept users can't view a store outside their access.
+    const allowedIds = await accessibleStoreIds(req.user);
+    if (allowedIds !== null && !allowedIds.includes(storeId)) {
+      res.status(403).json({ message: "You don't have access to this store" });
+      return;
+    }
 
     const stock = await prisma.storeStockPosition.findMany({
       where: { storeId },
@@ -45,10 +61,12 @@ export const getStockByStore = async (req: AuthenticatedRequest, res: Response) 
 // ═══════════════════════════════════════════════════════════
 // GET STOCK SUMMARY (aggregate across all stores)
 // ═══════════════════════════════════════════════════════════
-export const getStockSummary = async (_req: AuthenticatedRequest, res: Response) => {
+export const getStockSummary = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const allowedIds = await accessibleStoreIds(req.user);
     const summary = await prisma.storeStockPosition.groupBy({
       by: ["itemType", "sparePartId", "consumableId"],
+      where: allowedIds !== null ? { storeId: { in: allowedIds } } : undefined,
       _sum: {
         currentQty: true,
         reservedQty: true,
@@ -94,11 +112,12 @@ export const getStockSummary = async (_req: AuthenticatedRequest, res: Response)
 // ═══════════════════════════════════════════════════════════
 // GET LOW STOCK ALERTS
 // ═══════════════════════════════════════════════════════════
-export const getLowStockAlerts = async (_req: AuthenticatedRequest, res: Response) => {
+export const getLowStockAlerts = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    const allowedIds = await accessibleStoreIds(req.user);
     // Prisma doesn't support field-to-field comparison directly, so filter in application code
     const allWithReorder = await prisma.storeStockPosition.findMany({
-      where: { reorderLevel: { not: null } },
+      where: { reorderLevel: { not: null }, ...(allowedIds !== null ? { storeId: { in: allowedIds } } : {}) },
       include: {
         store: { select: { id: true, name: true } },
       },

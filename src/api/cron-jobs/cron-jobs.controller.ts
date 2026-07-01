@@ -552,6 +552,62 @@ export const checkLowStock = async (_req: Request, res: Response) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  CONSUMABLE EXPIRY — alert on batches nearing/past expiry with stock remaining
+// ═════════════════════════════════════════════════════════════════════════════
+async function checkConsumableExpiryInternal() {
+  const now = new Date();
+  const horizon = new Date();
+  horizon.setDate(now.getDate() + 30);
+
+  const batches = await prisma.consumableBatch.findMany({
+    where: {
+      expiryDate: { not: null, lte: horizon },
+      remainingQuantity: { gt: 0 },
+    },
+    include: { consumable: { select: { name: true, unit: true } } },
+    orderBy: { expiryDate: "asc" },
+  });
+
+  if (batches.length === 0) return { type: "consumableExpiry", expiringCount: 0, alerted: 0 };
+
+  const admins = await getAdminIds();
+  if (!admins.length) return { type: "consumableExpiry", expiringCount: batches.length, alerted: 0 };
+
+  let alerted = 0;
+  for (const b of batches) {
+    if (!b.expiryDate) continue;
+    const daysLeft = daysBetween(now, new Date(b.expiryDate));
+    const expired = new Date(b.expiryDate) < now;
+    const band = expired ? "expired" : daysLeft <= 7 ? "7d" : "30d";
+
+    await notify({
+      type: "CONSUMABLE_EXPIRY",
+      title: expired ? "Consumable Expired" : "Consumable Expiring Soon",
+      message: expired
+        ? `${b.consumable.name}${b.batchNumber ? ` (batch ${b.batchNumber})` : ""} expired — ${b.remainingQuantity.toString()} ${b.consumable.unit || ""} still in stock.`
+        : `${b.consumable.name}${b.batchNumber ? ` (batch ${b.batchNumber})` : ""} expires in ${daysLeft} day(s) — ${b.remainingQuantity.toString()} ${b.consumable.unit || ""} remaining.`,
+      recipientIds: admins,
+      priority: expired || daysLeft <= 7 ? "HIGH" : "MEDIUM",
+      channel: "BOTH",
+      dedupeKey: `consumable-expiry-${b.id}-${band}`,
+    });
+    alerted++;
+  }
+
+  return { type: "consumableExpiry", expiringCount: batches.length, alerted };
+}
+
+export const checkConsumableExpiry = async (_req: Request, res: Response) => {
+  try {
+    const result = await checkConsumableExpiryInternal();
+    res.json({ message: `${result.alerted} consumable expiry alert(s) processed`, ...result });
+  } catch (error) {
+    console.error("checkConsumableExpiry error:", error);
+    res.status(500).json({ message: "Failed to check consumable expiry" });
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  ASSET ACTIVATION — IN_STORE → ACTIVE once the installed date is reached
 // ═════════════════════════════════════════════════════════════════════════════
 async function checkAssetActivationInternal() {
@@ -705,6 +761,7 @@ export async function runAllChecksInternal() {
     ["calibrationDue", checkCalibrationDueInternal],
     ["maintenanceDue", checkMaintenanceDueInternal],
     ["lowStock", checkLowStockInternal],
+    ["consumableExpiry", checkConsumableExpiryInternal],
     ["assetActivation", checkAssetActivationInternal],
     ["gatePassOverdue", runGatePassOverdueCheck],
   ];

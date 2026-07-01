@@ -4,6 +4,45 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { Prisma } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { buildStoreAccessWhere } from "../store/store.controller";
+
+const LEADERSHIP = ["ADMIN", "CEO_COO", "OPERATIONS"];
+
+async function userIsStoreDept(user: any): Promise<boolean> {
+  const deptId = user?.departmentId ? Number(user.departmentId) : null;
+  if (!deptId) return false;
+  const dept = await prisma.department.findUnique({ where: { id: deptId }, select: { name: true } });
+  return !!dept?.name?.toUpperCase().includes("STORE");
+}
+
+// Who may APPROVE a requested transfer = the custodian (HOD) of the SOURCE store.
+async function canApproveTransfer(user: any, fromStoreId: number): Promise<boolean> {
+  const role = user?.role;
+  if (LEADERSHIP.includes(role)) return true;
+  if (role !== "HOD") return false;
+  const deptId = user?.departmentId ? Number(user.departmentId) : null;
+  const src = await prisma.store.findUnique({ where: { id: fromStoreId }, select: { departmentId: true } });
+  if (!src) return false;
+  if (src.departmentId != null) return src.departmentId === deptId;        // HOD of source dept
+  return await userIsStoreDept(user);                                       // main store → store-dept HOD
+}
+
+// Who may RECEIVE = the custodian (HOD/Supervisor) of the DESTINATION store/department.
+async function canReceiveTransfer(user: any, t: { transferType: string; toStoreId: number | null; toDepartmentId: number | null }): Promise<boolean> {
+  const role = user?.role;
+  if (LEADERSHIP.includes(role)) return true;
+  const deptId = user?.departmentId ? Number(user.departmentId) : null;
+  if (!deptId) return false;
+  const deptCustodian = role === "HOD" || role === "SUPERVISOR";
+  if (t.transferType === "STORE_TO_DEPARTMENT") {
+    return deptCustodian && t.toDepartmentId === deptId;                    // only the destination department's people
+  }
+  if (!t.toStoreId) return false;
+  const dest = await prisma.store.findUnique({ where: { id: t.toStoreId }, select: { departmentId: true } });
+  if (!dest) return false;
+  if (dest.departmentId != null) return deptCustodian && dest.departmentId === deptId;
+  return await userIsStoreDept(user);                                       // main store dest → store-dept
+}
 
 // ─── helpers ───────────────────────────────────────────────
 class InsufficientStockError extends Error {
@@ -50,6 +89,27 @@ export const getAllTransfers = async (req: AuthenticatedRequest, res: Response) 
     if (toStoreId) where.toStoreId = Number(toStoreId);
     if (transferType) where.transferType = String(transferType);
 
+    // Scope: a dept user sees a transfer only when THEIR OWN store or department
+    // is directly involved — not every transfer out of the (shared) main store.
+    // So we match on the user's own department stores + their department id,
+    // deliberately excluding main stores from the "involved" test.
+    const access = await buildStoreAccessWhere(req.user);
+    const seeAll = Object.keys(access).length === 0;
+    if (!seeAll) {
+      const deptId = (req.user as any)?.departmentId ? Number((req.user as any).departmentId) : null;
+      if (!deptId) {
+        where.id = -1; // no department → nothing
+      } else {
+        const ownStores = await prisma.store.findMany({ where: { departmentId: deptId }, select: { id: true } });
+        const ownIds = ownStores.map((s) => s.id);
+        where.OR = [
+          { fromStoreId: { in: ownIds } },
+          { toStoreId: { in: ownIds } },
+          { toDepartmentId: deptId },
+        ];
+      }
+    }
+
     const [data, total] = await Promise.all([
       prisma.storeTransfer.findMany({
         where,
@@ -64,6 +124,64 @@ export const getAllTransfers = async (req: AuthenticatedRequest, res: Response) 
       }),
       prisma.storeTransfer.count({ where }),
     ]);
+
+    // Attach destination department name for STORE_TO_DEPARTMENT rows (no relation
+    // on the client yet, so resolve names in one extra query).
+    const deptIds = [...new Set(data.map((t) => t.toDepartmentId).filter((x): x is number => x != null))];
+    if (deptIds.length) {
+      const depts = await prisma.department.findMany({ where: { id: { in: deptIds } }, select: { id: true, name: true } });
+      const deptMap = new Map(depts.map((d) => [d.id, d]));
+      for (const t of data as any[]) {
+        t.toDepartment = t.toDepartmentId != null ? deptMap.get(t.toDepartmentId) ?? null : null;
+      }
+    }
+
+    // Per-row action flags — computed here (full data + user context) so the UI
+    // shows Approve/Receive only to the right custodian, matching the API guards.
+    const meRole = (req.user as any)?.role;
+    const meDept = (req.user as any)?.departmentId ? Number((req.user as any).departmentId) : null;
+    const meIsStoreDept = await userIsStoreDept(req.user);
+    const isLeader = LEADERSHIP.includes(meRole);
+    const storeIds = [...new Set(data.flatMap((t) => [t.fromStoreId, t.toStoreId]).filter((x): x is number => x != null))];
+    const storeDeptMap = new Map(
+      (await prisma.store.findMany({ where: { id: { in: storeIds } }, select: { id: true, departmentId: true } })).map((s) => [s.id, s.departmentId])
+    );
+    for (const t of data as any[]) {
+      let canApprove = false;
+      if (t.status === "REQUESTED") {
+        if (isLeader) canApprove = true;
+        else if (meRole === "HOD") {
+          const srcDept = storeDeptMap.get(t.fromStoreId) ?? null;
+          canApprove = srcDept != null ? srcDept === meDept : meIsStoreDept;
+        }
+      }
+      let canReceive = false;
+      if (t.status === "APPROVED" || t.status === "IN_TRANSIT") {
+        if (isLeader) canReceive = true;
+        else {
+          const deptCustodian = meRole === "HOD" || meRole === "SUPERVISOR";
+          if (t.transferType === "STORE_TO_DEPARTMENT") {
+            canReceive = deptCustodian && t.toDepartmentId === meDept;
+          } else {
+            const destDept = t.toStoreId != null ? (storeDeptMap.get(t.toStoreId) ?? null) : null;
+            canReceive = destDept != null ? (deptCustodian && destDept === meDept) : meIsStoreDept;
+          }
+        }
+      }
+      // Cancel: requester or source custodian, while not yet received/cancelled.
+      let canCancel = false;
+      if (!["RECEIVED", "CANCELLED"].includes(t.status)) {
+        const isRequester = t.requestedById != null && t.requestedById === (req.user as any)?.employeeDbId;
+        if (isRequester || isLeader) canCancel = true;
+        else if (meRole === "HOD") {
+          const srcDept = storeDeptMap.get(t.fromStoreId) ?? null;
+          canCancel = srcDept != null ? srcDept === meDept : meIsStoreDept;
+        }
+      }
+      t.canApprove = canApprove;
+      t.canReceive = canReceive;
+      t.canCancel = canCancel;
+    }
 
     res.json({ data, total, page: Number(page), limit: Number(limit) });
   } catch (e: any) {
@@ -89,7 +207,36 @@ export const getTransferById = async (req: AuthenticatedRequest, res: Response) 
       res.status(404).json({ message: "Store transfer not found" });
       return;
     }
-    res.json(transfer);
+
+    // Enrich each line item with a readable name + destination department name.
+    const spIds = transfer.items.filter((i) => i.sparePartId).map((i) => i.sparePartId!);
+    const cIds = transfer.items.filter((i) => i.consumableId).map((i) => i.consumableId!);
+    const aIds = transfer.items.filter((i) => i.assetId).map((i) => i.assetId!);
+    const [spares, consumables, assets, toDept] = await Promise.all([
+      spIds.length ? prisma.sparePart.findMany({ where: { id: { in: spIds } }, select: { id: true, name: true, partNumber: true } }) : [],
+      cIds.length ? prisma.consumable.findMany({ where: { id: { in: cIds } }, select: { id: true, name: true, unit: true } }) : [],
+      aIds.length ? prisma.asset.findMany({ where: { id: { in: aIds } }, select: { id: true, assetName: true, assetId: true } }) : [],
+      transfer.toDepartmentId ? prisma.department.findUnique({ where: { id: transfer.toDepartmentId }, select: { id: true, name: true } }) : null,
+    ]);
+    const spMap = new Map(spares.map((s) => [s.id, s]));
+    const cMap = new Map(consumables.map((c) => [c.id, c]));
+    const aMap = new Map(assets.map((a) => [a.id, a]));
+    const items = transfer.items.map((i) => {
+      let itemName = "";
+      if (i.itemType === "SPARE_PART" && i.sparePartId) {
+        const sp = spMap.get(i.sparePartId);
+        itemName = sp ? `${sp.name}${sp.partNumber ? ` (${sp.partNumber})` : ""}` : "";
+      } else if (i.itemType === "CONSUMABLE" && i.consumableId) {
+        const c = cMap.get(i.consumableId);
+        itemName = c ? `${c.name}${c.unit ? ` (${c.unit})` : ""}` : "";
+      } else if (i.itemType === "ASSET" && i.assetId) {
+        const a = aMap.get(i.assetId);
+        itemName = a ? `${a.assetName} (${a.assetId})` : "";
+      }
+      return { ...i, itemName };
+    });
+
+    res.json({ ...transfer, items, toDepartment: toDept });
   } catch (e: any) {
     res.status(500).json({ message: e.message });
   }
@@ -106,6 +253,19 @@ export const createTransfer = async (req: AuthenticatedRequest, res: Response) =
       res.status(400).json({ message: "fromStoreId, transferType, and items are required" });
       return;
     }
+
+    // Enforce source ownership: admins/store-keepers can source from any store,
+    // but a department user may only transfer FROM their own department's store.
+    const access = await buildStoreAccessWhere(req.user);
+    const canSourceAny = Object.keys(access).length === 0;
+    if (!canSourceAny) {
+      const deptId = (req.user as any)?.departmentId ? Number((req.user as any).departmentId) : null;
+      const src = await prisma.store.findUnique({ where: { id: Number(fromStoreId) }, select: { departmentId: true } });
+      if (!deptId || !src || src.departmentId !== deptId) {
+        res.status(403).json({ message: "You can only transfer from your own department's store" });
+        return;
+      }
+    }
     if (transferType === "STORE_TO_DEPARTMENT") {
       if (!toDepartmentId) {
         res.status(400).json({ message: "toDepartmentId is required for a Store-to-Department transfer" });
@@ -117,6 +277,12 @@ export const createTransfer = async (req: AuthenticatedRequest, res: Response) =
     }
 
     const transferNumber = await generateTransferNumber();
+
+    // Auto-approve when raised by a HOD/admin (they own or control the source).
+    // A supervisor's request stays REQUESTED until the source HOD approves it.
+    const role = (req.user as any)?.role;
+    const autoApprove = LEADERSHIP.includes(role) || role === "HOD";
+    const meId = req.user?.employeeDbId ?? undefined;
 
     // Validate availability and reserve stock atomically so concurrent
     // transfers cannot oversell the same source stock.
@@ -161,8 +327,10 @@ export const createTransfer = async (req: AuthenticatedRequest, res: Response) =
           toStoreId: toStoreId ? Number(toStoreId) : null,
           toDepartmentId: toDepartmentId ? Number(toDepartmentId) : null,
           transferType,
-          status: "REQUESTED",
-          requestedById: req.user?.employeeDbId ?? null,
+          status: autoApprove ? "APPROVED" : "REQUESTED",
+          requestedById: meId,
+          approvedById: autoApprove ? meId : null,
+          approvedAt: autoApprove ? new Date() : null,
           remarks: remarks || null,
           items: {
             create: items.map((item: any) => ({
@@ -180,13 +348,27 @@ export const createTransfer = async (req: AuthenticatedRequest, res: Response) =
           toStore: { select: { id: true, name: true } },
         },
       });
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
-    logAction({ entityType: "STORE_TRANSFER", entityId: transfer.id, action: "CREATE", description: `Store transfer ${transfer.transferNumber} created (${transferType})`, performedById: req.user?.employeeDbId });
+    logAction({ entityType: "STORE_TRANSFER", entityId: transfer.id, action: autoApprove ? "APPROVE" : "CREATE", description: `Store transfer ${transfer.transferNumber} created (${transferType})${autoApprove ? " — auto-approved" : ""}`, performedById: meId });
 
-    // Notify admins about new store transfer request
     const adminIds = await getAdminIds();
-    notify({ type: "TRANSFER", title: "Store Transfer Requested", message: `Store transfer ${transfer.transferNumber} (${transferType}) requested`, recipientIds: adminIds, createdById: req.user?.employeeDbId });
+    if (autoApprove) {
+      // Already approved → tell the destination's people to receive it.
+      let destHods: number[] = [];
+      if (transferType === "STORE_TO_DEPARTMENT" && toDepartmentId) {
+        destHods = await getDepartmentHODs(Number(toDepartmentId));
+      } else if (toStoreId) {
+        const dest = await prisma.store.findUnique({ where: { id: Number(toStoreId) }, select: { departmentId: true } });
+        if (dest?.departmentId) destHods = await getDepartmentHODs(dest.departmentId);
+      }
+      notify({ type: "TRANSFER", title: "Store Transfer Ready to Receive", message: `Store transfer ${transfer.transferNumber} (${transferType}) is approved and ready to receive.`, recipientIds: [...new Set([...destHods, ...adminIds])], createdById: meId });
+    } else {
+      // Needs approval → notify the source store's HOD.
+      const src = await prisma.store.findUnique({ where: { id: Number(fromStoreId) }, select: { departmentId: true } });
+      const srcHods = src?.departmentId ? await getDepartmentHODs(src.departmentId) : [];
+      notify({ type: "TRANSFER", title: "Store Transfer Needs Approval", message: `Store transfer ${transfer.transferNumber} (${transferType}) is awaiting your approval.`, recipientIds: [...new Set([...srcHods, ...adminIds])], createdById: meId });
+    }
 
     res.status(201).json(transfer);
   } catch (e: any) {
@@ -210,6 +392,12 @@ export const approveTransfer = async (req: AuthenticatedRequest, res: Response) 
     if (!transfer) { res.status(404).json({ message: "Store transfer not found" }); return; }
     if (transfer.status !== "REQUESTED") {
       res.status(400).json({ message: `Cannot approve transfer in ${transfer.status} status` });
+      return;
+    }
+
+    // Only the source store's HOD (or admin) may approve.
+    if (!(await canApproveTransfer(req.user, transfer.fromStoreId))) {
+      res.status(403).json({ message: "Only the source store's HOD can approve this transfer" });
       return;
     }
 
@@ -263,7 +451,9 @@ export const markInTransit = async (req: AuthenticatedRequest, res: Response) =>
 export const receiveTransfer = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
-    const { receivedById, items: receivedItems } = req.body;
+    const { receivedById } = req.body;
+    // Accept either key: the web app sends "receivedItems", older callers send "items".
+    const receivedItems = req.body.receivedItems ?? req.body.items;
 
     const transfer = await prisma.storeTransfer.findUnique({
       where: { id },
@@ -273,6 +463,25 @@ export const receiveTransfer = async (req: AuthenticatedRequest, res: Response) 
     if (transfer.status !== "IN_TRANSIT" && transfer.status !== "APPROVED") {
       res.status(400).json({ message: `Cannot receive transfer in ${transfer.status} status` });
       return;
+    }
+
+    // Only the destination's HOD/Supervisor (or store-keeper for a main store) may receive.
+    if (!(await canReceiveTransfer(req.user, transfer))) {
+      res.status(403).json({ message: "Only the destination store/department's staff can receive this transfer" });
+      return;
+    }
+
+    // Validate received quantities — you can't receive more than was sent.
+    if (receivedItems?.length) {
+      for (const ri of receivedItems) {
+        const ti = transfer.items.find((t) => t.id === ri.itemId);
+        if (!ti) continue;
+        const rq = Number(ri.receivedQty);
+        if (isNaN(rq) || rq < 0 || rq > Number(ti.quantity)) {
+          res.status(400).json({ message: `Received quantity must be between 0 and the sent quantity (${ti.quantity}).` });
+          return;
+        }
+      }
     }
 
     const result = await prisma.$transaction(async (tx) => {
@@ -423,12 +632,45 @@ export const receiveTransfer = async (req: AuthenticatedRequest, res: Response) 
         where: { id },
         include: { items: true },
       });
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
     logAction({ entityType: "STORE_TRANSFER", entityId: id, action: "STATUS_CHANGE", description: `Store transfer ${transfer.transferNumber} received`, performedById: req.user?.employeeDbId });
 
     // Notify requester that transfer has been received
     if (transfer.requestedById) notify({ type: "TRANSFER", title: "Store Transfer Received", message: `Store transfer ${transfer.transferNumber} has been received`, recipientIds: [transfer.requestedById], channel: "BOTH" });
+
+    // Discrepancy alert — any line received short of what was sent (shortfall was
+    // already returned to the source's Available). Notify the source HOD + admins.
+    const shortLines = transfer.items
+      .map((ti) => {
+        const ri = receivedItems?.find((r: any) => r.itemId === ti.id);
+        const received = ri ? Number(ri.receivedQty) : Number(ti.quantity);
+        return { sent: Number(ti.quantity), received };
+      })
+      .filter((d) => d.received < d.sent);
+
+    if (shortLines.length) {
+      const src = await prisma.store.findUnique({ where: { id: transfer.fromStoreId }, select: { departmentId: true } });
+      let srcHods: number[] = [];
+      if (src?.departmentId) {
+        srcHods = await getDepartmentHODs(src.departmentId);
+      } else {
+        // Main store has no department → its custodians are the store-department HODs.
+        const storeDepts = await prisma.department.findMany({ where: { name: { contains: "STORE" } }, select: { id: true } });
+        srcHods = (await Promise.all(storeDepts.map((d) => getDepartmentHODs(d.id)))).flat();
+      }
+      const admins = await getAdminIds();
+      const shortTotal = shortLines.reduce((s, d) => s + (d.sent - d.received), 0);
+      notify({
+        type: "TRANSFER",
+        title: "Transfer Discrepancy",
+        message: `Store transfer ${transfer.transferNumber} was received short on ${shortLines.length} item(s) (${shortTotal} unit(s) not received). The shortfall was returned to the source store — please investigate.`,
+        recipientIds: [...new Set([...srcHods, ...admins])],
+        priority: "HIGH",
+        channel: "BOTH",
+        createdById: req.user?.employeeDbId,
+      });
+    }
 
     res.json(result);
   } catch (e: any) {
@@ -449,6 +691,13 @@ export const cancelTransfer = async (req: AuthenticatedRequest, res: Response) =
     if (!transfer) { res.status(404).json({ message: "Store transfer not found" }); return; }
     if (["RECEIVED", "CANCELLED"].includes(transfer.status)) {
       res.status(400).json({ message: `Cannot cancel transfer in ${transfer.status} status` });
+      return;
+    }
+
+    // Only the requester or the source store's HOD/admin may cancel.
+    const isRequester = transfer.requestedById != null && transfer.requestedById === req.user?.employeeDbId;
+    if (!isRequester && !(await canApproveTransfer(req.user, transfer.fromStoreId))) {
+      res.status(403).json({ message: "Only the requester or the source store's HOD can cancel this transfer" });
       return;
     }
 
@@ -482,7 +731,7 @@ export const cancelTransfer = async (req: AuthenticatedRequest, res: Response) =
         where: { id },
         data: { status: "CANCELLED" },
       });
-    });
+    }, { timeout: 20000, maxWait: 10000 });
 
     res.json(updated);
   } catch (e: any) {

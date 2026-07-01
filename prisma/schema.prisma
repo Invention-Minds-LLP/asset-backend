@@ -733,6 +733,8 @@ model Department {
   // Vendors that serve this department (M2M inverse).
   vendors Vendor[] @relation("VendorDepartments")
 
+  storeTransfersIn StoreTransfer[] @relation("TransferToDepartment")
+
   @@map("department")
 }
 
@@ -1645,6 +1647,7 @@ model Consumable {
 
   stockQuantity Decimal  @default(0) @db.Decimal(12, 2)
   reorderLevel  Decimal? @db.Decimal(12, 2)
+  cost          Decimal? @db.Decimal(12, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
@@ -3604,6 +3607,7 @@ model StoreTransfer {
   toStore     Store? @relation("TransferToStore", fields: [toStoreId], references: [id])
 
   toDepartmentId Int?
+  toDepartment   Department? @relation("TransferToDepartment", fields: [toDepartmentId], references: [id])
 
   status       String @default("REQUESTED") // REQUESTED | APPROVED | IN_TRANSIT | RECEIVED | CANCELLED
   transferType String // STORE_TO_STORE | STORE_TO_DEPARTMENT

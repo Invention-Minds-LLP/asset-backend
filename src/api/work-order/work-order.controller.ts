@@ -415,6 +415,20 @@ export const issueMaterial = async (req: AuthenticatedRequest, res: Response) =>
         },
       });
 
+      // Keep the global master stock in sync with the per-store position, so the
+      // Inventory Master view (which reads stockQuantity) stays accurate after a WO.
+      if (issueType === "SPARE_PART" && sparePartId) {
+        await tx.sparePart.update({
+          where: { id: Number(sparePartId) },
+          data: { stockQuantity: { decrement: Number(quantity) } },
+        });
+      } else if (issueType === "CONSUMABLE" && consumableId) {
+        await tx.consumable.update({
+          where: { id: Number(consumableId) },
+          data: { stockQuantity: { decrement: qty } },
+        });
+      }
+
       return materialIssue;
     });
 

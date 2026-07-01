@@ -36,7 +36,12 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
       // },
 
       // ── Store & Inventory ──
-      { name: "store-management", label: "Store & Inventory", icon: "pi pi-warehouse", path: "/store-management", sortOrder: 6, items: [] },
+      { name: "store-management", label: "Store & Inventory", icon: "pi pi-warehouse", path: "/store-management", sortOrder: 6,
+        items: [
+          { name: "store-management-page",     label: "Store Management",          path: "/store-management",          icon: "pi pi-warehouse",    sortOrder: 1 },
+          { name: "inventory-master",          label: "Inventory Master",          path: "/master",                    icon: "pi pi-box",          sortOrder: 2 },
+        ]
+      },
 
       // ── Maintenance & Service ──
       { name: "maintenance", label: "Maintenance", icon: "pi pi-wrench", path: "/maintenance", sortOrder: 7,
@@ -120,7 +125,6 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "notifications",             label: "Notifications",             path: "/notifications",             icon: "pi pi-bell",         sortOrder: 10 },
           { name: "notification-preferences",  label: "Notification Preferences",  path: "/notification-preferences",  icon: "pi pi-sliders-h",    sortOrder: 11 },
           { name: "email-templates",           label: "Email Templates",           path: "/email-templates",           icon: "pi pi-envelope",     sortOrder: 12 },
-          { name: "inventory-master",          label: "Inventory Master",          path: "/master",                    icon: "pi pi-box",          sortOrder: 13 },
         ]
       },
 
