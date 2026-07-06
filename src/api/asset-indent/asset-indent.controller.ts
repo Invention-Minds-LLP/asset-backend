@@ -30,18 +30,42 @@ async function generateIndentNumber(): Promise<string> {
   return `IND-${fyString}-${seq.toString().padStart(3, "0")}`;
 }
 
+// Leadership/management roles that oversee all indents.
+const INDENT_SEE_ALL_ROLES = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"];
+
+// A user sees every department's indents if they are leadership, or if their
+// own department is a Store or Purchase department (they fulfill/procure them).
+async function canSeeAllIndents(user: { role: string; departmentId?: number }): Promise<boolean> {
+  if (INDENT_SEE_ALL_ROLES.includes(user.role)) return true;
+  if (!user.departmentId) return false;
+  const dept = await prisma.department.findUnique({
+    where: { id: user.departmentId },
+    select: { name: true },
+  });
+  const name = dept?.name?.toUpperCase() || "";
+  return name.includes("STORE") || name.includes("PURCHASE");
+}
+
 // GET /api/asset-indent
 export const getAllIndents = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = mustUser(req);
-    const { status, departmentId, myDept } = req.query;
+    const { status, departmentId } = req.query;
 
     const where: any = {};
     if (status) where.status = String(status);
-    if (departmentId) where.departmentId = Number(departmentId);
-    // Non-HOD/management see only their dept
-    if (myDept === "true" && user.departmentId) {
+
+    if (await canSeeAllIndents(user)) {
+      // Leadership / Store / Purchase: optional department filter from the query.
+      if (departmentId) where.departmentId = Number(departmentId);
+    } else if (user.departmentId) {
+      // Everyone else is locked to their own department, ignoring any client-
+      // supplied departmentId (prevents viewing other departments' indents).
       where.departmentId = user.departmentId;
+    } else {
+      // No department context and not privileged → see nothing.
+      res.json([]);
+      return;
     }
 
     const indents = await prisma.assetIndent.findMany({
