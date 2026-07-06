@@ -68,6 +68,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
     const where: any = { ...buildRoleFilter(user) };
 
     if (query.departmentId) where.departmentId = Number(query.departmentId);
+    if (query.branchId) where.currentBranchId = Number(query.branchId);
     if (query.categoryId) where.assetCategoryId = Number(query.categoryId);
     if (query.vendorId) where.vendorId = Number(query.vendorId);
     if (query.status) where.status = query.status;
@@ -101,6 +102,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
           assetCategory: { select: { id: true, name: true } },
           department: { select: { id: true, name: true } },
           vendor: { select: { id: true, name: true } },
+          currentBranch: { select: { id: true, name: true } },
         },
       }),
     ]);
@@ -121,6 +123,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
         serialNumber: a.serialNumber,
         category: a.assetCategory?.name || "N/A",
         department: a.department?.name || "N/A",
+        branch: (a as any).currentBranch?.name || "—",
         vendor: a.vendor?.name || "N/A",
         manufacturer: a.manufacturer || "",
         modelNumber: a.modelNumber || "",
@@ -143,6 +146,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
         "Serial Number": d.serialNumber,
         "Category": d.category,
         "Department": d.department,
+        "Branch": d.branch,
         "Vendor": d.vendor,
         "Manufacturer": d.manufacturer,
         "Model Number": d.modelNumber,
@@ -180,6 +184,7 @@ export const getMaintenanceCostReport = async (req: AuthenticatedRequest, res: R
 
     const assetWhere: any = { ...buildRoleFilter(user) };
     if (query.departmentId) assetWhere.departmentId = Number(query.departmentId);
+    if (query.branchId) assetWhere.currentBranchId = Number(query.branchId);
     if (query.vendorId) assetWhere.vendorId = Number(query.vendorId);
     if (query.assetId) assetWhere.id = Number(query.assetId);
 
@@ -314,6 +319,10 @@ export const getTicketAnalyticsReport = async (req: AuthenticatedRequest, res: R
 
     if (query.departmentId) ticketWhere.departmentId = Number(query.departmentId);
     if (query.priority) ticketWhere.priority = query.priority;
+    // Branch scoping via the ticket's asset (merges with any role-based asset scope)
+    if (query.branchId) {
+      ticketWhere.asset = { ...(ticketWhere.asset || {}), currentBranchId: Number(query.branchId) };
+    }
 
     if (query.dateFrom || query.dateTo) {
       ticketWhere.createdAt = {};
@@ -426,6 +435,7 @@ export const getExpiryReport = async (req: AuthenticatedRequest, res: Response) 
     cutoffDate.setDate(cutoffDate.getDate() + days);
 
     const assetWhere: any = { ...buildRoleFilter(user) };
+    if (query.branchId) assetWhere.currentBranchId = Number(query.branchId);
     const matchingAssets = await prisma.asset.findMany({
       where: assetWhere,
       select: { id: true, assetId: true, assetName: true, department: { select: { name: true } } },
@@ -539,6 +549,7 @@ export const getDepreciationReport = async (req: AuthenticatedRequest, res: Resp
 
     const assetWhere: any = { ...buildRoleFilter(user) };
     if (query.departmentId) assetWhere.departmentId = Number(query.departmentId);
+    if (query.branchId) assetWhere.currentBranchId = Number(query.branchId);
     if (query.categoryId) assetWhere.assetCategoryId = Number(query.categoryId);
     if (query.status) assetWhere.status = query.status;
     if (query.dateFrom || query.dateTo) {
@@ -1069,6 +1080,7 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
           { purchaseDate: { lte: fyEnd } },
           { donationDate: { lte: fyEnd } },
         ],
+        ...(query.branchId ? { currentBranchId: Number(query.branchId) } : {}),
       },
       select: {
         id: true,
@@ -1588,6 +1600,7 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
 
     const where: any = { ...buildRoleFilter(user) };
     if (query.departmentId) where.departmentId = Number(query.departmentId);
+    if (query.branchId) where.currentBranchId = Number(query.branchId);
     if (query.categoryId) where.assetCategoryId = Number(query.categoryId);
     if (query.status) where.status = query.status;
     if (query.search) {
@@ -1620,6 +1633,7 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
           department: { select: { name: true } },
           vendor: { select: { name: true } },
           allottedTo: { select: { name: true } },
+          currentBranch: { select: { name: true } },
         },
       }),
     ]);
@@ -1699,6 +1713,7 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
         assetType: a.assetType,
         category: a.assetCategory?.name || "",
         department: a.department?.name || "",
+        branch: (a as any).currentBranch?.name || "—",
         vendor: a.vendor?.name || "",
         manufacturer: a.manufacturer || "",
         modelNumber: a.modelNumber || "",
@@ -1732,6 +1747,7 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
         "Asset Type": d.assetType,
         "Category": d.category,
         "Department": d.department,
+        "Branch": d.branch,
         "Vendor": d.vendor,
         "Manufacturer": d.manufacturer,
         "Model Number": d.modelNumber,
@@ -1795,6 +1811,7 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
           { purchaseDate: { lte: fyEnd } },
           { donationDate: { lte: fyEnd } },
         ],
+        ...(req.query.branchId ? { currentBranchId: Number(req.query.branchId) } : {}),
       },
       select: {
         id: true, assetId: true, assetName: true, serialNumber: true,

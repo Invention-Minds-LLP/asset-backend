@@ -4,7 +4,7 @@ import prisma from "../../prismaClient";
 // ─── Global Search across assets, tickets, employees ─────────────────────────
 export const globalSearch = async (req: Request, res: Response) => {
   try {
-    const { q, limit = "5" } = req.query;
+    const { q, limit = "5", branchId } = req.query;
 
     if (!q || String(q).trim().length < 2) {
       res.json({ assets: [], tickets: [], employees: [], vendors: [] });
@@ -13,6 +13,7 @@ export const globalSearch = async (req: Request, res: Response) => {
 
     const query = String(q).trim();
     const take = Math.min(parseInt(String(limit)), 20);
+    const branchFilter = branchId ? Number(branchId) : undefined;
 
     const [assets, tickets, employees, vendors] = await Promise.all([
       prisma.asset.findMany({
@@ -24,6 +25,7 @@ export const globalSearch = async (req: Request, res: Response) => {
             { manufacturer: { contains: query } },
             { modelNumber: { contains: query } },
           ],
+          ...(branchFilter ? { currentBranchId: branchFilter } : {}),
         },
         select: {
           id: true,
@@ -42,6 +44,7 @@ export const globalSearch = async (req: Request, res: Response) => {
             { detailedDesc: { contains: query } },
             { issueType: { contains: query } },
           ],
+          ...(branchFilter ? { asset: { currentBranchId: branchFilter } } : {}),
         },
         select: {
           id: true,

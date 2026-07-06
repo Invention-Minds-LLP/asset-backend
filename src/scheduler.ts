@@ -1,5 +1,5 @@
 import cron from "node-cron";
-import { runAllChecksInternal } from "./api/cron-jobs/cron-jobs.controller";
+import { runAllChecksInternal, runAssetStaleLocationCheck } from "./api/cron-jobs/cron-jobs.controller";
 import { syncAllToDirectory } from "./utilis/directory";
 
 // In-process daily scheduler for the alert / expiry checks.
@@ -18,6 +18,20 @@ export function startScheduler() {
   });
 
   console.log("[scheduler] daily alert checks scheduled for 08:00 server time");
+
+  // Hourly CCTV asset-not-returned check. The 12-hour "hasn't returned" rule
+  // needs finer resolution than the 08:00 daily batch, so it runs on its own
+  // hourly schedule. Per-day dedupe on the notification prevents repeat alerts.
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const result = await runAssetStaleLocationCheck();
+      console.log("[scheduler] asset-not-returned check:", JSON.stringify(result));
+    } catch (err) {
+      console.error("[scheduler] asset-not-returned check failed:", err);
+    }
+  });
+
+  console.log("[scheduler] asset-not-returned check scheduled hourly");
 
   // Nightly push of Employee IDs + external-auditor emails to the tenant
   // directory (multi-tenant routing). No-ops if DIRECTORY_URL isn't configured.

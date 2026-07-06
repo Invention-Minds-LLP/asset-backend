@@ -11,6 +11,7 @@ import {
   checkLowStock,
   checkAssetActivation,
   checkGatePassOverdue,
+  checkAssetStaleLocation,
   runAllChecks,
 } from "./cron-jobs.controller";
 import {
@@ -31,6 +32,7 @@ router.post("/maintenance-due", authenticateToken, checkMaintenanceDue);
 router.post("/low-stock", authenticateToken, checkLowStock);
 router.post("/asset-activation", authenticateToken, checkAssetActivation);
 router.post("/gate-pass-overdue", authenticateToken, checkGatePassOverdue);
+router.post("/asset-not-returned", authenticateToken, checkAssetStaleLocation);
 router.post("/run-all", authenticateToken, runAllChecks);
 
 // ── Depreciation cron jobs ───────────────────────────────────────────────

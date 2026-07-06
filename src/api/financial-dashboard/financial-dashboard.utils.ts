@@ -68,6 +68,7 @@ export function buildAssetWhere(query: any, user: any): any {
   const where: any = { ...buildRoleFilter(user) };
 
   if (query.departmentId) where.departmentId = Number(query.departmentId);
+  if (query.branchId) where.currentBranchId = Number(query.branchId);
   if (query.categoryId) where.assetCategoryId = Number(query.categoryId);
   if (query.vendorId) where.vendorId = Number(query.vendorId);
   if (query.status) where.status = query.status;
@@ -107,6 +108,7 @@ export function buildRawWhereClause(query: any, user: any): { clause: string; pa
 
   // User filters
   if (query.departmentId) { conditions.push("a.departmentId = ?"); params.push(Number(query.departmentId)); }
+  if (query.branchId) { conditions.push("a.currentBranchId = ?"); params.push(Number(query.branchId)); }
   if (query.categoryId) { conditions.push("a.assetCategoryId = ?"); params.push(Number(query.categoryId)); }
   if (query.vendorId) { conditions.push("a.vendorId = ?"); params.push(Number(query.vendorId)); }
   if (query.status) { conditions.push("a.status = ?"); params.push(query.status); }
@@ -235,4 +237,69 @@ export function buildFYTree(rows: MonthlyRow[]): FYNode[] {
   }
 
   return tree;
+}
+
+// ─── FY → Branch tree ───────────────────────────────────────────────────────
+
+export interface BranchFYRow extends MonthlyRowWithBranch {}
+interface MonthlyRowWithBranch {
+  yr: number;
+  mo: number;
+  total: number;
+  assetCount: number;
+  branchId: number | null;
+  branchName: string | null;
+}
+
+/**
+ * FY > Branch > Quarter > Month tree. Each FY groups its rows per branch and
+ * reuses buildFYTree for the quarter/month nesting. Branches are sorted by
+ * total desc, with "Unassigned" (no active location) last.
+ */
+export function buildFYBranchTree(rows: MonthlyRowWithBranch[]): any[] {
+  const fyMap = new Map<number, MonthlyRowWithBranch[]>();
+  for (const row of rows) {
+    const fyYear = row.mo >= 4 ? row.yr : row.yr - 1;
+    if (!fyMap.has(fyYear)) fyMap.set(fyYear, []);
+    fyMap.get(fyYear)!.push(row);
+  }
+
+  const sortedYears = [...fyMap.keys()].sort((a, b) => b - a);
+
+  return sortedYears.map((fyYear) => {
+    const fyRows = fyMap.get(fyYear)!;
+
+    const branchMap = new Map<string, MonthlyRowWithBranch[]>();
+    for (const r of fyRows) {
+      const key = r.branchId == null ? "null" : String(r.branchId);
+      if (!branchMap.has(key)) branchMap.set(key, []);
+      branchMap.get(key)!.push(r);
+    }
+
+    const branches = [...branchMap.entries()].map(([key, brRows]) => {
+      // Single-FY subset → buildFYTree returns exactly one FY node
+      const sub = buildFYTree(brRows)[0];
+      return {
+        branchId: key === "null" ? null : Number(key),
+        branchName: brRows[0].branchName || "Unassigned",
+        total: sub?.total ?? 0,
+        assetCount: sub?.assetCount ?? 0,
+        quarters: sub?.quarters ?? [],
+      };
+    });
+
+    branches.sort((a, b) => {
+      if (a.branchId == null) return 1;
+      if (b.branchId == null) return -1;
+      return b.total - a.total;
+    });
+
+    return {
+      fy: getFYLabel(fyYear),
+      fyStartYear: fyYear,
+      total: branches.reduce((s, b) => s + b.total, 0),
+      assetCount: branches.reduce((s, b) => s + b.assetCount, 0),
+      branches,
+    };
+  });
 }

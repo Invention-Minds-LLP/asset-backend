@@ -8,6 +8,7 @@ import {
   getMonthlyAssets,
   getCostTrend,
   getMonthBreakdown,
+  getBranchBreakdown,
 } from "./financial-dashboard.controller";
 
 const router = Router();
@@ -19,5 +20,6 @@ router.get("/category-breakdown", authenticateToken, getCategoryBreakdown);
 router.get("/monthly-assets", authenticateToken, getMonthlyAssets);
 router.get("/cost-trend", authenticateToken, getCostTrend);
 router.get("/month-breakdown", authenticateToken, getMonthBreakdown);
+router.get("/branch-breakdown", authenticateToken, getBranchBreakdown);
 
 export default router;

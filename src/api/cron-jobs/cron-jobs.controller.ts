@@ -748,6 +748,114 @@ export const checkGatePassOverdue = async (_req: Request, res: Response) => {
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
+//  ASSET NOT RETURNED — CCTV marker tracking (runs hourly, 12h rule)
+//  A tracked asset that left its home location (active AssetLocation) and hasn't
+//  been seen back there for >12h alerts the department HOD / admin.
+// ═════════════════════════════════════════════════════════════════════════════
+const STALE_HOURS = 12;
+const SCAN_LOOKBACK_DAYS = 7; // how far back we read scans to reconstruct the trip
+
+const norm = (v: string | null | undefined) => (v ?? "").trim().toLowerCase();
+
+// "Home" = the scan matches every area field that the active AssetLocation
+// actually specifies (block/floor/room). Fields the location leaves blank are
+// treated as wildcards ("match which is there in the last active").
+function scanIsHome(
+  scan: { block: string | null; floor: string | null; room: string | null },
+  base: { block: string | null; floor: string | null; room: string | null },
+): boolean {
+  if (base.block && norm(scan.block) !== norm(base.block)) return false;
+  if (base.floor && norm(scan.floor) !== norm(base.floor)) return false;
+  if (base.room && norm(scan.room) !== norm(base.room)) return false;
+  return true;
+}
+
+export async function runAssetStaleLocationCheck() {
+  const now = new Date();
+  const today = dayStr(now);
+  const lookback = new Date(now.getTime() - SCAN_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+
+  const assets = await prisma.asset.findMany({
+    where: { locationTracked: true },
+    select: {
+      id: true,
+      assetId: true,
+      assetName: true,
+      departmentId: true,
+      locations: {
+        where: { isActive: true, status: "APPROVED" },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { block: true, floor: true, room: true },
+      },
+    },
+  });
+
+  let alerted = 0;
+  let evaluated = 0;
+
+  for (const asset of assets) {
+    const base = asset.locations[0];
+    // No approved home location → nothing to compare against. Skip.
+    if (!base || (!base.block && !base.floor && !base.room)) continue;
+
+    const scans = await prisma.assetScanLog.findMany({
+      where: { assetId: asset.id, scannedAt: { gte: lookback } },
+      orderBy: { scannedAt: "asc" },
+      select: { block: true, floor: true, room: true, scannedAt: true },
+    });
+    if (scans.length === 0) continue; // never seen by a camera → can't judge
+    evaluated++;
+
+    const latest = scans[scans.length - 1];
+    // Currently at home → not away, no alert.
+    if (scanIsHome(latest, base)) continue;
+
+    // Away right now. Find when it left: the first away-scan after the last
+    // home-scan (or the earliest scan in the window if we never saw it home).
+    let lastHomeIdx = -1;
+    for (let i = scans.length - 1; i >= 0; i--) {
+      if (scanIsHome(scans[i], base)) { lastHomeIdx = i; break; }
+    }
+    const awaySince = lastHomeIdx >= 0 ? scans[lastHomeIdx + 1].scannedAt : scans[0].scannedAt;
+
+    const hoursAway = (now.getTime() - new Date(awaySince).getTime()) / (1000 * 60 * 60);
+    if (hoursAway < STALE_HOURS) continue;
+
+    const recipients = await hodOrAdmin(asset.departmentId);
+    if (recipients.length === 0) continue;
+
+    const hrs = Math.floor(hoursAway);
+    await notify({
+      type: "ASSET_NOT_RETURNED",
+      title: `Asset Not Returned · ${hrs}h`,
+      message: `${asset.assetName} (${asset.assetId}) left its assigned location and hasn't returned for ${hrs} hours. Last seen at ${latest.block || ""}/${latest.floor || ""}/${latest.room || ""}.`,
+      recipientIds: recipients,
+      priority: hoursAway > 24 ? "HIGH" : "MEDIUM",
+      channel: "BOTH",
+      assetId: asset.id,
+      // Per-day dedupe — one alert per asset per day while it stays out.
+      dedupeKey: `asset-not-returned-${asset.id}-${today}`,
+      emailSubject: `Asset Not Returned: ${asset.assetId}`,
+      emailHtml: `<p><strong>${asset.assetName}</strong> (${asset.assetId}) has been away from its assigned location for <strong>${hrs} hours</strong>.</p>`,
+    });
+    alerted++;
+  }
+
+  return { type: "asset-not-returned", tracked: assets.length, evaluated, alerted };
+}
+
+export const checkAssetStaleLocation = async (_req: Request, res: Response) => {
+  try {
+    const result = await runAssetStaleLocationCheck();
+    res.json({ message: `${result.alerted} not-returned alert(s) sent`, ...result });
+  } catch (error) {
+    console.error("checkAssetStaleLocation error:", error);
+    res.status(500).json({ message: "Failed to check asset locations" });
+  }
+};
+
+// ═════════════════════════════════════════════════════════════════════════════
 //  RUN ALL — single entry point for the scheduler / cron
 // ═════════════════════════════════════════════════════════════════════════════
 export async function runAllChecksInternal() {
@@ -764,6 +872,7 @@ export async function runAllChecksInternal() {
     ["consumableExpiry", checkConsumableExpiryInternal],
     ["assetActivation", checkAssetActivationInternal],
     ["gatePassOverdue", runGatePassOverdueCheck],
+    ["assetNotReturned", runAssetStaleLocationCheck],
   ];
 
   for (const [key, fn] of checks) {

@@ -7,6 +7,7 @@ import { Client } from "basic-ftp";
 import { AcknowledgementPurpose } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getSecurityTeam } from "../../utilis/notificationHelper";
+import { syncCurrentBranch } from "../../lib/assetLocation";
 
 
 const FTP_CONFIG = {
@@ -184,6 +185,9 @@ export const approveAssetTransfer = async (
           });
         }
       }
+
+      // Sync the denormalized current-branch cache (null when no active location remains, e.g. DEAD)
+      await syncCurrentBranch(tx, transfer.assetId, newLocation ? newLocation.branchId : null);
 
       const updatedTransfer = await tx.assetTransferHistory.update({
         where: { id: transfer.id },
@@ -436,6 +440,9 @@ export const returnTransferredAsset = async (
         isActive: true
       }
     });
+
+    // Sync the denormalized current-branch cache
+    await syncCurrentBranch(prisma, originalTransfer.assetId, newLocation.branchId);
 
     const returnEntry = await prisma.assetTransferHistory.create({
       data: {
@@ -990,6 +997,9 @@ export const completeTransferredAssetReturn = async (
         isActive: true
       }
     });
+
+    // Sync the denormalized current-branch cache
+    await syncCurrentBranch(prisma, returnRequest.assetId, newLocation.branchId);
 
     let acknowledgementRun = null;
 

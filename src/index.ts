@@ -80,6 +80,7 @@ import legacyMigrationRoutes from "./api/legacy-migration/legacy-migration.route
 import reconciliationRoutes from "./api/reconciliation/reconciliation.routes";
 import exportRoutes from "./api/export/export.routes";
 import floorPlanRoutes from "./api/floor-plan/floor-plan.routes";
+import assetScanRoutes from "./api/asset-scan/asset-scan.routes";
 
 import cors from "cors";
 import path from "path";
@@ -223,6 +224,9 @@ app.use("/api/export", exportRoutes);
 
 // ── Floor Plans (asset location pin map) ─────────────────────────────────────
 app.use("/api/floor-plan", floorPlanRoutes);
+
+// ── CCTV marker scan ingest (machine-to-machine, API-key auth) ───────────────
+app.use("/api/asset-scan", assetScanRoutes);
 
 // Default route
 app.get("/", (req, res) => {

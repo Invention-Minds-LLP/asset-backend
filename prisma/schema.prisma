@@ -218,6 +218,13 @@ model Asset {
   status          String
   assetPhoto      String?
 
+  // ── CCTV marker-based location tracking (ArUco/AprilTag) ──
+  // locationTracked: opt-in — only "selected assets" are watched by the reader.
+  // markerId: the fiducial marker's integer ID printed on the asset; the CCTV
+  // reader reports this, and ingest resolves it back to this asset.
+  locationTracked Boolean @default(false)
+  markerId        Int?
+
   sourceType             String? // NEW | INVENTORY
   sourceReference        String?
   remarks                String?           @db.Text
@@ -296,6 +303,13 @@ model Asset {
   currentStore      Store?    @relation("AssetCurrentStore", fields: [currentStoreId], references: [id])
   // When the asset entered its current store — drives "days in store" aging.
   currentStoreSince DateTime?
+
+  // Denormalized cache of the asset's current branch — mirrors the branchId of the
+  // active AssetLocation row (source of truth). Updated in the SAME transaction that
+  // flips the active location (see src/lib/assetLocation.ts); never edited directly.
+  // Null = asset has no active location yet (in store / in transit / never placed).
+  currentBranchId Int?
+  currentBranch   Branch? @relation("AssetCurrentBranch", fields: [currentBranchId], references: [id])
 
   depreciation AssetDepreciation?
   insurance    AssetInsurance[]
@@ -398,6 +412,7 @@ model Asset {
   @@index([assetCategoryId])
   @@index([departmentId])
   @@index([vendorId])
+  @@index([currentBranchId])
   @@map("asset")
 }
 
@@ -1138,6 +1153,7 @@ model Branch {
   transfersFrom AssetTransferHistory[] @relation("FromBranch")
   transfersTo   AssetTransferHistory[] @relation("ToBranch")
   floorPlans    FloorPlan[]
+  currentAssets Asset[]                @relation("AssetCurrentBranch")
 
   createdById Int?
   updatedById Int?
@@ -1774,9 +1790,19 @@ model AssetScanLog {
   scannedById Int?
   scannedBy   Employee? @relation(fields: [scannedById], references: [id])
 
-  scanType String? // RFID | QR | MANUAL
-  location String?
+  scanType String? // RFID | QR | MARKER | MANUAL
+  location String? // human-readable composed label, e.g. "Block A / 2 / ICU-3"
   notes    String?
+
+  // ── Structured area (CCTV marker reader) ──
+  // Reported by the reader from its per-camera config so the stale-location
+  // check can compare a scan against the asset's active AssetLocation without
+  // parsing `location`. isGate marks chokepoint cameras at the exit/gate.
+  cameraId String?
+  block    String?
+  floor    String?
+  room     String?
+  isGate   Boolean @default(false)
 
   scannedAt DateTime @default(now())
 

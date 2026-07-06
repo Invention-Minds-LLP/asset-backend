@@ -11,9 +11,11 @@ import {
   getMaintenanceByCategory,
   getAssetValueBuckets,
 } from "./analytics.controller";
+import { getBranchDashboard } from "./branch-dashboard.controller";
 
 const router = Router();
 
+router.get("/branch-dashboard", authenticateToken, getBranchDashboard);
 router.get("/tco", authenticateToken, getAssetTCO);
 router.get("/asset-turnover", authenticateToken, getAssetTurnover);
 router.get("/cfo-dashboard", authenticateToken, getCfoDashboard);

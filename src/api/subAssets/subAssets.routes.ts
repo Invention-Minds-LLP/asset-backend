@@ -6,6 +6,7 @@ import {
   getParentOptions,
   createSubAsset,
   getSparePartOptions,
+  getAvailableInventory,
   replaceSubAsset,
   getReplacementHistory,
 } from "./subAssets.controller";
@@ -19,6 +20,7 @@ router.use(authenticateToken);
 // dropdown options
 router.get("/parent-options", getParentOptions);
 router.get("/options", getSparePartOptions);
+router.get("/:parentAssetId/available-inventory", getAvailableInventory);
 
 // tree view
 router.get("/:assetId/tree", getAssetTree);

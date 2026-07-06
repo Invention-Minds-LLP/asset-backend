@@ -4,6 +4,7 @@ import XLSX from 'xlsx';
 import prisma from '../../prismaClient';
 import { generateAssetId, generateLegacyAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
 import { backfillHistoricalDepreciation } from '../../utilis/depreciationEngine';
+import { syncCurrentBranch } from '../../lib/assetLocation';
 
 function parseDate(value: any): Date | null {
     if (value === null || value === undefined || value === '') return null;
@@ -602,6 +603,10 @@ export async function importAssetsExcel(req: Request, res: Response) {
         // BEFORE any DB write, so user sees them as skipped rows rather than confusing updates.
         const inFileDups = detectInFileDuplicates(assetsRows);
 
+        // Branch name → id cache for this upload. Avoids one branch upsert per
+        // row (thousands of redundant round-trips on a remote DB).
+        const branchIdCache = new Map<string, number>();
+
         for (let i = 0; i < assetsRows.length; i++) {
             const row = assetsRows[i];
             const rowNum = i + 2; // +1 header, +1 because user-facing rows are 1-indexed
@@ -804,6 +809,7 @@ export async function importAssetsExcel(req: Request, res: Response) {
                 }
 
                 let savedAssetId: number;
+                let wasCreated = false;
                 if (existing) {
                     // Determine which field matched so the user knows why we're updating
                     const matchedBy: 'referenceCode' | 'serialNumber' | null =
@@ -836,6 +842,7 @@ export async function importAssetsExcel(req: Request, res: Response) {
                     try {
                         const created = await createAssetWithGeneratedId(assetData);
                         savedAssetId = created.id;
+                        wasCreated = true;
                         summary.assetsCreated++;
                         summary.assetOutcomes.push({
                             row: rowNum, assetName: rowAssetName, referenceCode: rowRef, serialNumber: rowSerial,
@@ -866,6 +873,77 @@ export async function importAssetsExcel(req: Request, res: Response) {
                             data: {
                                 status: remaining === 0 ? 'COMPLETE' : 'PARTIAL',
                             }
+                        });
+                    }
+                }
+
+                // ── Branch (optional "branchName" column on the Assets sheet) ──
+                // Sets the asset's current branch: an ACTIVE AssetLocation row +
+                // the Asset.currentBranchId cache. Newly created assets have no
+                // previous location, so no deactivation and no interactive
+                // transaction — per-row transactions against the remote DB were
+                // exhausting the connection pool on large uploads. A branch
+                // failure never fails the row: the asset is already saved.
+                if (row.branchName) {
+                    try {
+                        const branchKey = String(row.branchName).trim();
+                        let rowBranchId = branchIdCache.get(branchKey);
+                        if (rowBranchId === undefined) {
+                            const resolved = await getOrCreateBranch(branchKey);
+                            if (resolved) { rowBranchId = resolved; branchIdCache.set(branchKey, resolved); }
+                        }
+
+                        if (rowBranchId) {
+                            if (wasCreated) {
+                                // Brand-new asset — nothing to deactivate.
+                                await prisma.assetLocation.create({
+                                    data: {
+                                        assetId: savedAssetId,
+                                        branchId: rowBranchId,
+                                        departmentSnapshot: toStringOrNull(row.department),
+                                        status: 'APPROVED',
+                                        isActive: true,
+                                    },
+                                });
+                                await syncCurrentBranch(prisma, savedAssetId, rowBranchId);
+                                summary.locationsCreated++;
+                            } else {
+                                // Existing asset — move only if the branch actually changed,
+                                // so re-imports don't churn location history.
+                                const current = await prisma.asset.findUnique({
+                                    where: { id: savedAssetId },
+                                    select: { currentBranchId: true },
+                                });
+                                if (current?.currentBranchId !== rowBranchId) {
+                                    await prisma.$transaction(async (tx) => {
+                                        await tx.assetLocation.updateMany({
+                                            where: { assetId: savedAssetId, isActive: true },
+                                            data: { isActive: false },
+                                        });
+                                        await tx.assetLocation.create({
+                                            data: {
+                                                assetId: savedAssetId,
+                                                branchId: rowBranchId,
+                                                departmentSnapshot: toStringOrNull(row.department),
+                                                status: 'APPROVED',
+                                                isActive: true,
+                                            },
+                                        });
+                                        await syncCurrentBranch(tx, savedAssetId, rowBranchId);
+                                    }, {
+                                        // Remote MySQL on a slower network — same bump as transfer.controller.ts
+                                        maxWait: 10_000,
+                                        timeout: 30_000,
+                                    });
+                                    summary.locationsCreated++;
+                                }
+                            }
+                        }
+                    } catch (branchErr: any) {
+                        // Asset row itself succeeded — record the branch problem without failing the row.
+                        summary.errors.push({
+                            sheet: 'Assets', row: rowNum,
+                            message: `Asset saved, but setting branch "${row.branchName}" failed: ${branchErr?.message || branchErr}`,
                         });
                     }
                 }
@@ -1272,6 +1350,7 @@ export async function importAssetsExcel(req: Request, res: Response) {
                 const branchId = await getOrCreateBranch(row.branchName);
                 const employeeResponsibleId = await getEmployeeIdByCode(row.employeeResponsibleCode);
 
+                const isActiveLocation = toBool(row.isActive) ?? true;
                 await prisma.assetLocation.create({
                     data: {
                         assetId: asset.id,
@@ -1281,9 +1360,14 @@ export async function importAssetsExcel(req: Request, res: Response) {
                         room: toStringOrNull(row.room),
                         departmentSnapshot: toStringOrNull(row.departmentSnapshot),
                         employeeResponsibleId,
-                        isActive: toBool(row.isActive) ?? true,
+                        isActive: isActiveLocation,
                     }
                 });
+
+                // Sync the denormalized current-branch cache (active rows only)
+                if (isActiveLocation) {
+                    await syncCurrentBranch(prisma, asset.id, branchId!);
+                }
 
                 summary.locationsCreated++;
             } catch (err: any) {
@@ -1946,7 +2030,7 @@ export const downloadLegacyTemplate = (req: Request, res: Response) => {
         // Required
         'referenceCode', 'assetName', 'assetType', 'assetCategory',
         // Optional basic
-        'serialNumber', 'modeOfProcurement', 'department',
+        'serialNumber', 'modeOfProcurement', 'department', 'branchName',
         'purchaseDate', 'purchaseCost', 'vendorName',
         'manufacturer', 'modelNumber', 'currentLocation', 'status',
         // Legacy flag + opening balances
@@ -1974,6 +2058,7 @@ export const downloadLegacyTemplate = (req: Request, res: Response) => {
             serialNumber: 'SN-12345',
             modeOfProcurement: 'PURCHASE',
             department: 'Radiology',
+            branchName: 'Main Hospital',
             purchaseDate: '2021-06-01',
             purchaseCost: 2500000,
             vendorName: 'GE Healthcare',
@@ -2002,6 +2087,7 @@ export const downloadLegacyTemplate = (req: Request, res: Response) => {
             serialNumber: '',
             modeOfProcurement: 'PURCHASE',
             department: 'ICU',
+            branchName: 'Main Hospital',
             purchaseDate: '2020-01-15',
             purchaseCost: 350000,
             vendorName: 'Medtronic',
@@ -2033,6 +2119,7 @@ export const downloadLegacyTemplate = (req: Request, res: Response) => {
         { Field: 'serialNumber', Required: 'NO (legacy)', Notes: 'Leave blank if unknown for legacy assets' },
         { Field: 'modeOfProcurement', Required: 'NO', Notes: 'PURCHASE / DONATION / LEASE / RENTAL. Default: PURCHASE' },
         { Field: 'department', Required: 'NO', Notes: 'Department name — created automatically if not exists' },
+        { Field: 'branchName', Required: 'NO', Notes: 'Branch name — created automatically if not exists. Sets the asset\'s current branch (creates an active location record). Used by branch-wise filters/reports.' },
         { Field: 'purchaseDate', Required: 'NO', Notes: 'YYYY-MM-DD format' },
         { Field: 'purchaseCost', Required: 'NO (legacy)', Notes: 'Original purchase cost in INR. Skip if unknown for legacy.' },
         { Field: 'vendorName', Required: 'NO (legacy)', Notes: 'Vendor name — created automatically if not exists' },

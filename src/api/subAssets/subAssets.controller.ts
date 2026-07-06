@@ -33,8 +33,10 @@ export const getSubAssetsByAssetId = async (req: Request, res: Response) => {
         sourceType: true,
         modeOfProcurement: true,
         workingCondition: true,
+        assetCondition: true,
         referenceCode: true,
         exceedsParentThreshold: true,
+        purchaseCost: true,
       },
     });
 
@@ -612,6 +614,7 @@ export const createSubAsset = async (req: Request, res: Response) => {
     const {
       sourceType,
       sparePartId,
+      consumableId,
       quantity,
       assetName,
       assetType,
@@ -643,7 +646,7 @@ export const createSubAsset = async (req: Request, res: Response) => {
       sourceReference
     } = req.body;
 
-    if (!sourceType || !["NEW", "INVENTORY_SPARE"].includes(sourceType)) {
+    if (!sourceType || !["NEW", "INVENTORY_SPARE", "INVENTORY_CONSUMABLE"].includes(sourceType)) {
       res.status(400).json({ message: "Invalid source type" });
       return;
     }
@@ -651,7 +654,9 @@ export const createSubAsset = async (req: Request, res: Response) => {
     // Category & status are NOT required from the client — a sub-asset is a
     // component of its parent, so it inherits the parent's category/status
     // (resolved below) unless explicitly overridden.
-    if (!assetName || !assetType || !serialNumber) {
+    // For inventory sources the name/type are derived from the picked item, so
+    // only a NEW component must supply these.
+    if (sourceType === "NEW" && (!assetName || !assetType || !serialNumber)) {
       res.status(400).json({ message: "Missing required fields (component name, type and serial number)" });
       return;
     }
@@ -734,9 +739,11 @@ export const createSubAsset = async (req: Request, res: Response) => {
     const useInherit = inheritFromParent !== false;
     const newAssetId = await generateSubAssetId(parent);
 
-    if (sourceType === "INVENTORY_SPARE") {
-      if (!sparePartId) {
-        res.status(400).json({ message: "Spare part is required" });
+    if (sourceType === "INVENTORY_SPARE" || sourceType === "INVENTORY_CONSUMABLE") {
+      const isSpare = sourceType === "INVENTORY_SPARE";
+      const itemId = Number(isSpare ? sparePartId : consumableId);
+      if (!itemId) {
+        res.status(400).json({ message: isSpare ? "Spare part is required" : "Consumable is required" });
         return;
       }
 
@@ -746,38 +753,34 @@ export const createSubAsset = async (req: Request, res: Response) => {
         return;
       }
 
-      const spare = await prisma.sparePart.findUnique({
-        where: { id: Number(sparePartId) },
-        select: {
-          id: true,
-          name: true,
-          vendorId: true,
-          stockQuantity: true,
-        },
-      });
-
-      if (!spare) {
-        res.status(404).json({ message: "Spare part not found" });
-        return;
+      // Validate the item exists; derive name/vendor/cost from it.
+      let itemVendorId: number | null = null;
+      let itemName = "";
+      let itemCost: any = null;
+      if (isSpare) {
+        const spare = await prisma.sparePart.findUnique({ where: { id: itemId }, select: { name: true, vendorId: true, cost: true } });
+        if (!spare) { res.status(404).json({ message: "Spare part not found" }); return; }
+        itemVendorId = spare.vendorId; itemName = spare.name; itemCost = spare.cost;
+      } else {
+        const cons = await prisma.consumable.findUnique({ where: { id: itemId }, select: { name: true, cost: true } });
+        if (!cons) { res.status(404).json({ message: "Consumable not found" }); return; }
+        itemName = cons.name; itemCost = cons.cost;
       }
-
-      if (spare.stockQuantity < qty) {
-        res.status(400).json({ message: "Insufficient spare stock" });
-        return;
-      }
+      // Cost of the sub-asset = per-unit cost × quantity (client may override).
+      const bodyCost = req.body.purchaseCost;
+      const resolvedCost = bodyCost != null && bodyCost !== "" ? Number(bodyCost) : (itemCost != null ? Number(itemCost) * qty : null);
 
       let child: any = null;
-
       try {
         child = await prisma.asset.create({
           data: {
             assetId: newAssetId,
-            assetName,
-            assetType,
+            assetName: assetName || itemName,
+            assetType: assetType || "COMPONENT",
             assetCategoryId: resolvedCategoryId,
             serialNumber,
             referenceCode: referenceCode || null,
-            sourceType: "INVENTORY_SPARE",
+            sourceType,
             sourceReference: sourceReference || null,
             remarks: remarks || null,
             status: resolvedStatus,
@@ -785,56 +788,40 @@ export const createSubAsset = async (req: Request, res: Response) => {
             parentAssetId: parent.id,
             vendorId: useInherit
               ? parent.vendorId
-              : (vendorId != null ? Number(vendorId) : spare.vendorId),
+              : (vendorId != null ? Number(vendorId) : itemVendorId),
             departmentId: useInherit
               ? parent.departmentId
               : (departmentId != null ? Number(departmentId) : null),
+            purchaseCost: resolvedCost,
+            assetCondition: req.body.assetCondition || null,
             workingCondition: workingCondition || null,
           },
-          include: {
-            parentAsset: {
-              select: {
-                assetId: true,
-                assetName: true,
-              },
-            },
-          },
+          include: { parentAsset: { select: { assetId: true, assetName: true } } },
         });
 
-        await prisma.sparePart.update({
-          where: { id: spare.id },
-          data: {
-            stockQuantity: {
-              decrement: qty,
-            },
-          },
-        });
-
-        await prisma.inventoryTransaction.create({
-          data: {
-            type: "OUT",
-            sparePartId: spare.id,
-            quantity: qty,
-            referenceType: "SUB_ASSET",
-            referenceId: child.id,
-            notes: `Converted to sub-asset ${child.assetId} under parent ${parent.assetId}`,
-          },
-        });
+        // Consume from the parent's DEPARTMENT store (store position + global + ledger).
+        const err = await consumeFromDeptStore(
+          isSpare ? "SPARE_PART" : "CONSUMABLE",
+          itemId,
+          qty,
+          parent.departmentId,
+          child.id,
+          `Converted to sub-asset ${child.assetId} under parent ${parent.assetId}`,
+          (req as any).user?.employeeDbId
+        );
+        if (err) {
+          await prisma.asset.delete({ where: { id: child.id } }).catch(() => {});
+          res.status(400).json({ message: err });
+          return;
+        }
 
         res.status(201).json(child);
         return;
       } catch (e) {
-        // best-effort rollback since you're avoiding DB transactions
+        // best-effort rollback since this path avoids a DB transaction
         if (child?.id) {
-          try {
-            await prisma.asset.delete({
-              where: { id: child.id },
-            });
-          } catch (rollbackErr) {
-            console.error("Manual rollback failed:", rollbackErr);
-          }
+          try { await prisma.asset.delete({ where: { id: child.id } }); } catch (rollbackErr) { console.error("Manual rollback failed:", rollbackErr); }
         }
-
         throw e;
       }
     }
@@ -951,6 +938,7 @@ export const replaceSubAsset = async (req: Request, res: Response) => {
     const {
       sourceType,
       sparePartId,
+      consumableId,
       quantity,
       reason,
       cost,
@@ -970,14 +958,14 @@ export const replaceSubAsset = async (req: Request, res: Response) => {
       workingCondition,
     } = req.body;
 
-    if (!sourceType || !["NEW", "INVENTORY_SPARE"].includes(sourceType)) {
-      res.status(400).json({ message: "sourceType must be NEW or INVENTORY_SPARE" });
+    if (!sourceType || !["NEW", "INVENTORY_SPARE", "INVENTORY_CONSUMABLE"].includes(sourceType)) {
+      res.status(400).json({ message: "sourceType must be NEW, INVENTORY_SPARE or INVENTORY_CONSUMABLE" });
       return;
     }
 
     const parent = await prisma.asset.findUnique({
       where: { assetId: parentAssetId },
-      select: { id: true, assetId: true, departmentId: true, vendorId: true },
+      select: { id: true, assetId: true, departmentId: true, vendorId: true, assetCategoryId: true },
     });
     if (!parent) { res.status(404).json({ message: "Parent asset not found" }); return; }
 
@@ -994,24 +982,33 @@ export const replaceSubAsset = async (req: Request, res: Response) => {
     let newSubAssetDbId: number | null = null;
     let spareDbId: number | null = sparePartId ? Number(sparePartId) : null;
 
-    if (sourceType === "INVENTORY_SPARE") {
-      if (!sparePartId) { res.status(400).json({ message: "sparePartId is required" }); return; }
+    if (sourceType === "INVENTORY_SPARE" || sourceType === "INVENTORY_CONSUMABLE") {
+      const isSpare = sourceType === "INVENTORY_SPARE";
+      const itemId = Number(isSpare ? sparePartId : consumableId);
+      if (!itemId) { res.status(400).json({ message: isSpare ? "sparePartId is required" : "consumableId is required" }); return; }
       const qty = Number(quantity || 1);
 
-      const spare = await prisma.sparePart.findUnique({
-        where: { id: Number(sparePartId) },
-        select: { id: true, name: true, vendorId: true, stockQuantity: true, cost: true },
-      });
-      if (!spare) { res.status(404).json({ message: "Spare part not found" }); return; }
-      if (spare.stockQuantity < qty) { res.status(400).json({ message: "Insufficient spare stock" }); return; }
+      let defaultName = "";
+      let itemVendorId: number | null = null;
+      let itemCost: any = null;
+      if (isSpare) {
+        const spare = await prisma.sparePart.findUnique({ where: { id: itemId }, select: { name: true, vendorId: true, cost: true } });
+        if (!spare) { res.status(404).json({ message: "Spare part not found" }); return; }
+        defaultName = spare.name; itemVendorId = spare.vendorId; itemCost = spare.cost;
+      } else {
+        const cons = await prisma.consumable.findUnique({ where: { id: itemId }, select: { name: true, cost: true } });
+        if (!cons) { res.status(404).json({ message: "Consumable not found" }); return; }
+        defaultName = cons.name; itemCost = cons.cost;
+      }
 
-      const requiredName  = assetName  || spare.name;
+      const requiredName  = assetName  || defaultName;
       const requiredType  = assetType  || "COMPONENT";
-      const requiredCat   = assetCategoryId ? Number(assetCategoryId) : null;
-      const requiredSerial = serialNumber;
+      // Inherit the parent's category when not supplied; serial is optional for inventory items.
+      const requiredCat   = assetCategoryId ? Number(assetCategoryId) : parent.assetCategoryId;
+      const requiredSerial = serialNumber || null;
 
-      if (!requiredSerial || !requiredCat) {
-        res.status(400).json({ message: "serialNumber and assetCategoryId required even for spare replacements" });
+      if (!requiredCat) {
+        res.status(400).json({ message: "A category is required (parent has none — set assetCategoryId)" });
         return;
       }
 
@@ -1024,33 +1021,32 @@ export const replaceSubAsset = async (req: Request, res: Response) => {
           assetCategoryId: requiredCat,
           serialNumber: requiredSerial,
           referenceCode: referenceCode || null,
-          sourceType: "INVENTORY_SPARE",
+          sourceType,
           modeOfProcurement: "PURCHASE",
           status: "IN_USE",
           parentAssetId: parent.id,
           departmentId: parent.departmentId,
-          vendorId: spare.vendorId ?? parent.vendorId ?? null,
-          purchaseCost: cost ? Number(cost) : (spare.cost ? Number(spare.cost) : null),
+          vendorId: itemVendorId ?? parent.vendorId ?? null,
+          purchaseCost: cost ? Number(cost) : (itemCost ? Number(itemCost) : null),
           workingCondition: workingCondition || "WORKING",
         } as any,
       });
       newSubAssetDbId = newSub.id;
 
-      await prisma.sparePart.update({
-        where: { id: spare.id },
-        data: { stockQuantity: { decrement: qty } },
-      });
-
-      await prisma.inventoryTransaction.create({
-        data: {
-          type: "OUT",
-          sparePartId: spare.id,
-          quantity: qty,
-          referenceType: "REPLACEMENT",
-          referenceId: newSub.id,
-          notes: `Replacement sub-asset ${newSub.assetId} under ${parent.assetId}`,
-        },
-      });
+      const err = await consumeFromDeptStore(
+        isSpare ? "SPARE_PART" : "CONSUMABLE",
+        itemId,
+        qty,
+        parent.departmentId,
+        newSub.id,
+        `Replacement sub-asset ${newSub.assetId} under ${parent.assetId}`,
+        (req as any).user?.employeeDbId
+      );
+      if (err) {
+        await prisma.asset.delete({ where: { id: newSub.id } }).catch(() => {});
+        res.status(400).json({ message: err });
+        return;
+      }
     } else {
       // NEW
       if (!assetName || !assetType || !assetCategoryId || !serialNumber || !modeOfProcurement) {
@@ -1184,6 +1180,100 @@ export const getSparePartOptions = async (req: Request, res: Response) => {
     res.status(500).json({ message: e.message || "Failed to load spare parts" });
   }
 };
+
+// Spares + consumables actually stocked in the parent asset's department store(s),
+// so a sub-asset can only be built from what that department holds.
+export const getAvailableInventory = async (req: Request, res: Response) => {
+  try {
+    const { parentAssetId } = req.params;
+    const parent = await prisma.asset.findUnique({ where: { assetId: parentAssetId }, select: { departmentId: true } });
+    if (!parent) { res.status(404).json({ message: "Parent asset not found" }); return; }
+    if (parent.departmentId == null) { res.json({ spares: [], consumables: [] }); return; }
+
+    const stores = await prisma.store.findMany({ where: { departmentId: parent.departmentId, isActive: true }, select: { id: true } });
+    const storeIds = stores.map((s) => s.id);
+    if (!storeIds.length) { res.json({ spares: [], consumables: [] }); return; }
+
+    const positions = await prisma.storeStockPosition.findMany({
+      where: { storeId: { in: storeIds }, availableQty: { gt: 0 } },
+    });
+
+    const spareAgg = new Map<number, number>();
+    const consAgg = new Map<number, number>();
+    for (const p of positions) {
+      if (p.itemType === "SPARE_PART" && p.sparePartId) spareAgg.set(p.sparePartId, (spareAgg.get(p.sparePartId) || 0) + Number(p.availableQty));
+      if (p.itemType === "CONSUMABLE" && p.consumableId) consAgg.set(p.consumableId, (consAgg.get(p.consumableId) || 0) + Number(p.availableQty));
+    }
+
+    const [spares, consumables] = await Promise.all([
+      spareAgg.size ? prisma.sparePart.findMany({ where: { id: { in: [...spareAgg.keys()] } }, select: { id: true, name: true, partNumber: true, cost: true } }) : [],
+      consAgg.size ? prisma.consumable.findMany({ where: { id: { in: [...consAgg.keys()] } }, select: { id: true, name: true, unit: true, cost: true } }) : [],
+    ]);
+
+    res.json({
+      spares: spares.map((s) => ({ value: s.id, label: `${s.name}${s.partNumber ? ` (${s.partNumber})` : ""} — ${spareAgg.get(s.id)} avail`, available: spareAgg.get(s.id), cost: s.cost != null ? Number(s.cost) : null })),
+      consumables: consumables.map((c) => ({ value: c.id, label: `${c.name}${c.unit ? ` (${c.unit})` : ""} — ${consAgg.get(c.id)} avail`, available: consAgg.get(c.id), cost: c.cost != null ? Number(c.cost) : null })),
+    });
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to load available inventory" });
+  }
+};
+
+// Consume `qty` of an inventory item from the parent's department store: decrement
+// the store position + the global master stock, and log an OUT transaction.
+// Returns an error string if not available, else null.
+async function consumeFromDeptStore(
+  itemType: "SPARE_PART" | "CONSUMABLE",
+  itemId: number,
+  qty: number,
+  parentDeptId: number | null,
+  refId: number,
+  notes: string,
+  performedById?: number | null
+): Promise<string | null> {
+  // Find the department's store position holding this item with enough available.
+  let position = null as any;
+  if (parentDeptId != null) {
+    const stores = await prisma.store.findMany({ where: { departmentId: parentDeptId, isActive: true }, select: { id: true } });
+    const storeIds = stores.map((s) => s.id);
+    if (storeIds.length) {
+      position = await prisma.storeStockPosition.findFirst({
+        where: {
+          storeId: { in: storeIds },
+          itemType,
+          ...(itemType === "SPARE_PART" ? { sparePartId: itemId } : { consumableId: itemId }),
+          availableQty: { gte: qty },
+        },
+        orderBy: { availableQty: "desc" },
+      });
+    }
+  }
+  if (!position) return "This item is not available in your department's store.";
+
+  await prisma.storeStockPosition.update({
+    where: { id: position.id },
+    data: { currentQty: { decrement: qty }, availableQty: { decrement: qty }, lastUpdatedAt: new Date() },
+  });
+  if (itemType === "SPARE_PART") {
+    await prisma.sparePart.update({ where: { id: itemId }, data: { stockQuantity: { decrement: qty } } });
+  } else {
+    await prisma.consumable.update({ where: { id: itemId }, data: { stockQuantity: { decrement: qty } } });
+  }
+  await prisma.inventoryTransaction.create({
+    data: {
+      type: "OUT",
+      sparePartId: itemType === "SPARE_PART" ? itemId : null,
+      consumableId: itemType === "CONSUMABLE" ? itemId : null,
+      quantity: qty,
+      referenceType: "SUB_ASSET",
+      referenceId: refId,
+      storeId: position.storeId,
+      performedById: performedById ?? null,
+      notes,
+    },
+  });
+  return null;
+}
 
 async function generateSubAssetId(parentAsset: { id: number; assetId: string }): Promise<string> {
   return generateSubAssetIdShared(parentAsset.assetId, parentAsset.id);

@@ -1,10 +1,12 @@
 import { Response } from "express";
+import { Prisma } from "@prisma/client";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import {
   buildAssetWhere,
   buildRawWhereClause,
   buildFYTree,
+  buildFYBranchTree,
   getFYLabel,
 } from "./financial-dashboard.utils";
 
@@ -226,9 +228,12 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       case "purchase":
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(a.purchaseCost),0) as total, COUNT(*) as assetCount
-           FROM asset a WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
+           WHERE ${clause}
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -237,13 +242,15 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       case "maintenance":
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(mh.totalCost),0) + COALESCE(SUM(t.totalCost),0) as total,
                   COUNT(DISTINCT a.id) as assetCount
            FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
            LEFT JOIN maintenancehistory mh ON mh.assetId = a.id
            LEFT JOIN ticket t ON t.assetId = a.id
            WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -252,12 +259,14 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       case "insurance":
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(ai.premiumAmount),0) as total,
                   COUNT(DISTINCT a.id) as assetCount
            FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
            LEFT JOIN assetinsurance ai ON ai.assetId = a.id
            WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -266,12 +275,14 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       case "amc_cmc":
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(sc.cost),0) as total,
                   COUNT(DISTINCT a.id) as assetCount
            FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
            LEFT JOIN servicecontract sc ON sc.assetId = a.id
            WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -280,12 +291,14 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       case "depreciation":
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(ad.accumulatedDepreciation),0) as total,
                   COUNT(DISTINCT a.id) as assetCount
            FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
            LEFT JOIN assetdepreciation ad ON ad.assetId = a.id
            WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -295,13 +308,15 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       default:
         rows = await prisma.$queryRawUnsafe(
           `SELECT YEAR(a.purchaseDate) as yr, MONTH(a.purchaseDate) as mo,
+                  a.currentBranchId as branchId, b.name as branchName,
                   COALESCE(SUM(a.purchaseCost),0) +
                   COALESCE(SUM(a.leaseAmount),0) +
                   COALESCE(SUM(a.rentalAmount),0) as total,
                   COUNT(*) as assetCount
            FROM asset a
+           LEFT JOIN branch b ON b.id = a.currentBranchId
            WHERE ${clause}
-           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate)
+           GROUP BY YEAR(a.purchaseDate), MONTH(a.purchaseDate), a.currentBranchId, b.name
            ORDER BY yr, mo`,
           ...params
         );
@@ -314,9 +329,12 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       mo: Number(r.mo),
       total: Number(r.total || 0),
       assetCount: Number(r.assetCount || 0),
+      branchId: r.branchId == null ? null : Number(r.branchId),
+      branchName: r.branchName ?? null,
     }));
 
-    const tree = buildFYTree(normalizedRows);
+    // FY > Branch > Quarter > Month
+    const tree = buildFYBranchTree(normalizedRows);
 
     res.json({ financialYears: tree, view });
   } catch (err: any) {
@@ -653,6 +671,8 @@ export const getMonthBreakdown = async (req: AuthenticatedRequest, res: Response
 
     const start = new Date(year, month - 1, 1);
     const end   = new Date(year, month, 1);
+    const branchId = req.query.branchId ? Number(req.query.branchId) : undefined;
+    const branchClause = branchId ? Prisma.sql`AND a.currentBranchId = ${branchId}` : Prisma.empty;
 
     // Category-wise cost
     const categoryRaw: any[] = await prisma.$queryRaw`
@@ -663,6 +683,7 @@ export const getMonthBreakdown = async (req: AuthenticatedRequest, res: Response
       FROM asset a
       LEFT JOIN assetcategory ac ON ac.id = a.assetCategoryId
       WHERE a.purchaseDate >= ${start} AND a.purchaseDate < ${end}
+        ${branchClause}
       GROUP BY ac.id, ac.name
       ORDER BY totalCost DESC
     `;
@@ -676,6 +697,7 @@ export const getMonthBreakdown = async (req: AuthenticatedRequest, res: Response
       FROM asset a
       LEFT JOIN department d ON d.id = a.departmentId
       WHERE a.purchaseDate >= ${start} AND a.purchaseDate < ${end}
+        ${branchClause}
       GROUP BY d.id, d.name
       ORDER BY totalCost DESC
     `;
@@ -701,6 +723,78 @@ export const getMonthBreakdown = async (req: AuthenticatedRequest, res: Response
     });
   } catch (err: any) {
     console.error("getMonthBreakdown error:", err);
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// ─── 8. Branch Breakdown — per-branch totals across all cost views ─────────────
+// One call returns purchase value, maintenance, insurance and AMC/CMC spend per
+// branch, honoring the same filters as the rest of the dashboard.
+export const getBranchBreakdown = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user as any;
+    const { clause, params } = buildRawWhereClause(req.query, user);
+
+    const [purchaseRows, maintRows, insRows, amcRows] = await Promise.all([
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT a.currentBranchId as branchId, b.name as branchName,
+                COUNT(a.id) as assetCount,
+                COALESCE(SUM(a.purchaseCost),0) + COALESCE(SUM(a.estimatedValue),0) as total
+         FROM asset a
+         LEFT JOIN branch b ON b.id = a.currentBranchId
+         WHERE ${clause}
+         GROUP BY a.currentBranchId, b.name`,
+        ...params
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT a.currentBranchId as branchId,
+                COALESCE(SUM(mh.totalCost),0) as total
+         FROM asset a
+         LEFT JOIN maintenancehistory mh ON mh.assetId = a.id
+         WHERE ${clause}
+         GROUP BY a.currentBranchId`,
+        ...params
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT a.currentBranchId as branchId,
+                COALESCE(SUM(ai.premiumAmount),0) as total
+         FROM asset a
+         LEFT JOIN assetinsurance ai ON ai.assetId = a.id
+         WHERE ${clause}
+         GROUP BY a.currentBranchId`,
+        ...params
+      ),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT a.currentBranchId as branchId,
+                COALESCE(SUM(sc.cost),0) as total
+         FROM asset a
+         LEFT JOIN servicecontract sc ON sc.assetId = a.id
+         WHERE ${clause}
+         GROUP BY a.currentBranchId`,
+        ...params
+      ),
+    ]);
+
+    const key = (v: any) => (v == null ? "null" : String(Number(v)));
+    const maintMap = new Map(maintRows.map((r) => [key(r.branchId), Number(r.total)]));
+    const insMap = new Map(insRows.map((r) => [key(r.branchId), Number(r.total)]));
+    const amcMap = new Map(amcRows.map((r) => [key(r.branchId), Number(r.total)]));
+
+    const branches = purchaseRows
+      .map((r) => ({
+        branchId: r.branchId == null ? null : Number(r.branchId),
+        branchName: r.branchName || "Unassigned",
+        assetCount: Number(r.assetCount),
+        purchaseValue: Number(r.total),
+        maintenanceCost: maintMap.get(key(r.branchId)) ?? 0,
+        insurancePremium: insMap.get(key(r.branchId)) ?? 0,
+        amcCmcCost: amcMap.get(key(r.branchId)) ?? 0,
+      }))
+      .sort((a, z) => z.purchaseValue - a.purchaseValue);
+
+    res.json({ branches });
+  } catch (err: any) {
+    console.error("getBranchBreakdown error:", err);
     res.status(500).json({ message: err.message });
   }
 };

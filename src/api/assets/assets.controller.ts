@@ -69,9 +69,11 @@ export const getAllAssets = async (req: Request, res: Response) => {
     }
 
     // Optional filters (e.g. Store screen asking "which assets are parked in store X")
-    const { currentStoreId, status } = req.query;
+    const { currentStoreId, status, branchId } = req.query;
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
+    // Branch scoping via the denormalized current-branch cache (see schema note).
+    if (branchId) where.currentBranchId = Number(branchId);
 
     // Sub-assets/components (parentAssetId set) belong under their parent's expand
     // row, not as standalone entries — exclude them unless explicitly requested.
@@ -95,6 +97,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
         assetCategory: { select: { name: true } },
         department: { select: { name: true } },
         allottedTo: { select: { name: true } },
+        currentBranch: { select: { name: true } },
         _count: { select: { subAssets: true } }, // sub-asset count for the Sub-Assets screen badge
       },
     });
@@ -165,11 +168,12 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
 
     const accessWhere = await buildAssetAccessWhere(user);
 
-    // Parity with getAllAssets' optional store/status filters.
+    // Parity with getAllAssets' optional store/status/branch filters.
     const where: any = { ...accessWhere };
-    const { currentStoreId, status } = req.query;
+    const { currentStoreId, status, branchId } = req.query;
     if (currentStoreId) where.currentStoreId = Number(currentStoreId);
     if (status) where.status = String(status);
+    if (branchId) where.currentBranchId = Number(branchId);
 
     // Exclude sub-assets/components — they belong under their parent, not the main list.
     if (req.query.includeSubAssets !== "true") where.parentAssetId = null;
@@ -221,6 +225,7 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       assetCategory: { select: { name: true } },
       department: { select: { name: true } },
       allottedTo: { select: { name: true } },
+      currentBranch: { select: { name: true } },
     } as const;
 
     const [data, total, activeCount] = await Promise.all([
@@ -246,8 +251,10 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
 // GET /assets/all-dropdown — lightweight list of ALL assets for dropdowns (ticket form, etc.)
 export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
   try {
+    const where: any = { status: { notIn: ["DISPOSED", "SCRAPPED", "IN_STORE", "RETIRED", "CONDEMNED", "REJECTED"] } };
+    if (_req.query.branchId) where.currentBranchId = Number(_req.query.branchId);
     const assets = await prisma.asset.findMany({
-      where: { status: { notIn: ["DISPOSED", "SCRAPPED", "IN_STORE", "RETIRED", "CONDEMNED", "REJECTED"] } },
+      where,
       select: {
         id: true,
         assetId: true,
@@ -420,6 +427,10 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         assetPhoto: data.assetPhoto ?? null,
         modeOfProcurement: data.modeOfProcurement ?? "PURCHASE",
         serviceCoverageType: data.serviceCoverageType ?? null,
+
+        // Make/model
+        manufacturer: data.manufacturer ?? null,
+        modelNumber: data.modelNumber ?? null,
 
         // PURCHASE
         invoiceNumber: data.invoiceNumber,
@@ -821,6 +832,8 @@ export const updateAsset = async (req: Request, res: Response) => {
       serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
       assetPhoto: data.assetPhoto,
       rfidCode: data.rfidCode,
+      manufacturer: data.manufacturer ?? null,
+      modelNumber: data.modelNumber ?? null,
       modeOfProcurement: data.modeOfProcurement,
 
       // GRN
@@ -1072,6 +1085,26 @@ async function uploadToFTP(localFilePath: string, remoteFilePath: string): Promi
     throw new Error("FTP upload failed");
   }
 }
+
+// Targeted update of make/model only — used from the Specifications tab so
+// non-basic-details users (maintenance) can set them without touching other fields.
+export const updateAssetMakeModel = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { manufacturer, modelNumber } = req.body;
+    const updated = await prisma.asset.update({
+      where: { id },
+      data: {
+        manufacturer: manufacturer ? String(manufacturer).trim() : null,
+        modelNumber: modelNumber ? String(modelNumber).trim() : null,
+      },
+      select: { id: true, manufacturer: true, modelNumber: true },
+    });
+    res.json(updated);
+  } catch (e: any) {
+    res.status(500).json({ message: e.message || "Failed to update make/model" });
+  }
+};
 
 export const uploadAssetImage = async (req: Request, res: Response) => {
   try {

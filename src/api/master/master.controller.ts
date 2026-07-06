@@ -20,6 +20,13 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       assetWhere = { supervisorId: Number(employeeDbId) };
     }
 
+    // Optional branch scoping (dashboard branch tiles drive this)
+    const branchId = req.query.branchId ? Number(req.query.branchId) : undefined;
+    if (branchId) {
+      assetWhere.currentBranchId = branchId;
+      ticketWhere.asset = { ...(ticketWhere.asset || {}), currentBranchId: branchId };
+    }
+
     // Get asset IDs for department-scoped queries on related models
     let scopedAssetIds: number[] | null = null; // null = no filter (ADMIN sees all)
     if (Object.keys(assetWhere).length > 0) {

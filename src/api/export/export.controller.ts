@@ -266,7 +266,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const where: any = {};
         if (f.assetCategoryId) where.assetCategoryId = f.assetCategoryId;
         if (f.departmentId)    where.departmentId    = f.departmentId;
-        if (f.branchId)        where.branchId        = f.branchId;
+        if (f.branchId)        where.currentBranchId = f.branchId;
 
         const [assets, categories, depLogs] = await Promise.all([
           prisma.asset.findMany({
@@ -914,7 +914,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         if (dr) where.purchaseDate = dr;
         if (f.assetCategoryId) where.assetCategoryId = f.assetCategoryId;
         if (f.departmentId)    where.departmentId    = f.departmentId;
-        if (f.branchId)        where.branchId        = f.branchId;
+        if (f.branchId)        where.currentBranchId = f.branchId;
         if (f.vendorId)        where.vendorId        = f.vendorId;
         const assets = await prisma.asset.findMany({
           where,
@@ -2077,7 +2077,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const where: any = {};
         if (f.assetCategoryId) where.assetCategoryId = f.assetCategoryId;
         if (f.departmentId)    where.departmentId    = f.departmentId;
-        if (f.branchId)        where.branchId        = f.branchId;
+        if (f.branchId)        where.currentBranchId = f.branchId;
         if (f.assetType)       where.assetType       = f.assetType;
         const [assets, assignments, subAssets, documents, maintHistory] = await Promise.all([
           prisma.asset.findMany({

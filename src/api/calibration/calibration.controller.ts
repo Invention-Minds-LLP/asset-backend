@@ -83,7 +83,7 @@ export const getAllCalibrationSchedules = async (req: Request, res: Response) =>
     const schedules = await prisma.calibrationSchedule.findMany({
       where,
       include: {
-        asset: { select: { assetId: true, assetName: true, assetType: true } },
+        asset: { select: { assetId: true, assetName: true, assetType: true, manufacturer: true, modelNumber: true } },
         vendor: { select: { name: true } },
       },
       orderBy: { nextDueAt: "asc" },
@@ -204,7 +204,7 @@ export const getDueCalibrations = async (req: Request, res: Response) => {
     const due = await prisma.calibrationSchedule.findMany({
       where: { nextDueAt: { lte: cutoff }, isActive: true },
       include: {
-        asset: { select: { assetId: true, assetName: true, assetType: true, departmentId: true } },
+        asset: { select: { assetId: true, assetName: true, assetType: true, departmentId: true, manufacturer: true, modelNumber: true } },
         vendor: { select: { name: true, contact: true } },
       },
       orderBy: { nextDueAt: "asc" },

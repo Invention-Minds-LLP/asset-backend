@@ -1,5 +1,5 @@
 import express from "express";
-import { getAllAssets, getAllAssetsForDropdown, getAssetsPaginated, getAssetById, createAsset, updateAsset, deleteAsset, getAssetByAssetId, uploadAssetImage, updateAssetAssignment, getAssetSpecifications, createAssetSpecification, updateAssetSpecification, getAssetScanSummary, getAssetScanDetails, hodApproveAsset } from "./assets.controller";
+import { getAllAssets, getAllAssetsForDropdown, getAssetsPaginated, getAssetById, createAsset, updateAsset, deleteAsset, getAssetByAssetId, uploadAssetImage, updateAssetAssignment, getAssetSpecifications, createAssetSpecification, updateAssetSpecification, getAssetScanSummary, getAssetScanDetails, hodApproveAsset, updateAssetMakeModel } from "./assets.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
 const router = express.Router();
@@ -18,6 +18,7 @@ router.get("/scan/:assetId", authenticateToken, getAssetScanDetails);
 router.get("/:id",authenticateToken, getAssetById);
 router.post("/",authenticateToken, createAsset);
 router.put("/:id",authenticateToken, updateAsset);
+router.patch("/:id/make-model", authenticateToken, updateAssetMakeModel);
 router.delete("/:id",authenticateToken, deleteAsset);
 router.post('/:assetId/upload-image', authenticateToken, uploadAssetImage);
 router.post('/:id/hod-approval', authenticateToken, hodApproveAsset);

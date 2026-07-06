@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { syncCurrentBranch } from "../../lib/assetLocation";
 
 export const addAssetLocation = async (
   req: AuthenticatedRequest,
@@ -66,6 +67,9 @@ export const addAssetLocation = async (
         }
       });
 
+      // 4️⃣ Sync the denormalized current-branch cache
+      await syncCurrentBranch(tx, assetId, branchId ?? null);
+
       return newLocation;
     });
 
@@ -130,6 +134,9 @@ export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Resp
           data: { rfidCode: rfid }
         });
       }
+
+      // 4) Sync the denormalized current-branch cache
+      await syncCurrentBranch(tx, assetId, branchId ?? null);
 
       return newLocation;
     });

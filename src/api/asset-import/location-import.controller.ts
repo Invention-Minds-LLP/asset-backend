@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import fs from "fs";
 import XLSX from "xlsx";
 import prisma from "../../prismaClient";
+import { syncCurrentBranch } from "../../lib/assetLocation";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ASSET LOCATION BULK IMPORT (asset-wise)
@@ -152,6 +153,8 @@ export const importLocationsExcel = async (req: Request, res: Response): Promise
               isActive: true,
             },
           });
+          // Sync the denormalized current-branch cache
+          await syncCurrentBranch(tx, asset.id, branchId);
         });
         push("UPDATED");
       } catch (e: any) {

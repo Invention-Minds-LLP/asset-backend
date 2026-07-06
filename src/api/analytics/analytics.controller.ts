@@ -8,7 +8,7 @@ import { Prisma } from "@prisma/client";
 // ═══════════════════════════════════════════════════════════
 export const getAssetTCO = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { assetId, categoryId, departmentId, level = "asset" } = req.query;
+    const { assetId, categoryId, departmentId, branchId, level = "asset" } = req.query;
     const user = (req as any).user;
     const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
 
@@ -151,6 +151,7 @@ export const getAssetTCO = async (req: AuthenticatedRequest, res: Response) => {
 
     const assetWhere: Prisma.AssetWhereInput = {};
     if (categoryId) assetWhere.assetCategoryId = Number(categoryId);
+    if (branchId) assetWhere.currentBranchId = Number(branchId);
     if (departmentId) {
       assetWhere.departmentId = Number(departmentId);
     } else if (!broadAccess && user?.departmentId) {
@@ -175,6 +176,7 @@ export const getAssetTCO = async (req: AuthenticatedRequest, res: Response) => {
       groups.map(async (g) => {
         const groupId = (g as any)[groupByField] as number;
         const assetFilter: Prisma.AssetWhereInput = { [groupByField]: groupId };
+        if (branchId) assetFilter.currentBranchId = Number(branchId);
 
         // Get all asset IDs in this group
         const assetIds = (
@@ -270,7 +272,7 @@ export const getAssetTCO = async (req: AuthenticatedRequest, res: Response) => {
 // ═══════════════════════════════════════════════════════════
 export const getAssetTurnover = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { categoryId, departmentId } = req.query;
+    const { categoryId, departmentId, branchId } = req.query;
     const user = (req as any).user;
 
     const where: Prisma.AssetWhereInput = {
@@ -279,6 +281,7 @@ export const getAssetTurnover = async (req: AuthenticatedRequest, res: Response)
     };
     const broadAccessTurnover = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
     if (categoryId) where.assetCategoryId = Number(categoryId);
+    if (branchId) where.currentBranchId = Number(branchId);
     if (departmentId) {
       where.departmentId = Number(departmentId);
     } else if (!broadAccessTurnover && user?.departmentId) {
@@ -367,13 +370,19 @@ export const getAssetTurnover = async (req: AuthenticatedRequest, res: Response)
 // ═══════════════════════════════════════════════════════════
 export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { departmentId } = req.query;
+    const { departmentId, branchId } = req.query;
     const user = (req as any).user;
     // Auto-inject departmentId for non-admin users
     const broadAccess = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role);
     const deptFilter = departmentId
       ? Number(departmentId)
       : (!broadAccess && user?.departmentId ? Number(user.departmentId) : undefined);
+    const branchFilter = branchId ? Number(branchId) : undefined;
+    // Asset-level where fragment shared by the asset aggregates below.
+    const assetScope = {
+      ...(deptFilter ? { departmentId: deptFilter } : {}),
+      ...(branchFilter ? { currentBranchId: branchFilter } : {}),
+    };
 
     // All KPIs sourced from the Asset module only — no PO/GRA workflow tables.
     // Basic PO/GRN details (purchaseOrderNo, grnNumber, purchaseCost, grnValue)
@@ -390,7 +399,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       prisma.asset.aggregate({
         where: {
           status: { notIn: ["DISPOSED", "SCRAPPED"] },
-          ...(deptFilter ? { departmentId: deptFilter } : {}),
+          ...assetScope,
         },
         _sum: { purchaseCost: true },
       }),
@@ -398,32 +407,35 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       prisma.assetDepreciation.aggregate({
         where: {
           isActive: true,
-          ...(deptFilter ? { asset: { departmentId: deptFilter } } : {}),
+          ...(deptFilter || branchFilter ? { asset: assetScope } : {}),
         },
         _sum: { currentBookValue: true },
       }),
       // Maintenance cost — corrective tickets
       prisma.ticket.aggregate({
-        where: deptFilter ? { departmentId: deptFilter } : {},
+        where: {
+          ...(deptFilter ? { departmentId: deptFilter } : {}),
+          ...(branchFilter ? { asset: { currentBranchId: branchFilter } } : {}),
+        },
         _sum: { totalCost: true },
       }),
       // Maintenance cost — planned maintenance history
       prisma.maintenanceHistory.aggregate({
-        where: deptFilter ? { asset: { departmentId: deptFilter } } : {},
+        where: deptFilter || branchFilter ? { asset: assetScope } : {},
         _sum: { totalCost: true },
       }),
       // Active asset count
       prisma.asset.count({
         where: {
           status: { notIn: ["DISPOSED", "SCRAPPED"] },
-          ...(deptFilter ? { departmentId: deptFilter } : {}),
+          ...assetScope,
         },
       }),
       // Disposed/scrapped assets
       prisma.asset.count({
         where: {
           status: { in: ["DISPOSED", "SCRAPPED"] },
-          ...(deptFilter ? { departmentId: deptFilter } : {}),
+          ...assetScope,
         },
       }),
     ]);
@@ -441,6 +453,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       WHERE purchaseDate >= ${twelveMonthsAgo}
         AND status NOT IN ('DISPOSED', 'SCRAPPED')
         ${deptFilter ? Prisma.sql`AND departmentId = ${deptFilter}` : Prisma.empty}
+        ${branchFilter ? Prisma.sql`AND currentBranchId = ${branchFilter}` : Prisma.empty}
       GROUP BY DATE_FORMAT(purchaseDate, '%Y-%m')
       ORDER BY month
     `;
@@ -452,6 +465,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       FROM ticket
       WHERE createdAt >= ${twelveMonthsAgo}
         ${deptFilter ? Prisma.sql`AND departmentId = ${deptFilter}` : Prisma.empty}
+        ${branchFilter ? Prisma.sql`AND assetId IN (SELECT id FROM asset WHERE currentBranchId = ${branchFilter})` : Prisma.empty}
       GROUP BY DATE_FORMAT(createdAt, '%Y-%m')
       ORDER BY month
     `;
@@ -478,7 +492,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
 
     // Add historical opening balance costs from legacy assets
     const historicalCostAgg = await prisma.asset.aggregate({
-      where: { isLegacyAsset: true, ...(deptFilter ? { departmentId: deptFilter } : {}) },
+      where: { isLegacyAsset: true, ...assetScope },
       _sum: { historicalMaintenanceCost: true, historicalSparePartsCost: true, historicalOtherCost: true },
     });
     const totalHistoricalCost =
@@ -578,6 +592,7 @@ export const getIdleCapitalAnalysis = async (req: AuthenticatedRequest, res: Res
     if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       deptScope.departmentId = Number(user.departmentId);
     }
+    if (req.query.branchId) deptScope.currentBranchId = Number(req.query.branchId);
 
     // Asset status buckets:
     //   Always idle  : IN_STORE (in warehouse, not deployed), RETIRED (withdrawn from service)
@@ -778,9 +793,16 @@ export const getCooDashboard = async (req: AuthenticatedRequest, res: Response) 
     // Auto-inject departmentId for non-admin users
     const user = (req as any).user;
     const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId ? Number(user.departmentId) : undefined;
-    const deptAssetWhere = deptFilter ? { departmentId: deptFilter } : {};
-    const deptWhere = deptFilter ? { departmentId: deptFilter } : {};
-    const deptAssetNestedWhere = deptFilter ? { asset: { departmentId: deptFilter } } : {};
+    const branchFilter = req.query.branchId ? Number(req.query.branchId) : undefined;
+    const deptAssetWhere = {
+      ...(deptFilter ? { departmentId: deptFilter } : {}),
+      ...(branchFilter ? { currentBranchId: branchFilter } : {}),
+    };
+    const deptWhere = {
+      ...(deptFilter ? { departmentId: deptFilter } : {}),
+      ...(branchFilter ? { asset: { currentBranchId: branchFilter } } : {}),
+    };
+    const deptAssetNestedWhere = deptFilter || branchFilter ? { asset: deptAssetWhere } : {};
 
     // ── 1. Asset Fleet Health ────────────────────────────────
     const [
@@ -1115,6 +1137,7 @@ export const getInStoreAging = async (req: AuthenticatedRequest, res: Response) 
           { departmentId: null, allottedToId: null },
         ],
         ...(deptScope ? { departmentId: deptScope } : {}),
+        ...(req.query.branchId ? { currentBranchId: Number(req.query.branchId) } : {}),
       },
       select: {
         id: true,
@@ -1177,6 +1200,7 @@ export const getUncoveredAssets = async (req: AuthenticatedRequest, res: Respons
     if (!["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId) {
       assetWhere.departmentId = Number(user.departmentId);
     }
+    if (req.query.branchId) assetWhere.currentBranchId = Number(req.query.branchId);
 
     const assets = await prisma.asset.findMany({
       where: assetWhere,
@@ -1283,19 +1307,27 @@ export const getMaintenanceByCategory = async (req: AuthenticatedRequest, res: R
     const user = (req as any).user;
     const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"].includes(user?.role) && user?.departmentId
       ? Number(user.departmentId) : undefined;
-    const deptAssetWhere = deptFilter ? { departmentId: deptFilter } : {};
+    const branchFilter = req.query.branchId ? Number(req.query.branchId) : undefined;
+    const deptAssetWhere = {
+      ...(deptFilter ? { departmentId: deptFilter } : {}),
+      ...(branchFilter ? { currentBranchId: branchFilter } : {}),
+    };
 
     // Step 1: Aggregate ticket (corrective) costs per asset
     const ticketCosts = await prisma.ticket.groupBy({
       by: ["assetId"],
-      where: { assetId: { not: undefined }, ...(deptFilter ? { departmentId: deptFilter } : {}) },
+      where: {
+        assetId: { not: undefined },
+        ...(deptFilter ? { departmentId: deptFilter } : {}),
+        ...(branchFilter ? { asset: { currentBranchId: branchFilter } } : {}),
+      },
       _sum: { totalCost: true },
     });
 
     // Step 2: Aggregate maintenance history (PM) costs per asset
     const mhCosts = await prisma.maintenanceHistory.groupBy({
       by: ["assetId"],
-      where: { assetId: { not: undefined }, ...(deptFilter ? { asset: deptAssetWhere } : {}) },
+      where: { assetId: { not: undefined }, ...(deptFilter || branchFilter ? { asset: deptAssetWhere } : {}) },
       _sum: { totalCost: true },
     });
 
@@ -1316,7 +1348,7 @@ export const getMaintenanceByCategory = async (req: AuthenticatedRequest, res: R
 
     // Step 3: Load all assets with category & department
     const assets = await prisma.asset.findMany({
-      where: deptFilter ? { departmentId: deptFilter } : {},
+      where: deptAssetWhere,
       select: {
         id: true,
         assetId: true,
@@ -1408,7 +1440,11 @@ export const getAssetValueBuckets = async (req: AuthenticatedRequest, res: Respo
     const deptFilter = !["ADMIN", "CEO_COO", "FINANCE", "CFO"].includes(user?.role) && user?.departmentId
       ? { departmentId: Number(user.departmentId) } : {};
 
-    const activeWhere = { status: { notIn: ["DISPOSED", "SCRAPPED", "CONDEMNED"] }, ...deptFilter };
+    const activeWhere = {
+      status: { notIn: ["DISPOSED", "SCRAPPED", "CONDEMNED"] },
+      ...deptFilter,
+      ...(req.query.branchId ? { currentBranchId: Number(req.query.branchId) } : {}),
+    };
 
     const assets = await prisma.asset.findMany({
       where: activeWhere,
