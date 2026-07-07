@@ -50,6 +50,17 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
       return;
     }
 
+    const payload = await computeBranchDashboard();
+    res.json(payload);
+  } catch (err: any) {
+    console.error("getBranchDashboard error:", err);
+    res.status(500).json({ message: "Failed to load branch dashboard", error: err?.message });
+  }
+};
+
+/** Shared branch health/value aggregates — used by /branch-dashboard and /head-office. */
+export async function computeBranchDashboard() {
+  {
     const [
       branches,
       countByBranchStatus,
@@ -62,6 +73,8 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
       uncoveredRows,
       monthlyRows,
       netBlockRows,
+      subAssetCostRows,
+      replacementCostRows,
     ] = await Promise.all([
       prisma.branch.findMany({
         where: { isActive: true },
@@ -128,6 +141,22 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
         FROM assetdepreciation d
         JOIN asset a ON a.id = d.assetId
         GROUP BY a.currentBranchId`,
+      // Component purchases: sub-asset purchase cost per branch
+      prisma.asset.groupBy({
+        by: ["currentBranchId"],
+        where: { parentAssetId: { not: null } },
+        _sum: { purchaseCost: true },
+      }),
+      // Component replacements: SubAssetReplacement costs, attributed to the
+      // parent's branch. Only rows WITHOUT a new sub-asset — those with one are
+      // already counted via the new sub-asset's purchaseCost.
+      prisma.$queryRaw<any[]>`
+        SELECT p.currentBranchId AS branchId,
+               COALESCE(SUM(r.cost), 0) AS cost
+        FROM subassetreplacement r
+        JOIN asset p ON p.id = r.parentAssetId
+        WHERE r.newSubAssetId IS NULL
+        GROUP BY p.currentBranchId`,
     ]);
 
     const catName = new Map(categories.map((c) => [c.id, c.name]));
@@ -149,6 +178,7 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
     const maintMap = byBranch(maintRows);
     const uncoveredMap = byBranch(uncoveredRows);
     const netBlockMap = byBranch(netBlockRows);
+    const replacementMap = byBranch(replacementCostRows);
 
     // Include a synthetic "Unassigned" bucket if any asset has no branch.
     const branchList: Array<{ id: number | null; name: string; code: string | null }> = [
@@ -195,6 +225,8 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
       const maintenanceSpend = num(maintMap.get(b.id)?.maintenanceCost) + num(t.ticketCost);
       const uncovered = num(uncoveredMap.get(b.id)?.uncovered);
       const netBlock = num(netBlockMap.get(b.id)?.netBlock);
+      const subCostRow = subAssetCostRows.find((r) => r.currentBranchId === b.id);
+      const componentCost = num(subCostRow?._sum.purchaseCost) + num(replacementMap.get(b.id)?.cost);
 
       const monthly = months.map((ym) => {
         const row = monthlyRows.find((m) => m.branchId === (b.id as any) && m.ym === ym)
@@ -217,6 +249,7 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
         openTickets,
         slaBreached,
         maintenanceSpend,
+        componentCost,
         uncovered,
         topCategories,
         monthly,
@@ -237,9 +270,6 @@ export const getBranchDashboard = async (req: AuthenticatedRequest, res: Respons
       slaBreached: result.reduce((s, r) => s + r.slaBreached, 0),
     };
 
-    res.json({ branches: result, totals, months, generatedAt: new Date().toISOString() });
-  } catch (err: any) {
-    console.error("getBranchDashboard error:", err);
-    res.status(500).json({ message: "Failed to load branch dashboard", error: err?.message });
+    return { branches: result, totals, months, generatedAt: new Date().toISOString() };
   }
-};
+}

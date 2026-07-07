@@ -37,9 +37,11 @@ export const getAssetCostAnalysis = async (
     const subAssetPurchaseCost = subAssets.reduce(
       (sum, s) => sum + Number(s.purchaseCost ?? 0), 0
     );
-    // Replacement costs from SubAssetReplacement table
+    // Replacement costs from SubAssetReplacement table.
+    // Only rows WITHOUT a new sub-asset: when a replacement creates a new
+    // sub-asset, its cost is already counted via that asset's purchaseCost.
     const replacements = await (prisma as any).subAssetReplacement.findMany({
-      where: { parentAssetId: assetDbId },
+      where: { parentAssetId: assetDbId, newSubAssetId: null },
       select: { cost: true },
     });
     const subAssetReplacementCost = replacements.reduce(
@@ -285,6 +287,9 @@ export const getAssetCostAnalysis = async (
         pmInternalCost,
         subAssetPurchaseCost,
         subAssetReplacementCost,
+        // Split for display: repairs+PM vs component purchases/replacements
+        maintenanceOnlyCost: repairCost + pmCost,
+        componentCost: subAssetPurchaseCost + subAssetReplacementCost,
         totalMaintenanceCost,
         totalHistoricalCost,
         lifetimeTotalMaintenanceCost,

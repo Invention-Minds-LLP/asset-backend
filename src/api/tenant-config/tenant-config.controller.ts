@@ -16,6 +16,7 @@ interface DefaultConfig {
 }
 
 const DEFAULT_CONFIGS: DefaultConfig[] = [
+  { key: "ENABLE_BRANCH_FEATURES", value: "true", label: "Show branch-wise filters, tiles and breakdowns across the app (set false for single-branch clients)", group: "GENERAL" },
   { key: "ENABLE_PO_MODULE", value: "true", group: "PROCUREMENT" },
   { key: "ENABLE_GRA_MODULE", value: "true", group: "PROCUREMENT" },
   { key: "ENABLE_EXTERNAL_PROCUREMENT", value: "false", group: "PROCUREMENT" },

@@ -157,6 +157,22 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       count: row._count.id,
     }));
 
+    // Asset branch breakdown (branch-wise strip on the dashboard)
+    const assetBranchBreakdown = await prisma.asset.groupBy({
+      by: ["currentBranchId"],
+      _count: { id: true },
+      where: assetWhere,
+    });
+    const branchRows = await prisma.branch.findMany({ select: { id: true, name: true } });
+    const branchNameMap = Object.fromEntries(branchRows.map((b) => [b.id, b.name]));
+    const assetsByBranch = assetBranchBreakdown
+      .map((row) => ({
+        branchId: row.currentBranchId,
+        branch: row.currentBranchId == null ? "Unassigned" : (branchNameMap[row.currentBranchId] ?? "Unknown"),
+        count: row._count.id,
+      }))
+      .sort((a, b) => b.count - a.count);
+
     // Recent tickets (configurable limit)
     const recentLimit = Math.min(Number(req.query.recentLimit) || 5, 25);
     const recentTickets = await prisma.ticket.findMany({
@@ -221,6 +237,7 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
         count: t._count.id,
       })),
       assetsByCategory,
+      assetsByBranch,
       recentTickets,
       recentAssets,
     });

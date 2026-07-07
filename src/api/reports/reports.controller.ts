@@ -164,8 +164,26 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
       return sendExcel(res, exportRows, "asset-register-report", "Asset Register");
     }
 
+    // Branch-wise subtotals over the WHOLE filtered set (not just this page)
+    const branchAgg = await prisma.asset.groupBy({
+      by: ["currentBranchId"],
+      where,
+      _count: { id: true },
+      _sum: { purchaseCost: true },
+    });
+    const branchNames = await prisma.branch.findMany({ select: { id: true, name: true } });
+    const branchNameById = new Map(branchNames.map((b) => [b.id, b.name]));
+    const branchSummary = branchAgg
+      .map((b) => ({
+        branch: b.currentBranchId == null ? "Unassigned" : (branchNameById.get(b.currentBranchId) ?? "Unknown"),
+        count: b._count.id,
+        totalCost: Number(b._sum.purchaseCost || 0),
+      }))
+      .sort((a, z) => z.totalCost - a.totalCost);
+
     res.json({
       data,
+      branchSummary,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   } catch (err: any) {
@@ -1776,7 +1794,24 @@ export const getConsolidatedAssetReport = async (req: AuthenticatedRequest, res:
       return sendExcel(res, exportRows, "consolidated-asset-report", "Consolidated Assets");
     }
 
-    res.json({ data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
+    // Branch-wise subtotals over the WHOLE filtered set (not just this page)
+    const branchAgg = await prisma.asset.groupBy({
+      by: ["currentBranchId"],
+      where,
+      _count: { id: true },
+      _sum: { purchaseCost: true },
+    });
+    const branchNames = await prisma.branch.findMany({ select: { id: true, name: true } });
+    const branchNameById = new Map(branchNames.map((b) => [b.id, b.name]));
+    const branchSummary = branchAgg
+      .map((b) => ({
+        branch: b.currentBranchId == null ? "Unassigned" : (branchNameById.get(b.currentBranchId) ?? "Unknown"),
+        count: b._count.id,
+        totalCost: Number(b._sum.purchaseCost || 0),
+      }))
+      .sort((a, z) => z.totalCost - a.totalCost);
+
+    res.json({ data, branchSummary, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
   } catch (err: any) {
     console.error("getConsolidatedAssetReport error:", err);
     res.status(500).json({ message: err.message });

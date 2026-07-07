@@ -136,6 +136,24 @@ export const getFinancialSummary = async (req: AuthenticatedRequest, res: Respon
     const totalDepreciation = Number(depreciationSum._sum.accumulatedDepreciation || 0);
     const totalSparePartCost = Number(sparePartUsageSum._sum.costAtUse || 0);
 
+    // Component purchases/replacements — sub-asset purchase costs (within the
+    // filtered scope) + replacement records whose parent is in scope.
+    const [subAssetCostAgg, replacementCostAgg] = await Promise.all([
+      prisma.asset.aggregate({
+        where: { ...assetWhere, parentAssetId: { not: null } },
+        _sum: { purchaseCost: true },
+      }),
+      // Only replacements WITHOUT a new sub-asset row — those with one are
+      // already counted via the new sub-asset's purchaseCost above.
+      prisma.subAssetReplacement.aggregate({
+        where: { parentAsset: assetWhere, newSubAssetId: null },
+        _sum: { cost: true },
+      }),
+    ]);
+    const totalComponentCost =
+      Number(subAssetCostAgg._sum.purchaseCost ?? 0) +
+      Number(replacementCostAgg._sum.cost ?? 0);
+
     const totalCostOfOwnership =
       totalPurchaseCost + totalMaintenanceCost + totalInsurancePremiums +
       totalAmcCmcCost + totalSparePartCost + totalLeaseAmount + totalRentalAmount;
@@ -185,6 +203,7 @@ export const getFinancialSummary = async (req: AuthenticatedRequest, res: Respon
       totalAmcCmcCost,
       totalDepreciation,
       totalSparePartCost,
+      totalComponentCost,
       totalCostOfOwnership,
       avgCostPerAsset: matchingAssets.length > 0 ? +(totalCostOfOwnership / matchingAssets.length).toFixed(2) : 0,
       costByCategory: costByCategory.map((c) => ({
@@ -333,8 +352,27 @@ export const getFYBreakdown = async (req: AuthenticatedRequest, res: Response) =
       branchName: r.branchName ?? null,
     }));
 
-    // FY > Branch > Quarter > Month
-    const tree = buildFYBranchTree(normalizedRows);
+    // Tenant switch: single-branch clients hide all branch UI, so collapse the
+    // branch dimension and return the legacy FY > Quarter > Month shape.
+    const branchFlag = await prisma.tenantConfig.findUnique({ where: { key: "ENABLE_BRANCH_FEATURES" } });
+    const branchFeaturesOn = branchFlag ? branchFlag.value === "true" : true;
+
+    let tree: any[];
+    if (branchFeaturesOn) {
+      // FY > Branch > Quarter > Month
+      tree = buildFYBranchTree(normalizedRows);
+    } else {
+      // Collapse rows across branches per year-month, then legacy tree
+      const merged = new Map<string, { yr: number; mo: number; total: number; assetCount: number }>();
+      for (const r of normalizedRows) {
+        const k = `${r.yr}-${r.mo}`;
+        const e = merged.get(k) ?? { yr: r.yr, mo: r.mo, total: 0, assetCount: 0 };
+        e.total += r.total;
+        e.assetCount += r.assetCount;
+        merged.set(k, e);
+      }
+      tree = buildFYTree([...merged.values()]);
+    }
 
     res.json({ financialYears: tree, view });
   } catch (err: any) {

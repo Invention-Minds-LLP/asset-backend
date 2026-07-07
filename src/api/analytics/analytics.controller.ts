@@ -440,6 +440,31 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       }),
     ]);
 
+    // Component purchases/replacements — sub-asset purchase costs + replacement
+    // records. Shown as its own line so it isn't mistaken for repair/PM spend.
+    const [subAssetCostResult, replacementCostResult] = await Promise.all([
+      prisma.asset.aggregate({
+        where: {
+          parentAssetId: { not: null },
+          status: { notIn: ["DISPOSED", "SCRAPPED"] },
+          ...assetScope,
+        },
+        _sum: { purchaseCost: true },
+      }),
+      // Only replacements WITHOUT a new sub-asset row — those with one are
+      // already counted via the new sub-asset's purchaseCost above.
+      prisma.subAssetReplacement.aggregate({
+        where: {
+          newSubAssetId: null,
+          ...(deptFilter || branchFilter ? { parentAsset: assetScope } : {}),
+        },
+        _sum: { cost: true },
+      }),
+    ]);
+    const componentCost =
+      Number(subAssetCostResult._sum.purchaseCost ?? 0) +
+      Number(replacementCostResult._sum.cost ?? 0);
+
     // Monthly asset acquisitions (capital) — based on purchaseDate on the asset record
     // Monthly maintenance cost — ticket costs by creation month
     const now = new Date();
@@ -543,6 +568,7 @@ export const getCfoDashboard = async (req: AuthenticatedRequest, res: Response) 
       liveMaintenanceCost,
       totalHistoricalCost,
       totalMaintenanceCost,
+      componentCost,
       maintenanceToAssetRatio: totalAssetValue > 0
         ? Math.round((totalMaintenanceCost / totalAssetValue) * 10000) / 100
         : 0,
