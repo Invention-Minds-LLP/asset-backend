@@ -10,11 +10,17 @@ const OPEN_TICKET_STATUSES = ["CLOSED", "RESOLVED"]; // NOT IN
 
 /**
  * Branch Health Score (0–100), computed from four signals:
- *  - working condition: % of active assets NOT_WORKING     (up to −40)
+ *  - working condition: share of active assets NOT_WORKING (up to −40)
  *  - SLA breaches:      open tickets past SLA, 4 pts each  (up to −20)
- *  - coverage:          % of active assets with no warranty/AMC (up to −25)
+ *  - coverage:          share of active assets with no warranty/AMC (up to −25)
  *  - open ticket load:  open tickets per asset             (up to −15)
+ *
+ * SMALL-BRANCH FAIRNESS: ratios use a floor denominator of 25 assets, so a
+ * branch holding only e.g. 4 buses isn't destroyed by one vehicle in service —
+ * 1 not-working out of 4 real assets is treated like 1-in-25, not 1-in-4.
+ * Large branches are unaffected (their real count exceeds the floor).
  */
+const RATIO_FLOOR = 25;
 function healthScore(input: {
   activeAssets: number;
   notWorking: number;
@@ -24,12 +30,12 @@ function healthScore(input: {
   totalAssets: number;
 }): number {
   const { activeAssets, notWorking, slaBreached, uncovered, openTickets, totalAssets } = input;
-  const act = Math.max(activeAssets, 1);
+  const act = Math.max(activeAssets, RATIO_FLOOR);
   let score = 100;
   score -= Math.min(40, (notWorking / act) * 40);
   score -= Math.min(20, slaBreached * 4);
   score -= Math.min(25, (uncovered / act) * 25);
-  score -= Math.min(15, (openTickets / Math.max(totalAssets, 1)) * 75);
+  score -= Math.min(15, (openTickets / Math.max(totalAssets, RATIO_FLOOR)) * 75);
   return Math.max(0, Math.round(score));
 }
 

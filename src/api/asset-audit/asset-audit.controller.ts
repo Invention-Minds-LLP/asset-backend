@@ -635,9 +635,34 @@ export const getScopeFloors = async (req: AuthenticatedRequest, res: Response) =
   }
 };
 
-// GET /asset-audit/scope/categories?branchId=&floor=&block=
-// Categories present in the scope, each with a distinct-asset count.
-export const getScopeCategories = async (req: AuthenticatedRequest, res: Response) => {
+// GET /asset-audit/scope/blocks?branchId=&floor=
+// Distinct blocks from active+approved locations, within the chosen branch/floor.
+export const getScopeBlocks = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { branchId, floor } = req.query as Record<string, string | undefined>;
+
+    const where: any = { isActive: true, status: "APPROVED" };
+    if (branchId) where.branchId = Number(branchId);
+    if (floor) where.floor = floor;
+
+    const rows = await prisma.assetLocation.findMany({
+      where,
+      select: { block: true },
+      distinct: ["block"],
+      orderBy: { block: "asc" },
+    });
+
+    const blocks = [...new Set(rows.map((r) => r.block).filter(Boolean))];
+    res.json({ data: blocks });
+  } catch (error: any) {
+    console.error("Error fetching scope blocks:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/scope/rooms?branchId=&floor=&block=
+// Distinct rooms from active+approved locations, within the chosen branch/floor/block.
+export const getScopeRooms = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { branchId, floor, block } = req.query as Record<string, string | undefined>;
 
@@ -645,6 +670,33 @@ export const getScopeCategories = async (req: AuthenticatedRequest, res: Respons
     if (branchId) where.branchId = Number(branchId);
     if (floor) where.floor = floor;
     if (block) where.block = block;
+
+    const rows = await prisma.assetLocation.findMany({
+      where,
+      select: { room: true },
+      distinct: ["room"],
+      orderBy: { room: "asc" },
+    });
+
+    const rooms = [...new Set(rows.map((r) => r.room).filter(Boolean))];
+    res.json({ data: rooms });
+  } catch (error: any) {
+    console.error("Error fetching scope rooms:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/scope/categories?branchId=&floor=&block=&room=
+// Categories present in the scope, each with a distinct-asset count.
+export const getScopeCategories = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { branchId, floor, block, room } = req.query as Record<string, string | undefined>;
+
+    const where: any = { isActive: true, status: "APPROVED" };
+    if (branchId) where.branchId = Number(branchId);
+    if (floor) where.floor = floor;
+    if (block) where.block = block;
+    if (room) where.room = room;
 
     const locations = await prisma.assetLocation.findMany({
       where,
@@ -671,17 +723,20 @@ export const getScopeCategories = async (req: AuthenticatedRequest, res: Respons
   }
 };
 
-// GET /asset-audit/scope/preview?branchId=&floor=&block=&categoryIds=
+// GET /asset-audit/scope/preview?branchId=&floor=&block=&room=&categoryIds=
 // How many assets the audit would cover, with pinned/unpinned + per-category breakdown.
+// Must mirror createAudit's location filter (branch/floor/block/room) exactly so
+// the previewed count matches the assets actually enrolled.
 export const getScopePreview = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId, floor, block } = req.query as Record<string, string | undefined>;
+    const { branchId, floor, block, room } = req.query as Record<string, string | undefined>;
     const catIds = normalizeIds(req.query.categoryIds);
 
     const where: any = { isActive: true, status: "APPROVED" };
     if (branchId) where.branchId = Number(branchId);
     if (floor) where.floor = floor;
     if (block) where.block = block;
+    if (room) where.room = room;
     if (catIds.length) where.asset = { assetCategoryId: { in: catIds } };
 
     const locations = await prisma.assetLocation.findMany({

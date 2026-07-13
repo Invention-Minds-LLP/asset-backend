@@ -51,7 +51,7 @@ export const APPROVAL_AUTHORITY: Record<ApprovalLevelKey, string[]> = {
   HOD:        ["HOD", "FINANCE", "CEO_COO", "ADMIN"],
   MANAGEMENT: ["FINANCE", "CEO_COO", "ADMIN"],
   COO:        ["CEO_COO", "ADMIN"],
-  CFO:        ["ADMIN"],
+  CFO:        ["CFO", "ADMIN"],
 };
 
 /**
@@ -59,4 +59,18 @@ export const APPROVAL_AUTHORITY: Record<ApprovalLevelKey, string[]> = {
  */
 export function canApproveAtLevel(employeeRole: string, requiredLevel: ApprovalLevelKey): boolean {
   return (APPROVAL_AUTHORITY[requiredLevel] ?? ["ADMIN"]).includes(employeeRole);
+}
+
+/**
+ * The HOD of the Finance department acts with FINANCE authority
+ * (management-level PO approval, amendment decisions, indent management
+ * approval) even though their role is HOD.
+ */
+export async function isFinanceDeptHOD(user: { role: string; departmentId?: number }): Promise<boolean> {
+  if (user.role !== "HOD" || !user.departmentId) return false;
+  const dept = await prisma.department.findUnique({
+    where: { id: Number(user.departmentId) },
+    select: { name: true },
+  });
+  return (dept?.name || "").toUpperCase().includes("FINANCE");
 }

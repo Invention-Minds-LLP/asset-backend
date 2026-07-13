@@ -45,7 +45,11 @@ export const authenticateToken = (
      return
   } catch (error) {
     console.error("JWT verification failed:", error);
-     res.status(403).json({ message: "Forbidden: Invalid token" });
+    // 401 (not 403): an invalid/expired token means "not authenticated" —
+    // the frontend interceptor logs out ONLY on 401. 403 is reserved for
+    // authenticated users lacking permission (e.g. management-only pages)
+    // and must NOT end the session.
+    res.status(401).json({ message: "Unauthorized: Invalid token" });
     return;
   }
 };

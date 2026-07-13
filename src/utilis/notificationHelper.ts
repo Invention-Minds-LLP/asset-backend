@@ -324,4 +324,45 @@ export const getAdminIds = async (): Promise<number[]> => {
   return admins.map(a => a.employee?.id).filter(Boolean) as number[];
 };
 
+// ── Helper to get active employees by role ──
+export const getEmployeeIdsByRole = async (roles: string[]): Promise<number[]> => {
+  const emps = await prisma.employee.findMany({
+    where: { role: { in: roles as any }, isActive: true },
+    select: { id: true },
+  });
+  return emps.map(e => e.id);
+};
+
+// ── Finance approvers: FINANCE-role employees + the Finance department HOD ──
+// Falls back to admins so approval requests are never silently dropped.
+export const getFinanceApproverIds = async (): Promise<number[]> => {
+  const financeRole = await getEmployeeIdsByRole(["FINANCE"]);
+  const financeHods = await prisma.employee.findMany({
+    where: { role: "HOD", isActive: true, department: { name: { contains: "finance" } } },
+    select: { id: true },
+  });
+  const ids = [...new Set([...financeRole, ...financeHods.map(h => h.id)])];
+  return ids.length > 0 ? ids : getAdminIds();
+};
+
+// ── Procurement team: HODs/Supervisors of Purchase/Procurement/Store depts ──
+export const getProcurementTeamIds = async (roles: string[] = ["HOD", "SUPERVISOR"]): Promise<number[]> => {
+  const team = await prisma.employee.findMany({
+    where: {
+      role: { in: roles as any },
+      isActive: true,
+      department: {
+        OR: [
+          { name: { contains: "purchase" } },
+          { name: { contains: "procurement" } },
+          { name: { contains: "store" } },
+        ],
+      },
+    },
+    select: { id: true },
+  });
+  const ids = team.map(t => t.id);
+  return ids.length > 0 ? ids : getAdminIds();
+};
+
 export { formatCurrency };

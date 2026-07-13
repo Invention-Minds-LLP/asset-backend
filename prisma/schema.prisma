@@ -1154,6 +1154,7 @@ model Branch {
   transfersTo   AssetTransferHistory[] @relation("ToBranch")
   floorPlans    FloorPlan[]
   currentAssets Asset[]                @relation("AssetCurrentBranch")
+  assetIndents  AssetIndent[]          @relation("IndentBranch")
 
   createdById Int?
   updatedById Int?
@@ -1203,6 +1204,9 @@ model AssetLocation {
 
   isActive Boolean @default(true)
   status   String  @default("REQUESTED") // REQUESTED | APPROVED | REJECTED
+  // Which approver tier must sign off a pending change: HOD | MANAGEMENT.
+  // Set from the requester's role at request time. Null on auto-approved rows.
+  approvalLevel String?
 
   requestedById Int?
   requestedBy   Employee? @relation("LocationRequestedBy", fields: [requestedById], references: [id])
@@ -2965,6 +2969,8 @@ model AssetIndent {
   raisedBy     Employee   @relation("IndentRaisedBy", fields: [raisedById], references: [id])
   departmentId Int
   department   Department @relation(fields: [departmentId], references: [id])
+  branchId     Int?
+  branch       Branch?    @relation("IndentBranch", fields: [branchId], references: [id])
 
   assetCategoryId Int?
   assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
@@ -3001,10 +3007,12 @@ model AssetIndent {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  purchaseOrders PurchaseOrder[]
+  purchaseOrders     PurchaseOrder[]
+  purchaseOrderLines PurchaseOrderLine[] @relation("POLineIndent")
 
   @@index([departmentId, status])
   @@index([raisedById])
+  @@index([branchId])
   @@map("assetindent")
 }
 
@@ -3305,6 +3313,9 @@ model PurchaseOrder {
   isAmended      Boolean  @default(false)
   originalAmount Decimal? @db.Decimal(14, 2)
 
+  // TAT milestone: when the PO was dispatched to the vendor
+  sentToVendorAt DateTime?
+
   deliveryDate    DateTime?
   paymentTerms    String?   @db.Text
   shippingAddress String?   @db.Text
@@ -3368,6 +3379,11 @@ model PurchaseOrderLine {
   storeId Int?
   store   Store? @relation("POLineStore", fields: [storeId], references: [id])
 
+  // Source indent for this line — set when the PO clubs one or more approved
+  // indents (each indent becomes one traceable line).
+  indentId Int?
+  indent   AssetIndent? @relation("POLineIndent", fields: [indentId], references: [id])
+
   quantity   Int
   unitPrice  Decimal  @db.Decimal(12, 2)
   taxPercent Decimal? @db.Decimal(5, 2)
@@ -3384,6 +3400,7 @@ model PurchaseOrderLine {
   goodsReceiptLines GoodsReceiptLine[]
 
   @@index([purchaseOrderId])
+  @@index([indentId])
   @@map("purchaseorderline")
 }
 
@@ -3406,6 +3423,9 @@ model GoodsReceipt {
   inspectedById     Int?
   inspectedAt       DateTime?
   inspectionRemarks String?   @db.Text
+
+  // TAT milestone: when the receipt was accepted (assets created)
+  acceptedAt DateTime?
 
   deliveryChallanNo String?
   deliveryDate      DateTime?
@@ -3457,7 +3477,9 @@ model GoodsReceiptLine {
   inspectionRemarks String? @db.Text
 
   createdAssetId Int?
-  serialNumber   String?
+  // For bulk lines this holds MULTIPLE serials (one per unit),
+  // comma/newline-separated — hence Text, not varchar
+  serialNumber   String? @db.Text
 
   createdAt DateTime @default(now())
 

@@ -10,6 +10,8 @@ import {
   getAuditSummary,
   getAuditLocationOptions,
   getScopeFloors,
+  getScopeBlocks,
+  getScopeRooms,
   getScopeCategories,
   getScopePreview,
   getFloorMap,
@@ -21,6 +23,8 @@ const router = express.Router();
 
 router.get("/locations", authenticateToken, getAuditLocationOptions);
 router.get("/scope/floors", authenticateToken, getScopeFloors);
+router.get("/scope/blocks", authenticateToken, getScopeBlocks);
+router.get("/scope/rooms", authenticateToken, getScopeRooms);
 router.get("/scope/categories", authenticateToken, getScopeCategories);
 router.get("/scope/preview", authenticateToken, getScopePreview);
 router.get("/my", authenticateToken, getMyAudits);

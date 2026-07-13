@@ -8,6 +8,9 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
     const defaults = [
       // ── Overview ──
       { name: "master-dashboard", label: "Dashboard", icon: "pi pi-chart-bar", path: "/master-dashboard", sortOrder: 1, items: [] },
+      // Management command center — hidden automatically when the tenant's
+      // ENABLE_BRANCH_FEATURES flag is off (single-branch clients like JMRH).
+      { name: "head-office", label: "Head Office", icon: "pi pi-globe", path: "/head-office", sortOrder: 2, items: [] },
       { name: "my-assets", label: "My Assets", icon: "pi pi-id-card", path: "/my-assets", sortOrder: 2, items: [] },
 
       // ── Asset Management ──
@@ -20,7 +23,8 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "import",            label: "Import",            path: "/import",            icon: "pi pi-upload",    sortOrder: 5 },
           { name: "sub-assets",        label: "Sub-Assets",        path: "/sub-assets",        icon: "pi pi-sitemap",   sortOrder: 6 },
           { name: "department-assets", label: "Department Assets",  path: "/department-assets", icon: "pi pi-building",  sortOrder: 7 },
-          { name: "revenue-log",       label: "Revenue Log",        path: "/revenue-log",       icon: "pi pi-chart-line",sortOrder: 8 },
+          { name: "location-approvals",label: "Location Approvals", path: "/location-approvals",icon: "pi pi-check-circle", sortOrder: 8 },
+          { name: "revenue-log",       label: "Revenue Log",        path: "/revenue-log",       icon: "pi pi-chart-line",sortOrder: 9 },
           { name: "asset-disposal",    label: "Asset Disposal",     path: "/disposal",          icon: "pi pi-trash",     sortOrder: 9 },
           { name: "e-waste",           label: "E-Waste Management", path: "/e-waste",           icon: "pi pi-recycle",   sortOrder: 10 },
         ]
@@ -28,12 +32,13 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
       { name: "asset-indent", label: "Asset Indent", icon: "pi pi-list-check", path: "/asset-indent", sortOrder: 4, items: [] },
 
       // ── Procurement ──
-      // { name: "procurement", label: "Procurement", icon: "pi pi-shopping-cart", path: "/procurement", sortOrder: 5,
-      //   items: [
-      //     { name: "purchase-orders", label: "Purchase Orders",      path: "/purchase-orders", icon: "pi pi-file-edit", sortOrder: 1 },
-      //     { name: "goods-receipts",  label: "Goods Receipt (GRA)", path: "/goods-receipts",  icon: "pi pi-inbox",     sortOrder: 2 },
-      //   ]
-      // },
+      { name: "procurement", label: "Procurement", icon: "pi pi-shopping-cart", path: "/procurement", sortOrder: 5,
+        items: [
+          { name: "purchase-orders", label: "Purchase Orders",      path: "/purchase-orders", icon: "pi pi-file-edit", sortOrder: 1 },
+          { name: "goods-receipts",  label: "Goods Receipt (GRA)", path: "/goods-receipts",  icon: "pi pi-inbox",     sortOrder: 2 },
+          { name: "procurement-tat", label: "TAT Report",           path: "/procurement-tat", icon: "pi pi-stopwatch", sortOrder: 3 },
+        ]
+      },
 
       // ── Store & Inventory ──
       { name: "store-management", label: "Store & Inventory", icon: "pi pi-warehouse", path: "/store-management", sortOrder: 6,
@@ -73,7 +78,8 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
         items: [
           { name: "financial-dashboard", label: "Financial Dashboard", path: "/financial-dashboard", icon: "pi pi-indian-rupee", sortOrder: 1 },
           { name: "cfo-dashboard",       label: "CFO Dashboard",      path: "/cfo-dashboard",       icon: "pi pi-chart-pie",   sortOrder: 2 },
-          { name: "coo-dashboard",       label: "COO Dashboard",      path: "/coo-dashboard",       icon: "pi pi-gauge",       sortOrder: 3 },
+          // Generic label — schools/institutes don't have a "COO"; the route stays /coo-dashboard for compatibility
+          { name: "coo-dashboard",       label: "Operations Dashboard", path: "/coo-dashboard",     icon: "pi pi-gauge",       sortOrder: 3 },
           { name: "cost-analysis",       label: "Cost Analysis",      path: "/cost-analysis",       icon: "pi pi-chart-bar",   sortOrder: 4 },
           { name: "decision-engine",     label: "Decision Engine",    path: "/decision-engine",     icon: "pi pi-microchip",   sortOrder: 5 },
           { name: "batch-depreciation",    label: "Batch Depreciation",   path: "/batch-depreciation",    icon: "pi pi-chart-line", sortOrder: 6 },

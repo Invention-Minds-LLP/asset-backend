@@ -1,5 +1,6 @@
 import cron from "node-cron";
 import { runAllChecksInternal, runAssetStaleLocationCheck } from "./api/cron-jobs/cron-jobs.controller";
+import { runManagementAssetAlerts } from "./api/cron-jobs/mgmt-asset-alerts";
 import { syncAllToDirectory } from "./utilis/directory";
 
 // In-process daily scheduler for the alert / expiry checks.
@@ -32,6 +33,19 @@ export function startScheduler() {
   });
 
   console.log("[scheduler] asset-not-returned check scheduled hourly");
+
+  // Daily management alerts: assets past 35% maintenance-to-cost (services need
+  // approval) and past 50% of expected life (replacement planning). Deduped per day.
+  cron.schedule("15 8 * * *", async () => {
+    try {
+      const result = await runManagementAssetAlerts();
+      console.log("[scheduler] management asset alerts:", JSON.stringify(result));
+    } catch (err) {
+      console.error("[scheduler] management asset alerts failed:", err);
+    }
+  });
+
+  console.log("[scheduler] management asset alerts scheduled for 08:15 server time");
 
   // Nightly push of Employee IDs + external-auditor emails to the tenant
   // directory (multi-tenant routing). No-ops if DIRECTORY_URL isn't configured.
