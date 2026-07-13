@@ -42,6 +42,13 @@ export const loginUser = async (req: Request, res: Response) => {
     return
   }
 
+  // Deactivated employees cannot sign in. Checked after the password so we
+  // don't reveal account state to someone guessing credentials.
+  if (user.employee?.isActive === false) {
+    res.status(403).json({ message: "Your account is inactive. Please contact your administrator." });
+    return;
+  }
+
   // Successful login → update lastLogin
   await prisma.user.update({
     where: { id: user.id },

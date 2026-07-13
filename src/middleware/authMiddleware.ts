@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import jwt, { JwtPayload } from "jsonwebtoken";
+import prisma from "../prismaClient";
 
 // Validated at startup by src/config/validateEnv.ts — no insecure fallback.
 const JWT_SECRET = process.env.JWT_SECRET as string;
@@ -19,7 +20,7 @@ export interface AuthUserPayload {
 }
 
 
-export const authenticateToken = (
+export const authenticateToken = async (
   req: any,
   res: Response,
   next: NextFunction
@@ -40,6 +41,23 @@ export const authenticateToken = (
       name: decoded.name,
       departmentId: decoded.departmentId
     };
+
+    // A still-valid token must not outlive the employee's access: re-check the
+    // ACTIVE flag on every request so deactivating someone ejects them right
+    // away (the frontend interceptor logs out on 401). Same guarantee the
+    // external-auditor middleware gives. Fails open if the employee row can't
+    // be resolved, so a data anomaly never locks anyone out.
+    if (decoded.employeeDbId) {
+      const employee = await prisma.employee.findUnique({
+        where: { id: Number(decoded.employeeDbId) },
+        select: { isActive: true },
+      });
+      if (employee && employee.isActive === false) {
+        res.status(401).json({ message: "Your account is inactive. Please contact your administrator." });
+        return;
+      }
+    }
+
  // attach decoded payload to request
     next();
      return

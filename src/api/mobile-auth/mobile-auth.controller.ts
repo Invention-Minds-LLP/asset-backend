@@ -34,6 +34,12 @@ export const mobileLogin = async (req: Request, res: Response) => {
       return;
     }
 
+    // Deactivated employees cannot sign in.
+    if (user.employee?.isActive === false) {
+      res.status(403).json({ message: "Your account is inactive. Please contact your administrator." });
+      return;
+    }
+
     const token = jwt.sign(
       {
         userId: user.id,
@@ -386,7 +392,7 @@ export const mobileRequestOtp = async (req: Request, res: Response) => {
 
     const user = await prisma.user.findUnique({
       where: { employeeID: employeeId },
-      include: { employee: { select: { email: true, name: true } } },
+      include: { employee: { select: { email: true, name: true, isActive: true } } },
     });
 
     const email = user?.employee?.email;
@@ -394,6 +400,13 @@ export const mobileRequestOtp = async (req: Request, res: Response) => {
     // Unknown employee ID → still respond success so we don't leak which IDs
     // exist (enumeration protection).
     if (!user) {
+      res.json({ success: true });
+      return;
+    }
+
+    // Deactivated employee → no code is sent, but respond the same way so the
+    // caller can't tell an inactive account apart from an unknown one.
+    if (user.employee?.isActive === false) {
       res.json({ success: true });
       return;
     }
@@ -501,6 +514,13 @@ export const mobileVerifyOtp = async (req: Request, res: Response) => {
       // OTP was valid but user record vanished between issuance and verify.
       // Treat as expired so the client requests a new code.
       res.status(401).json({ message: "Account no longer available." });
+      return;
+    }
+
+    // Re-check status NOW: the employee may have been deactivated between
+    // request-otp and verify-otp. A correct code must not let them in.
+    if (user.employee?.isActive === false) {
+      res.status(403).json({ message: "Your account is inactive. Please contact your administrator." });
       return;
     }
 
