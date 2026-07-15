@@ -421,6 +421,7 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
         amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
         residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
         assetCategoryId: data.assetCategoryId,
+        assetSubTypeId: data.assetSubTypeId ? Number(data.assetSubTypeId) : null,
         rfidCode: data.rfidCode && String(data.rfidCode).trim() !== "" ? String(data.rfidCode).trim() : null,
         referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
         serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
@@ -884,6 +885,13 @@ export const updateAsset = async (req: Request, res: Response) => {
     }
 
     // ---------------------------
+    // SUB-TYPE (optional; empty clears it)
+    // ---------------------------
+    if ("assetSubTypeId" in data) {
+      updateData.assetSubTypeId = data.assetSubTypeId ? Number(data.assetSubTypeId) : null;
+    }
+
+    // ---------------------------
     // VENDOR (SAFE CONNECT)
     // ---------------------------
     if (data.vendorId) {
@@ -1092,13 +1100,18 @@ export const updateAssetMakeModel = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
     const { manufacturer, modelNumber } = req.body;
+    const data: any = {
+      manufacturer: manufacturer ? String(manufacturer).trim() : null,
+      modelNumber: modelNumber ? String(modelNumber).trim() : null,
+    };
+    // Sub-type is edited alongside make/model in the Specifications tab.
+    if ("assetSubTypeId" in req.body) {
+      data.assetSubTypeId = req.body.assetSubTypeId ? Number(req.body.assetSubTypeId) : null;
+    }
     const updated = await prisma.asset.update({
       where: { id },
-      data: {
-        manufacturer: manufacturer ? String(manufacturer).trim() : null,
-        modelNumber: modelNumber ? String(modelNumber).trim() : null,
-      },
-      select: { id: true, manufacturer: true, modelNumber: true },
+      data,
+      select: { id: true, manufacturer: true, modelNumber: true, assetSubTypeId: true },
     });
     res.json(updated);
   } catch (e: any) {

@@ -254,7 +254,7 @@ async function requireTicketDeptHod(user: any, ticketDbId: number) {
 
 async function getAssetDeptHod(assetId: number) {
   const asset = await prisma.asset.findUnique({ where: { id: assetId } });
-  if (!asset?.departmentId) return { asset, hod: null, supervisor: null };
+  if (!asset?.departmentId) return { asset, hod: null, supervisor: null, assignee: null, assignmentNote: null };
 
   const hod = await prisma.employee.findFirst({
     where: { departmentId: asset.departmentId, role: "HOD" },
@@ -264,7 +264,31 @@ async function getAssetDeptHod(assetId: number) {
     where: { departmentId: asset.departmentId, role: "SUPERVISOR" },
   });
 
-  return { asset, hod, supervisor };
+  // Sub-type routing: if the asset has a sub-type and the HOD configured a
+  // repair engineer for it in this department, prefer that engineer. Otherwise
+  // fall back to the department supervisor (existing behaviour).
+  let assignee: { id: number } | null = supervisor ? { id: supervisor.id } : null;
+  let assignmentNote: string | null = supervisor
+    ? "Auto-assigned to department supervisor"
+    : null;
+
+  if (asset.assetSubTypeId) {
+    const config = await prisma.subTypeSupportConfig.findFirst({
+      where: {
+        assetSubTypeId: asset.assetSubTypeId,
+        departmentId: asset.departmentId,
+        isActive: true,
+        employee: { isActive: true },
+      },
+      include: { employee: { select: { id: true } } },
+    });
+    if (config?.employee) {
+      assignee = { id: config.employee.id };
+      assignmentNote = "Auto-assigned to configured repair engineer for sub-type";
+    }
+  }
+
+  return { asset, hod, supervisor, assignee, assignmentNote };
 }
 
 async function requireAssetDeptHod(user: any, ticketId: number) {
@@ -445,7 +469,7 @@ export const createTicket = async (req: Request, res: Response) => {
       return
     }
 
-    const { asset, hod, supervisor } = await getAssetDeptHod(assetId);
+    const { asset, hod, supervisor, assignee, assignmentNote } = await getAssetDeptHod(assetId);
     if (!asset) {
       res.status(400).json({ message: "Invalid assetId" });
       return;
@@ -632,10 +656,10 @@ export const createTicket = async (req: Request, res: Response) => {
         photoOfIssue: req.body.photoOfIssue ?? null,
         location: req.body.location ?? asset.currentLocation ?? "UNKNOWN",
         status: "OPEN",
-        assignedTo: supervisor?.id ? { connect: { id: supervisor.id } } : undefined,
-        assignedBy: supervisor?.id ? { connect: { id: hod?.id ?? user.employeeDbId } } : undefined,
-        lastAssignedAt: supervisor?.id ? new Date() : null,
-        assignmentNote: supervisor?.id ? "Auto-assigned to department supervisor" : null,
+        assignedTo: assignee?.id ? { connect: { id: assignee.id } } : undefined,
+        assignedBy: assignee?.id ? { connect: { id: hod?.id ?? user.employeeDbId } } : undefined,
+        lastAssignedAt: assignee?.id ? new Date() : null,
+        assignmentNote: assignee?.id ? assignmentNote : null,
         slaCategory,
         slaSource,
         slaExpectedValue,
@@ -660,14 +684,14 @@ export const createTicket = async (req: Request, res: Response) => {
     });
 
     // 3) assignment history
-    if (supervisor?.id) {
+    if (assignee?.id) {
       await prisma.ticketAssignmentHistory.create({
         data: {
           ticketId: created.id,
           fromEmployeeId: null,
-          toEmployeeId: supervisor.id,
+          toEmployeeId: assignee.id,
           action: "ASSIGNED",
-          comment: "Auto-assigned to supervisor on ticket creation",
+          comment: assignmentNote ?? "Auto-assigned on ticket creation",
           performedById: hod?.id ?? user.employeeDbId,
         },
       });

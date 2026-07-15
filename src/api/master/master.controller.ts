@@ -252,12 +252,14 @@ export const getLookupData = async (req: Request, res: Response) => {
   try {
     const [
       categories,
+      subTypes,
       departments,
       employees,
       vendors,
       branches,
     ] = await Promise.all([
       prisma.assetCategory.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
+      prisma.assetSubType.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true }, orderBy: { name: "asc" } }),
       prisma.department.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
       prisma.employee.findMany({
         select: { id: true, name: true, employeeID: true, role: true, departmentId: true, department: { select: { name: true } } },
@@ -267,7 +269,7 @@ export const getLookupData = async (req: Request, res: Response) => {
       prisma.branch.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
     ]);
 
-    res.json({ categories, departments, employees, vendors, branches });
+    res.json({ categories, subTypes, departments, employees, vendors, branches });
   } catch (error) {
     console.error("getLookupData error:", error);
     res.status(500).json({ message: "Failed to fetch lookup data" });
