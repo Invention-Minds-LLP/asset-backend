@@ -2,13 +2,35 @@ import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 
+// Resolve the department a sub-type request is scoped to.
+// HOD is locked to their own department. ADMIN/others may target any department
+// via ?departmentId (list) or departmentId in the body (create/update); null on
+// a list means "all departments".
+function resolveSubTypeDept(req: AuthenticatedRequest, fromBody = false): number | null | "FORBIDDEN" {
+  const user = req.user as any;
+  if (user?.role === "HOD") {
+    return user?.departmentId ? Number(user.departmentId) : "FORBIDDEN";
+  }
+  const raw = fromBody ? req.body?.departmentId : req.query?.departmentId;
+  return raw != null && raw !== "" ? Number(raw) : null;
+}
+
 // ─── List ────────────────────────────────────────────────────────────────────
-export const getAllSubTypes = async (req: Request, res: Response) => {
+// HOD → only their department's sub-types. Others → all, or a single department
+// when ?departmentId is supplied (the asset form passes the asset's department).
+export const getAllSubTypes = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { includeInactive, search } = req.query;
 
+    const dept = resolveSubTypeDept(req);
+    if (dept === "FORBIDDEN") {
+      res.status(400).json({ message: "No department associated with your account" });
+      return;
+    }
+
     const where: any = {};
     if (includeInactive !== "true") where.isActive = true;
+    if (dept != null) where.departmentId = dept;
     if (search) {
       where.OR = [
         { name: { contains: String(search) } },
@@ -18,7 +40,10 @@ export const getAllSubTypes = async (req: Request, res: Response) => {
 
     const subTypes = await prisma.assetSubType.findMany({
       where,
-      include: { _count: { select: { assets: true } } },
+      include: {
+        _count: { select: { assets: true } },
+        department: { select: { id: true, name: true } },
+      },
       orderBy: { name: "asc" },
     });
 
@@ -43,8 +68,19 @@ export const createSubType = async (req: AuthenticatedRequest, res: Response) =>
   try {
     const data = pickSubTypeFields(req.body);
     if (!data.name) { res.status(400).json({ message: "Sub-type name is required" }); return; }
+
+    const dept = resolveSubTypeDept(req, true);
+    if (dept === "FORBIDDEN") {
+      res.status(400).json({ message: "No department associated with your account" });
+      return;
+    }
+    if (dept == null) {
+      res.status(400).json({ message: "departmentId is required" });
+      return;
+    }
+
     const subType = await prisma.assetSubType.create({
-      data: { ...data, createdById: req.user?.employeeDbId ?? null } as any,
+      data: { ...data, departmentId: dept, createdById: req.user?.employeeDbId ?? null } as any,
     });
     res.status(201).json(subType);
   } catch (error: any) {
@@ -63,10 +99,24 @@ export const updateSubType = async (req: AuthenticatedRequest, res: Response) =>
     const id = parseInt(req.params.id);
     const data = pickSubTypeFields(req.body);
     if (!data.name) { res.status(400).json({ message: "Sub-type name is required" }); return; }
-    const updated = await prisma.assetSubType.update({
-      where: { id },
-      data: { ...data, updatedById: req.user?.employeeDbId ?? null } as any,
-    });
+
+    const user = req.user as any;
+    // HOD may only edit sub-types that belong to their own department.
+    if (user?.role === "HOD") {
+      const existing = await prisma.assetSubType.findUnique({ where: { id }, select: { departmentId: true } });
+      if (!existing || existing.departmentId !== Number(user?.departmentId)) {
+        res.status(403).json({ message: "Not allowed to modify another department's sub-type" });
+        return;
+      }
+    }
+
+    const payload: any = { ...data, updatedById: req.user?.employeeDbId ?? null };
+    // Admin may reassign the owning department; HOD cannot move it out of theirs.
+    if (user?.role !== "HOD" && req.body?.departmentId != null && req.body.departmentId !== "") {
+      payload.departmentId = Number(req.body.departmentId);
+    }
+
+    const updated = await prisma.assetSubType.update({ where: { id }, data: payload });
     res.json(updated);
   } catch (error: any) {
     console.error("updateSubType error:", error);
@@ -79,9 +129,17 @@ export const updateSubType = async (req: AuthenticatedRequest, res: Response) =>
 };
 
 // ─── Delete (soft) ───────────────────────────────────────────────────────────
-export const deleteSubType = async (req: Request, res: Response) => {
+export const deleteSubType = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = parseInt(req.params.id);
+    const user = req.user as any;
+    if (user?.role === "HOD") {
+      const existing = await prisma.assetSubType.findUnique({ where: { id }, select: { departmentId: true } });
+      if (!existing || existing.departmentId !== Number(user?.departmentId)) {
+        res.status(403).json({ message: "Not allowed to modify another department's sub-type" });
+        return;
+      }
+    }
     const inUse = await prisma.asset.findFirst({ where: { assetSubTypeId: id } });
     if (inUse) {
       res.status(400).json({ message: "Sub-type is assigned to assets. Cannot delete." });

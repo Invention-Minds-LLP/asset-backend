@@ -17,7 +17,14 @@ export const getDashboardStats = async (req: AuthenticatedRequest, res: Response
       assetWhere = { departmentId: Number(departmentId) };
       ticketWhere = { departmentId: Number(departmentId) };
     } else if (role === "SUPERVISOR") {
-      assetWhere = { supervisorId: Number(employeeDbId) };
+      // A supervisor sees assets where they are the primary (supervisorId) OR a
+      // co-supervisor (AssetSupervisor set) — supports shift-wise duty.
+      assetWhere = {
+        OR: [
+          { supervisorId: Number(employeeDbId) },
+          { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+        ],
+      };
     }
 
     // Optional branch scoping (dashboard branch tiles drive this)
@@ -259,7 +266,7 @@ export const getLookupData = async (req: Request, res: Response) => {
       branches,
     ] = await Promise.all([
       prisma.assetCategory.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
-      prisma.assetSubType.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true }, orderBy: { name: "asc" } }),
+      prisma.assetSubType.findMany({ where: { isActive: true }, select: { id: true, name: true, code: true, departmentId: true }, orderBy: { name: "asc" } }),
       prisma.department.findMany({ select: { id: true, name: true }, orderBy: { name: "asc" } }),
       prisma.employee.findMany({
         select: { id: true, name: true, employeeID: true, role: true, departmentId: true, department: { select: { name: true } } },

@@ -254,7 +254,9 @@ async function requireTicketDeptHod(user: any, ticketDbId: number) {
 
 async function getAssetDeptHod(assetId: number) {
   const asset = await prisma.asset.findUnique({ where: { id: assetId } });
-  if (!asset?.departmentId) return { asset, hod: null, supervisor: null, assignee: null, assignmentNote: null };
+  if (!asset?.departmentId) {
+    return { asset, hod: null, supervisor: null, assignee: null, assignmentNote: null, supervisorIds: [] as number[] };
+  }
 
   const hod = await prisma.employee.findFirst({
     where: { departmentId: asset.departmentId, role: "HOD" },
@@ -264,13 +266,26 @@ async function getAssetDeptHod(assetId: number) {
     where: { departmentId: asset.departmentId, role: "SUPERVISOR" },
   });
 
-  // Sub-type routing: if the asset has a sub-type and the HOD configured a
-  // repair engineer for it in this department, prefer that engineer. Otherwise
-  // fall back to the department supervisor (existing behaviour).
-  let assignee: { id: number } | null = supervisor ? { id: supervisor.id } : null;
-  let assignmentNote: string | null = supervisor
-    ? "Auto-assigned to department supervisor"
-    : null;
+  // All supervisors on this asset (shift-wise duty) — everyone gets notified.
+  const supervisorLinks = await prisma.assetSupervisor.findMany({
+    where: { assetId: asset.id, isActive: true },
+    select: { employeeId: true },
+  });
+  const supervisorIds = Array.from(
+    new Set([...(asset.supervisorId ? [asset.supervisorId] : []), ...supervisorLinks.map((s) => s.employeeId)])
+  );
+
+  // Auto-assign priority: configured sub-type engineer → asset's primary
+  // supervisor → first department supervisor.
+  let assignee: { id: number } | null = null;
+  let assignmentNote: string | null = null;
+  if (asset.supervisorId) {
+    assignee = { id: asset.supervisorId };
+    assignmentNote = "Auto-assigned to primary supervisor";
+  } else if (supervisor) {
+    assignee = { id: supervisor.id };
+    assignmentNote = "Auto-assigned to department supervisor";
+  }
 
   if (asset.assetSubTypeId) {
     const config = await prisma.subTypeSupportConfig.findFirst({
@@ -288,7 +303,7 @@ async function getAssetDeptHod(assetId: number) {
     }
   }
 
-  return { asset, hod, supervisor, assignee, assignmentNote };
+  return { asset, hod, supervisor, assignee, assignmentNote, supervisorIds };
 }
 
 async function requireAssetDeptHod(user: any, ticketId: number) {
@@ -469,7 +484,7 @@ export const createTicket = async (req: Request, res: Response) => {
       return
     }
 
-    const { asset, hod, supervisor, assignee, assignmentNote } = await getAssetDeptHod(assetId);
+    const { asset, hod, supervisor, assignee, assignmentNote, supervisorIds } = await getAssetDeptHod(assetId);
     if (!asset) {
       res.status(400).json({ message: "Invalid assetId" });
       return;
@@ -711,7 +726,11 @@ export const createTicket = async (req: Request, res: Response) => {
       },
     });
 
-    const recipients = [hod?.id, supervisor?.id].filter(Boolean) as number[];
+    // Notify HOD, the dept supervisor, the auto-assignee, and every supervisor
+    // on the asset (shift-wise duty) so whoever is on shift sees it.
+    const recipients = Array.from(new Set(
+      [hod?.id, supervisor?.id, assignee?.id, ...(supervisorIds || [])].filter(Boolean) as number[]
+    ));
     await prisma.notificationRecipient.createMany({
       data: recipients.map(empId => ({ notificationId: notif.id, employeeId: empId })),
       skipDuplicates: true,

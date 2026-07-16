@@ -59,7 +59,10 @@ export const getAllAssets = async (req: Request, res: Response) => {
       // }
     } else if (role === 'SUPERVISOR') {
       where = {
-        supervisorId: Number(employeeDbId)
+        OR: [
+          { supervisorId: Number(employeeDbId) },
+          { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+        ],
       };
     } else {
       // EXECUTIVE — see assets in their department
@@ -147,7 +150,12 @@ async function buildAssetAccessWhere(user: any): Promise<any> {
   } else if (role === 'HOD') {
     return { departmentId: Number(departmentId) };
   } else if (role === 'SUPERVISOR') {
-    return { supervisorId: Number(employeeDbId) };
+    return {
+      OR: [
+        { supervisorId: Number(employeeDbId) },
+        { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+      ],
+    };
   } else {
     // EXECUTIVE — department assets, else own allotted
     return departmentId ? { departmentId: Number(departmentId) } : { allottedToId: Number(employeeDbId) };
@@ -1116,6 +1124,78 @@ export const updateAssetMakeModel = async (req: Request, res: Response) => {
     res.json(updated);
   } catch (e: any) {
     res.status(500).json({ message: e.message || "Failed to update make/model" });
+  }
+};
+
+// ─── Asset supervisors (many; supports shift-wise duty) ───────────────────────
+// The set lives in AssetSupervisor; the primary is mirrored on Asset.supervisorId
+// so the handover flow and default ticket routing keep working unchanged.
+export const getAssetSupervisors = async (req: Request, res: Response) => {
+  try {
+    const assetId = Number(req.params.id);
+    const rows = await prisma.assetSupervisor.findMany({
+      where: { assetId, isActive: true },
+      include: {
+        employee: { select: { id: true, name: true, employeeID: true, role: true, departmentId: true } },
+      },
+      orderBy: [{ isPrimary: "desc" }, { id: "asc" }],
+    });
+    res.json(rows);
+  } catch (e: any) {
+    console.error("getAssetSupervisors error:", e);
+    res.status(500).json({ message: "Failed to fetch supervisors" });
+  }
+};
+
+// Replace the full supervisor set for an asset.
+// Body: { supervisors: [{ employeeId, isPrimary? }] }
+export const setAssetSupervisors = async (req: Request, res: Response) => {
+  try {
+    const assetId = Number(req.params.id);
+    const createdById = (req as any).user?.employeeDbId ?? null;
+
+    const raw = Array.isArray(req.body?.supervisors) ? req.body.supervisors : [];
+    const seen = new Set<number>();
+    const items: { employeeId: number; isPrimary: boolean }[] = [];
+    for (const s of raw) {
+      const employeeId = Number(s?.employeeId);
+      if (!employeeId || seen.has(employeeId)) continue;
+      seen.add(employeeId);
+      items.push({ employeeId, isPrimary: !!s?.isPrimary });
+    }
+
+    // Exactly one primary when the list is non-empty (default to the first).
+    const primaryId = items.find((i) => i.isPrimary)?.employeeId ?? items[0]?.employeeId ?? null;
+
+    await prisma.$transaction(async (tx) => {
+      if (items.length === 0) {
+        await tx.assetSupervisor.deleteMany({ where: { assetId } });
+      } else {
+        await tx.assetSupervisor.deleteMany({
+          where: { assetId, employeeId: { notIn: items.map((i) => i.employeeId) } },
+        });
+        for (const it of items) {
+          await tx.assetSupervisor.upsert({
+            where: { assetId_employeeId: { assetId, employeeId: it.employeeId } },
+            update: { isPrimary: it.employeeId === primaryId, isActive: true },
+            create: {
+              assetId,
+              employeeId: it.employeeId,
+              isPrimary: it.employeeId === primaryId,
+              isActive: true,
+              createdById,
+            },
+          });
+        }
+      }
+      // Keep the single FK in sync with the primary.
+      await tx.asset.update({ where: { id: assetId }, data: { supervisorId: primaryId } });
+    });
+
+    res.json({ message: "Supervisors updated", primarySupervisorId: primaryId });
+  } catch (e: any) {
+    console.error("setAssetSupervisors error:", e);
+    res.status(500).json({ message: e.message || "Failed to update supervisors" });
   }
 };
 

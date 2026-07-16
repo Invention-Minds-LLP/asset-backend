@@ -12,7 +12,12 @@ function buildRoleFilter(user: any): any {
   const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
 
   if (role === "HOD") return { departmentId: Number(departmentId) };
-  if (role === "SUPERVISOR") return { supervisorId: Number(employeeDbId) };
+  if (role === "SUPERVISOR") return {
+    OR: [
+      { supervisorId: Number(employeeDbId) },
+      { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+    ],
+  };
   return {}; // ADMIN and others see everything
 }
 
@@ -332,7 +337,12 @@ export const getTicketAnalyticsReport = async (req: AuthenticatedRequest, res: R
       ticketWhere.departmentId = Number(user.departmentId);
     } else if (role === "SUPERVISOR") {
       const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
-      ticketWhere.asset = { supervisorId: Number(employeeDbId) };
+      ticketWhere.asset = {
+        OR: [
+          { supervisorId: Number(employeeDbId) },
+          { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+        ],
+      };
     }
 
     if (query.departmentId) ticketWhere.departmentId = Number(query.departmentId);

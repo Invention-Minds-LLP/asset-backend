@@ -207,8 +207,15 @@ model Asset {
   targetDepartmentId Int? // NEW (where end user belongs)
   targetDepartment   Department? @relation("TargetDept", fields: [targetDepartmentId], references: [id])
 
+  // Primary supervisor (custodian). Kept as a single FK for the handover flow
+  // and default ticket routing; the full set of (shift/co-)supervisors lives in
+  // AssetSupervisor. Primary is mirrored there with isPrimary=true.
   supervisorId Int?
   supervisor   Employee? @relation("AssetSupervisor", fields: [supervisorId], references: [id])
+
+  // All supervisors assigned to this asset (incl. primary) — supports shift-wise
+  // duty where several supervisors share one asset.
+  supervisors  AssetSupervisor[]
 
   allottedToId    Int?
   allottedTo      Employee? @relation("AssetEndUser", fields: [allottedToId], references: [id])
@@ -725,10 +732,15 @@ model AssetCategory {
 // to route repair tickets to the engineer configured per department.
 model AssetSubType {
   id          Int     @id @default(autoincrement())
+  // Name/code are globally unique (a name can't repeat across departments).
   name        String  @unique
   code        String? @unique
   description String?
   isActive    Boolean @default(true)
+
+  // Owning department — a HOD only manages/sees sub-types for their department.
+  departmentId Int?
+  department   Department? @relation("DeptSubTypes", fields: [departmentId], references: [id])
 
   assets         Asset[]
   supportConfigs SubTypeSupportConfig[]
@@ -738,6 +750,7 @@ model AssetSubType {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
 
+  @@index([departmentId])
   @@map("assetsubtype")
 }
 
@@ -799,6 +812,7 @@ model Department {
   capexBudgets       CapexBudget[]           @relation("CapexBudgetDept")
   assetPools         AssetPool[]             @relation("AssetPoolDepartment")
   subTypeSupportConfigs SubTypeSupportConfig[] @relation("SubTypeSupportDept")
+  assetSubTypes      AssetSubType[]          @relation("DeptSubTypes")
 
   // Vendors that serve this department (M2M inverse).
   vendors Vendor[] @relation("VendorDepartments")
@@ -866,6 +880,7 @@ model Employee {
   assetAcknowledgementRuns AssetAcknowledgementRun[]
   assetSupportMatrixes     AssetSupportMatrix[]
   subTypeSupportConfigs    SubTypeSupportConfig[]    @relation("SubTypeSupportEngineer")
+  supervisedAssetLinks     AssetSupervisor[]         @relation("EmployeeSupervisedAssets")
   transferRequests         AssetTransferHistory[]    @relation("TransferRequestedBy")
   transferApprovals        AssetTransferHistory[]    @relation("TransferApprovedBy")
   transferMgmtApprovals    AssetTransferHistory[]    @relation("TransferMgmtApprovedBy")
@@ -2143,6 +2158,30 @@ model AssetSpecification {
   createdAt DateTime @default(now())
 
   @@index([assetId])
+}
+
+// Many-to-many between an asset and its supervisors. Lets a single asset have
+// several supervisors (e.g. shift-wise duty). One row per (asset, employee);
+// isPrimary marks the custodian that also sits on Asset.supervisorId.
+model AssetSupervisor {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  employeeId Int
+  employee   Employee @relation("EmployeeSupervisedAssets", fields: [employeeId], references: [id])
+
+  isPrimary Boolean @default(false)
+  isActive  Boolean @default(true)
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([assetId, employeeId])
+  @@index([employeeId])
+  @@map("assetsupervisor")
 }
 
 model EscalationMatrix {

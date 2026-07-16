@@ -221,7 +221,11 @@ export const getMyAssets = async (req: MobileAuthRequest, res: Response) => {
     const role = (req.user?.role || "").toUpperCase();
     const ownerWhere =
       role === "SUPERVISOR"
-        ? { OR: [{ supervisorId: empId }, { allottedToId: empId }] }
+        ? { OR: [
+            { supervisorId: empId },
+            { supervisors: { some: { employeeId: empId, isActive: true } } },
+            { allottedToId: empId },
+          ] }
         : { allottedToId: empId };
 
     const assets = await prisma.asset.findMany({
