@@ -167,7 +167,11 @@ export const getEmployeeAssets = async (req: Request, res: Response) => {
       where: {
         AND: [
           { status: { notIn: ["DISPOSED", "CONDEMNED"] } },
-          { OR: [{ allottedToId: empId }, { supervisorId: empId }] },
+          { OR: [
+            { allottedToId: empId },
+            { supervisorId: empId },
+            { supervisors: { some: { employeeId: empId, isActive: true } } },
+          ] },
         ],
       },
       include: {
@@ -175,6 +179,7 @@ export const getEmployeeAssets = async (req: Request, res: Response) => {
         department:    { select: { id: true, name: true } },
         allottedTo:    { select: { id: true, name: true, employeeID: true } },
         supervisor:    { select: { id: true, name: true, employeeID: true } },
+        supervisors:   { where: { isActive: true }, select: { employeeId: true } },
       },
       orderBy: { assetName: "asc" },
     });
@@ -184,7 +189,7 @@ export const getEmployeeAssets = async (req: Request, res: Response) => {
       ...a,
       myRole: a.allottedToId === empId
         ? "ALLOTTEE"
-        : a.supervisorId === empId
+        : (a.supervisorId === empId || (a.supervisors || []).some((s: any) => s.employeeId === empId))
           ? "SUPERVISOR"
           : "OTHER",
     }));

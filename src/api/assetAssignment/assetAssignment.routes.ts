@@ -14,6 +14,7 @@ import {
     getAssetAssignmentState,
     resendAcknowledgement,
     getAssignmentChecklist,
+    directAssignWithAck,
 } from "./assetAssignment.controller";
 import multer from "multer";
 
@@ -31,6 +32,10 @@ router.post("/:assetId/assign/target-end-user", authenticateToken, targetHodAssi
 
 // no-target flow (optional direct end user)
 router.post("/:assetId/assign/end-user", authenticateToken, supervisorAssignEndUser);
+
+// direct assignment for imported/already-assigned assets — sets fields + sends
+// an acknowledgement request only to the assignee(s) that changed
+router.patch("/:assetId/direct-assign", authenticateToken, directAssignWithAck);
 
 // Acks
 router.get("/my/pending", authenticateToken, getMyPendingAcknowledgements);

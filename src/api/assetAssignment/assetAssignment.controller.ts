@@ -975,6 +975,99 @@ export const getAssetAssignmentState = async (req: AuthenticatedRequest, res: Re
     }
 
 };
+// -----------------------------
+// Direct assignment for imported / already-assigned assets (no HOD→Supervisor→
+// End-User chain). Sets the fields immediately, and for each assignee that
+// CHANGED, sends that person a standalone acknowledgement request + notification.
+// Bulk import stays silent (it never calls this); only deliberate per-asset
+// changes via the form do.
+// PATCH /assignments/:assetId/direct-assign
+// -----------------------------
+export const directAssignWithAck = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+        if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
+        const assetId = Number(req.params.assetId);
+        const { departmentId, supervisorId, allottedToId, targetDepartmentId } = req.body;
+
+        const asset = await prisma.asset.findUnique({
+            where: { id: assetId },
+            select: {
+                id: true, assetId: true, assetName: true,
+                supervisorId: true, allottedToId: true, departmentId: true, targetDepartmentId: true,
+            },
+        });
+        if (!asset) { res.status(404).json({ message: "Asset not found" }); return; }
+
+        const num = (v: any) => (v !== undefined && v !== null && v !== "" ? Number(v) : undefined);
+        const updateData: any = {};
+        if (num(departmentId) !== undefined) updateData.departmentId = num(departmentId);
+        if (num(supervisorId) !== undefined) updateData.supervisorId = num(supervisorId);
+        if (num(allottedToId) !== undefined) updateData.allottedToId = num(allottedToId);
+        if (num(targetDepartmentId) !== undefined) updateData.targetDepartmentId = num(targetDepartmentId);
+
+        await prisma.asset.update({ where: { id: assetId }, data: updateData });
+
+        // Keep the multi-supervisor set's primary in sync when the primary changes.
+        if (updateData.supervisorId && updateData.supervisorId !== asset.supervisorId) {
+            await prisma.assetSupervisor.updateMany({ where: { assetId }, data: { isPrimary: false } });
+            await prisma.assetSupervisor.upsert({
+                where: { assetId_employeeId: { assetId, employeeId: updateData.supervisorId } },
+                update: { isPrimary: true, isActive: true },
+                create: { assetId, employeeId: updateData.supervisorId, isPrimary: true, isActive: true, createdById: req.user.employeeDbId },
+            });
+        }
+
+        const by = req.user.employeeDbId;
+        const requested: { role: string; employeeId: number }[] = [];
+
+        // Current assignee for a field: the value being set now, else what's stored.
+        const current = (field: "supervisorId" | "allottedToId" | "targetDepartmentId") =>
+            updateData[field] !== undefined ? updateData[field] : (asset as any)[field];
+
+        // Request acknowledgement from `employeeId` for `stage` unless they ALREADY
+        // have an active pending/acknowledged request for it. This is keyed on the
+        // person actually assigned (not on whether the field changed in THIS save),
+        // so an assignee set via the plain Save still gets asked, while re-saving
+        // doesn't spam a person who already has a request.
+        const requestAckIfNeeded = async (stage: AssignmentStage, employeeId: number, title: string, roleLabel: string) => {
+            if (!employeeId) return;
+            const already = await prisma.assetAssignment.findFirst({
+                where: { assetId, stage, assignedToId: employeeId, isActive: true, status: { in: [AssignmentStatus.PENDING, AssignmentStatus.ACKNOWLEDGED] } },
+                select: { id: true },
+            });
+            if (already) return;
+            // Retire any active request at this stage for a DIFFERENT person.
+            await prisma.assetAssignment.updateMany({ where: { assetId, stage, isActive: true }, data: { isActive: false } });
+            await createAssignment({ assetId, stage, assignedToId: employeeId, assignedById: by, note: `Direct assignment — ${roleLabel} acknowledgement requested` });
+            await createNotificationToEmployees({
+                type: "ASSET_ASSIGNMENT",
+                title,
+                message: `Asset ${asset.assetId} — ${asset.assetName} assigned to you. Please acknowledge.`,
+                assetId,
+                createdByEmployeeId: by,
+                recipientEmployeeIds: [employeeId],
+                dedupeKey: `asset:${assetId}:${stage}:${employeeId}`,
+            });
+            requested.push({ role: roleLabel, employeeId });
+        };
+
+        await requestAckIfNeeded(AssignmentStage.SUPERVISOR, current("supervisorId"), "Asset assigned to you (Supervisor)", "supervisor");
+        await requestAckIfNeeded(AssignmentStage.END_USER, current("allottedToId"), "Asset allotted to you", "end user");
+        const targetDept = current("targetDepartmentId");
+        if (targetDept) {
+            const targetHod = await prisma.employee.findFirst({ where: { departmentId: targetDept, role: "HOD" }, select: { id: true } });
+            if (targetHod) {
+                await requestAckIfNeeded(AssignmentStage.HOD_TARGET, targetHod.id, "Asset incoming to your department", "target HOD");
+            }
+        }
+
+        res.json({ message: "Assignment updated", acknowledgementRequested: requested });
+    } catch (e: any) {
+        console.error("directAssignWithAck error:", e);
+        res.status(500).json({ message: e.message || "Failed to update assignment" });
+    }
+};
+
 const TEMP_FOLDER = path.join(__dirname, "../../temp");
 if (!fs.existsSync(TEMP_FOLDER)) {
     fs.mkdirSync(TEMP_FOLDER, { recursive: true });
