@@ -192,7 +192,7 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       // Plain String columns → substring match.
       const STRING_FIELDS = [
         'assetName', 'assetId', 'assetType', 'serialNumber', 'referenceCode', 'storeAssetId',
-        'manufacturer', 'invoiceNumber', 'purchaseOrderNo', 'currentLocation',
+        'manufacturer', 'modelNumber', 'invoiceNumber', 'purchaseOrderNo', 'currentLocation',
         'status', 'modeOfProcurement', 'physicalCondition', 'workingCondition',
         'warrantyStatus', 'disposalMethod',
       ];

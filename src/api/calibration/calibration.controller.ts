@@ -83,7 +83,18 @@ export const getAllCalibrationSchedules = async (req: Request, res: Response) =>
     const schedules = await prisma.calibrationSchedule.findMany({
       where,
       include: {
-        asset: { select: { assetId: true, assetName: true, assetType: true, manufacturer: true, modelNumber: true } },
+        asset: {
+          select: {
+            assetId: true,
+            assetName: true,
+            assetType: true,
+            manufacturer: true,
+            modelNumber: true,
+            serialNumber: true,
+            currentLocation: true,
+            department: { select: { name: true } },
+          },
+        },
         vendor: { select: { name: true } },
       },
       orderBy: { nextDueAt: "asc" },

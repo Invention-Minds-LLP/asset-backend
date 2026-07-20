@@ -146,7 +146,18 @@ export const getAllSchedules = async (_req: Request, res: Response) => {
     const data = await prisma.maintenanceSchedule.findMany({
         where,
         include: {
-            asset: true,
+            asset: {
+                include: {
+                    department: { select: { name: true } },
+                    // Latest active warranty → surfaces warranty expiry on the PM dashboard.
+                    warranties: {
+                        where: { isActive: true },
+                        orderBy: { warrantyEnd: "desc" },
+                        take: 1,
+                        select: { warrantyEnd: true, isUnderWarranty: true },
+                    },
+                },
+            },
             // Latest completed PM for this schedule (executeMaintenance always sets actualDoneAt).
             maintenanceHistories: {
                 orderBy: { actualDoneAt: "desc" },
