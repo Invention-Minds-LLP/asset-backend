@@ -1,0 +1,15 @@
+{
+  "name": "floor-plan-convert",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "One-off tool: rasterize architectural floor-plan PDFs to cropped PNGs ready for POST /api/floor-plan. Isolated from the backend's dependencies.",
+  "scripts": {
+    "convert": "node convert.mjs"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.65",
+    "pdfjs-dist": "^4.7.76",
+    "sharp": "^0.33.5"
+  }
+}
