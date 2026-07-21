@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword } from "./user.controller";
+import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword, refreshAccessToken, logoutUser } from "./user.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import { validateBody } from "../../middleware/validate";
 
@@ -26,6 +26,9 @@ router.post("/", validateBody(createUserSchema), createUser);
 
 router.put("/reset-password", authenticateToken, validateBody(resetPasswordSchema), resetPassword);
 router.post("/login", validateBody(loginSchema), loginUser);
+// Cookie-authenticated (refresh cookie + CSRF header), no bearer token required.
+router.post("/refresh", refreshAccessToken);
+router.post("/logout", logoutUser);
 
 router.put("/:id", authenticateToken, updateUser);
 router.delete("/:id", authenticateToken, deleteUser);

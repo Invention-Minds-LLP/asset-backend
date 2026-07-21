@@ -666,10 +666,45 @@ model User {
   lastLogin    DateTime?
 
   loginHistory LoginHistory[]
+  refreshTokens RefreshToken[]
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @default(now()) @updatedAt
 
   @@map("users")
+}
+
+// Server-side refresh tokens for the web auth flow. Only the SHA-256 hash of the
+// token is stored (never the raw value), so a DB leak can't be used to mint
+// sessions. Rotated on every /refresh; revoked on logout or reuse.
+model RefreshToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  tokenHash String   @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refreshtoken")
+}
+
+// Per-department asset-table column layout. One config per department, but the
+// uniqueness is enforced in the controller (findFirst → update/create) rather
+// than a DB constraint, so the model can evolve without a migration headache.
+// `columns` is an ordered JSON array of column keys from the server catalog.
+model DepartmentColumnConfig {
+  id           Int      @id @default(autoincrement())
+  departmentId Int
+  columns      Json
+  updatedById  Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@index([departmentId])
+  @@map("departmentcolumnconfig")
 }
 
 model LoginHistory {

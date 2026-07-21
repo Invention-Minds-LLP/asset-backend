@@ -1,12 +1,14 @@
 import "dotenv/config";          // load .env before anything else evaluates
 import "./config/validateEnv";   // fail fast if a critical secret is missing
 import express from "express";
+import cookieParser from "cookie-parser";
 import assetRoutes from "./api/assets/assets.routes";
 import warrantyRoutes from "./api/warranty/warranty.routes";
 import ticketRoutes from "./api/tickets/tickets.routes";
 import assetCategoryRoutes from "./api/assetCategory/assetCategory.routes";
 import assetSubTypeRoutes from "./api/asset-subtype/asset-subtype.routes";
 import subTypeSupportRoutes from "./api/subtype-support/subtype-support.routes";
+import departmentColumnRoutes from "./api/department-columns/department-columns.routes";
 import departmentRoutes from "./api/department/department.routes";
 import employeeRoutes from "./api/employee/employee.routes";
 import vendorRoutes from "./api/vendor/vendor.routes";
@@ -92,6 +94,10 @@ import rateLimit from "express-rate-limit";
 import { startScheduler } from "./scheduler";
 
 const app = express();
+// Honour X-Forwarded-Proto from a TLS-terminating reverse proxy so req.secure is
+// correct for public HTTPS. Auth cookies key their Secure/SameSite flags off it,
+// which lets one backend serve both http://LAN and https://public clients.
+app.set("trust proxy", true);
 const port = 3001;
 
 // Security headers (HSTS, X-Content-Type-Options, frameguard, etc.).
@@ -101,6 +107,9 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
 
 // Middleware to parse JSON bodies
 app.use(express.json());
+
+// Parse cookies (refresh token + CSRF) for the web auth flow.
+app.use(cookieParser());
 
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
@@ -139,6 +148,7 @@ app.use("/api/tickets", ticketRoutes);
 app.use("/api/categories", assetCategoryRoutes);
 app.use("/api/asset-subtypes", assetSubTypeRoutes);
 app.use("/api/subtype-support", subTypeSupportRoutes);
+app.use("/api/department-columns", departmentColumnRoutes);
 app.use("/api/departments", departmentRoutes);
 app.use("/api/employees", employeeRoutes);
 app.use("/api/vendors", vendorRoutes);

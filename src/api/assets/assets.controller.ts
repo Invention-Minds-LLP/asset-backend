@@ -186,38 +186,59 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
     // Exclude sub-assets/components — they belong under their parent, not the main list.
     if (req.query.includeSubAssets !== "true") where.parentAssetId = null;
 
+    // Plain String columns → substring match.
+    const STRING_FIELDS = [
+      'assetName', 'assetId', 'assetType', 'serialNumber', 'referenceCode', 'storeAssetId',
+      'manufacturer', 'modelNumber', 'invoiceNumber', 'purchaseOrderNo', 'currentLocation',
+      'status', 'modeOfProcurement', 'physicalCondition', 'workingCondition',
+      'warrantyStatus', 'disposalMethod', 'criticalityLevel',
+    ];
+    // To-one relations → substring match on the related row's name.
+    const RELATION_FIELDS: Record<string, string> = {
+      categoryName: 'assetCategory',
+      'assetCategory?.name': 'assetCategory',
+      department: 'department',
+      vendor: 'vendor',
+      allottedTo: 'allottedTo',
+      supervisor: 'supervisor',
+      currentStore: 'currentStore',
+    };
+
+    // Apply one (field → value) filter onto `target`. `allowNameFallback` keeps the
+    // legacy single-search behaviour of defaulting an unknown field to assetName;
+    // per-column header filters pass false so an unknown field is simply ignored.
+    const applyFieldFilter = (target: any, field: string, rawValue: string, allowNameFallback: boolean) => {
+      const v = String(rawValue ?? '').trim();
+      if (!v) return;
+      if (field === 'assetNature') {
+        // Real enum — must be an exact, valid value or the filter is ignored.
+        const up = v.toUpperCase();
+        if (up === 'TANGIBLE' || up === 'INTANGIBLE') target.assetNature = up;
+      } else if (RELATION_FIELDS[field]) {
+        target[RELATION_FIELDS[field]] = { name: { contains: v } };
+      } else if (STRING_FIELDS.includes(field)) {
+        target[field] = { contains: v };
+      } else if (allowNameFallback) {
+        target.assetName = { contains: v };
+      }
+    };
+
     // Search is layered on top of the access scope (MySQL collation = case-insensitive).
     const searchWhere: any = { ...where };
-    if (search) {
-      // Plain String columns → substring match.
-      const STRING_FIELDS = [
-        'assetName', 'assetId', 'assetType', 'serialNumber', 'referenceCode', 'storeAssetId',
-        'manufacturer', 'modelNumber', 'invoiceNumber', 'purchaseOrderNo', 'currentLocation',
-        'status', 'modeOfProcurement', 'physicalCondition', 'workingCondition',
-        'warrantyStatus', 'disposalMethod',
-      ];
-      // To-one relations → substring match on the related row's name.
-      const RELATION_FIELDS: Record<string, string> = {
-        categoryName: 'assetCategory',
-        'assetCategory?.name': 'assetCategory',
-        department: 'department',
-        vendor: 'vendor',
-        allottedTo: 'allottedTo',
-        supervisor: 'supervisor',
-        currentStore: 'currentStore',
-      };
 
-      if (filterField === 'assetNature') {
-        // Real enum — must be an exact, valid value or the filter is ignored.
-        const v = search.toUpperCase();
-        if (v === 'TANGIBLE' || v === 'INTANGIBLE') searchWhere.assetNature = v;
-      } else if (RELATION_FIELDS[filterField]) {
-        searchWhere[RELATION_FIELDS[filterField]] = { name: { contains: search } };
-      } else if (STRING_FIELDS.includes(filterField)) {
-        searchWhere[filterField] = { contains: search };
-      } else {
-        searchWhere.assetName = { contains: search };
-      }
+    // Legacy single-field search (search box + field dropdown).
+    if (search) applyFieldFilter(searchWhere, filterField, search, true);
+
+    // Per-column header filters → JSON map { filterField: value }, AND-combined.
+    if (req.query.filters) {
+      try {
+        const parsed = JSON.parse(String(req.query.filters));
+        if (parsed && typeof parsed === 'object') {
+          for (const [field, val] of Object.entries(parsed)) {
+            applyFieldFilter(searchWhere, field, val as string, false);
+          }
+        }
+      } catch { /* malformed filters param → ignore */ }
     }
 
     const select = {
@@ -230,9 +251,22 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       status: true,
       assetPhoto: true,
       hodApprovalStatus: true,
+      // Extra fields so departments can add these to their table layout.
+      serialNumber: true,
+      manufacturer: true,
+      modelNumber: true,
+      purchaseDate: true,
+      purchaseCost: true,
+      currentLocation: true,
+      criticalityLevel: true,
+      warrantyStatus: true,
+      workingCondition: true,
+      installedAt: true,
       assetCategory: { select: { name: true } },
       department: { select: { name: true } },
       allottedTo: { select: { name: true } },
+      supervisor: { select: { name: true } },
+      assetSubType: { select: { name: true } },
       currentBranch: { select: { name: true } },
     } as const;
 
