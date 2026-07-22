@@ -865,7 +865,10 @@ export const createSubAsset = async (req: Request, res: Response) => {
         assetId: newAssetId,
         assetName,
         assetType,
-        assetCategoryId: Number(assetCategoryId),
+        // Use the resolved id — falls back to the parent's category when the
+        // client omits it ("Defaults to parent's category"). Using the raw body
+        // value here yields NaN and Prisma rejects the create.
+        assetCategoryId: resolvedCategoryId,
         serialNumber,
         referenceCode: referenceCode || null,
         sourceType: "NEW",
