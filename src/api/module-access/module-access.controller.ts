@@ -8,6 +8,8 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
     const defaults = [
       // ── Overview ──
       { name: "master-dashboard", label: "Dashboard", icon: "pi pi-chart-bar", path: "/master-dashboard", sortOrder: 1, items: [] },
+      { name: "department-dashboard", label: "Department Dashboard", icon: "pi pi-th-large", path: "/department-dashboard", sortOrder: 1, items: [] },
+      { name: "hod-dashboard", label: "Assignment Dashboard", icon: "pi pi-sitemap", path: "/hod-dashboard", sortOrder: 1, items: [] },
       // Management command center — hidden automatically when the tenant's
       // ENABLE_BRANCH_FEATURES flag is off (single-branch clients like JMRH).
       { name: "head-office", label: "Head Office", icon: "pi pi-globe", path: "/head-office", sortOrder: 2, items: [] },

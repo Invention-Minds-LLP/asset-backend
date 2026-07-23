@@ -6,7 +6,9 @@ import jwt from "jsonwebtoken";
 import { MobileAuthRequest } from "../../middleware/mobileAuthMiddleware";
 import { sendEmail } from "../../utilis/notificationHelper";
 
-const JWT_SECRET = process.env.JWT_SECRET || "your_default_secret";
+// No insecure fallback — a hardcoded default would let anyone forge tokens if
+// the env var were ever missing. validateEnv fails startup if JWT_SECRET is unset.
+const JWT_SECRET = process.env.JWT_SECRET as string;
 
 // Password login (no OTP) — Employee ID + password. Re-added for QA / Google
 // Play review. Authenticates against User.passwordHash (same password as the

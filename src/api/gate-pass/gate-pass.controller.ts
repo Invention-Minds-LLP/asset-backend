@@ -33,9 +33,12 @@ function userId(req: AuthenticatedRequest): number | null {
   return u?.employeeDbId ?? u?.employeeId ?? u?.id ?? null;
 }
 
-async function resolveApproverDepartmentId(items: { assetId: number }[]): Promise<number | null> {
-  if (items.length === 0) return null;
-  const a = await prisma.asset.findUnique({ where: { id: items[0].assetId }, select: { departmentId: true } });
+async function resolveApproverDepartmentId(items: { assetId: number | null }[]): Promise<number | null> {
+  // Route approval to the first asset-linked item's department. Non-asset items
+  // (spares / surgical equipment) carry no department, so skip them here.
+  const firstAssetId = items.find((it) => it.assetId != null)?.assetId;
+  if (firstAssetId == null) return null;
+  const a = await prisma.asset.findUnique({ where: { id: firstAssetId }, select: { departmentId: true } });
   return a?.departmentId ?? null;
 }
 
@@ -64,19 +67,35 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
       return;
     }
 
-    const itemRows: { assetId: number; quantity: number; remarks: string | null }[] =
+    type ItemRow = {
+      assetId: number | null;
+      description: string | null;
+      make: string | null;
+      model: string | null;
+      quantity: number;
+      remarks: string | null;
+    };
+    const itemRows: ItemRow[] =
       Array.isArray(items) && items.length > 0
         ? items.map((it: any) => ({
-            assetId: Number(it.assetId),
+            assetId: it.assetId ? Number(it.assetId) : null,
+            description: it.description?.trim() || null,
+            make: it.make?.trim() || null,
+            model: it.model?.trim() || null,
             quantity: it.quantity ? Number(it.quantity) : 1,
             remarks: it.remarks ?? null,
           }))
         : assetId
-        ? [{ assetId: Number(assetId), quantity: quantity ? Number(quantity) : 1, remarks: description ?? null }]
+        ? [{ assetId: Number(assetId), description: description?.trim() || null, make: null, model: null, quantity: quantity ? Number(quantity) : 1, remarks: description ?? null }]
         : [];
 
     if (itemRows.length === 0) {
-      res.status(400).json({ message: "At least one asset item is required" });
+      res.status(400).json({ message: "At least one item is required" });
+      return;
+    }
+    // Each item must be identifiable: either a linked asset or a description.
+    if (itemRows.some((it) => it.assetId == null && !it.description)) {
+      res.status(400).json({ message: "Each item needs either an asset or an item description" });
       return;
     }
 
@@ -209,7 +228,10 @@ export const updateGatePass = async (req: AuthenticatedRequest, res: Response) =
       await prisma.gatePassItem.deleteMany({ where: { gatePassId: id } });
       data.items = {
         create: items.map((it: any) => ({
-          assetId: Number(it.assetId),
+          assetId: it.assetId ? Number(it.assetId) : null,
+          description: it.description?.trim() || null,
+          make: it.make?.trim() || null,
+          model: it.model?.trim() || null,
           quantity: it.quantity ? Number(it.quantity) : 1,
           remarks: it.remarks ?? null,
         })),

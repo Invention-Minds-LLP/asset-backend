@@ -50,6 +50,9 @@ type GatePassForPdf = {
   items: Array<{
     quantity: number;
     remarks: string | null;
+    description: string | null;
+    make: string | null;
+    model: string | null;
     asset: { assetId: string; assetName: string; serialNumber: string | null } | null;
   }>;
 };
@@ -173,9 +176,13 @@ function drawItemsTable(doc: PDFKit.PDFDocument, items: GatePassForPdf["items"])
   doc.fillColor("black").fontSize(9).font("Helvetica");
   items.forEach((it, idx) => {
     const rowY = doc.y + 2;
+    // Non-asset items (spares / surgical equipment) fall back to their free-text
+    // description + make/model so the pass is still identifiable.
+    const makeModel = [it.make, it.model].filter(Boolean).join(" ");
+    const name = it.asset?.assetName || it.description || "—";
     doc.text(String(idx + 1), cols[0].x, rowY, { width: cols[0].w });
-    doc.text(it.asset?.assetId || "—", cols[1].x, rowY, { width: cols[1].w });
-    doc.text(it.asset?.assetName || "—", cols[2].x, rowY, { width: cols[2].w });
+    doc.text(it.asset?.assetId || (makeModel || "—"), cols[1].x, rowY, { width: cols[1].w });
+    doc.text(makeModel && it.asset ? `${name} (${makeModel})` : name, cols[2].x, rowY, { width: cols[2].w });
     doc.text(it.asset?.serialNumber || "—", cols[3].x, rowY, { width: cols[3].w });
     doc.text(String(it.quantity ?? 1), cols[4].x, rowY, { width: cols[4].w });
     doc.text(it.remarks || "", cols[5].x, rowY, { width: cols[5].w });

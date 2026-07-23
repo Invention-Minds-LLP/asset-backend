@@ -826,6 +826,9 @@ model Department {
   parentDepartment   Department?             @relation("DeptHierarchy", fields: [parentDepartmentId], references: [id])
   childDepartments   Department[]            @relation("DeptHierarchy")
   isActive           Boolean                 @default(true)
+  // Which department-dashboard widget set this department sees. Admin-assigned.
+  // STORES | PURCHASE | IT | MAINTENANCE | BIOMEDICAL | GENERIC (null → GENERIC)
+  dashboardProfile   String?
   assets             Asset[]
   tickets            Ticket[]                @relation("TicketDepartment")
   employees          Employee[]
@@ -1657,8 +1660,16 @@ model GatePassItem {
   gatePassId Int
   gatePass   GatePass @relation(fields: [gatePassId], references: [id], onDelete: Cascade)
 
-  assetId Int
-  asset   Asset @relation("GatePassItemAsset", fields: [assetId], references: [id])
+  // Optional: spares / surgical equipment sent out for repair may not be
+  // registered assets. Such items are identified by description/make/model below.
+  assetId Int?
+  asset   Asset? @relation("GatePassItemAsset", fields: [assetId], references: [id])
+
+  // Free-text identification (used for non-asset items, or to override/supplement
+  // the linked asset's details).
+  description String?
+  make        String?
+  model       String?
 
   quantity Int     @default(1)
   remarks  String?
