@@ -215,7 +215,7 @@ export const getTransferById = async (req: AuthenticatedRequest, res: Response) 
     const [spares, consumables, assets, toDept] = await Promise.all([
       spIds.length ? prisma.sparePart.findMany({ where: { id: { in: spIds } }, select: { id: true, name: true, partNumber: true } }) : [],
       cIds.length ? prisma.consumable.findMany({ where: { id: { in: cIds } }, select: { id: true, name: true, unit: true } }) : [],
-      aIds.length ? prisma.asset.findMany({ where: { id: { in: aIds } }, select: { id: true, assetName: true, assetId: true } }) : [],
+      aIds.length ? prisma.asset.findMany({ where: { id: { in: aIds } }, select: { id: true, assetName: true, assetId: true, manufacturer: true, modelNumber: true } }) : [],
       transfer.toDepartmentId ? prisma.department.findUnique({ where: { id: transfer.toDepartmentId }, select: { id: true, name: true } }) : null,
     ]);
     const spMap = new Map(spares.map((s) => [s.id, s]));
@@ -223,6 +223,10 @@ export const getTransferById = async (req: AuthenticatedRequest, res: Response) 
     const aMap = new Map(assets.map((a) => [a.id, a]));
     const items = transfer.items.map((i) => {
       let itemName = "";
+      // Make / Model / Asset Number for traceability — only assets carry these.
+      let make: string | null = null;
+      let model: string | null = null;
+      let assetNumber: string | null = null;
       if (i.itemType === "SPARE_PART" && i.sparePartId) {
         const sp = spMap.get(i.sparePartId);
         itemName = sp ? `${sp.name}${sp.partNumber ? ` (${sp.partNumber})` : ""}` : "";
@@ -232,8 +236,11 @@ export const getTransferById = async (req: AuthenticatedRequest, res: Response) 
       } else if (i.itemType === "ASSET" && i.assetId) {
         const a = aMap.get(i.assetId);
         itemName = a ? `${a.assetName} (${a.assetId})` : "";
+        make = a?.manufacturer ?? null;
+        model = a?.modelNumber ?? null;
+        assetNumber = a?.assetId ?? null;
       }
-      return { ...i, itemName };
+      return { ...i, itemName, make, model, assetNumber };
     });
 
     res.json({ ...transfer, items, toDepartment: toDept });

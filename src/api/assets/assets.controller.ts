@@ -97,10 +97,13 @@ export const getAllAssets = async (req: Request, res: Response) => {
         status: true,
         assetPhoto: true,
         hodApprovalStatus: true,
+        manufacturer: true,
+        modelNumber: true,
         assetCategory: { select: { name: true } },
         department: { select: { name: true } },
         allottedTo: { select: { name: true } },
         currentBranch: { select: { name: true } },
+        currentStore: { select: { name: true } },
         _count: { select: { subAssets: true } }, // sub-asset count for the Sub-Assets screen badge
       },
     });
