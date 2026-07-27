@@ -20,10 +20,38 @@ export interface AccessPayload {
   role: string;
   name?: string;
   departmentId?: number | null;
+  // Web single-session stamp. Compared against User.activeSessionId on every
+  // request; a login elsewhere rotates the stored value and strands this token.
+  sid?: string;
 }
 
 export function signAccessToken(payload: AccessPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TTL } as jwt.SignOptions);
+}
+
+// Off only when a deployment explicitly opts out (e.g. it relies on shared
+// logins). Any value other than "false" leaves it enforced.
+export const SINGLE_SESSION_ENFORCED = process.env.ENFORCE_SINGLE_SESSION !== "false";
+
+/**
+ * Start a new web session for the user: mint a fresh stamp, store it, and revoke
+ * every earlier refresh token so the previous device cannot silently refresh.
+ * Call BEFORE createRefreshToken so this login's own token survives.
+ *
+ * Returns the new stamp to embed in the access token, or undefined when the
+ * feature is disabled (so tokens stay stampless and authMiddleware skips the
+ * check for everyone).
+ */
+export async function rotateUserSession(userId: number): Promise<string | undefined> {
+  if (!SINGLE_SESSION_ENFORCED) return undefined;
+
+  const sid = crypto.randomBytes(16).toString("hex");
+  await prisma.user.update({ where: { id: userId }, data: { activeSessionId: sid } });
+  await prisma.refreshToken.updateMany({
+    where: { userId, revokedAt: null },
+    data: { revokedAt: new Date() },
+  });
+  return sid;
 }
 
 // Cookie flags are decided PER REQUEST from how the request arrived, so ONE

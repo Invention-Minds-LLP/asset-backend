@@ -94,6 +94,9 @@ import path from "path";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startScheduler } from "./scheduler";
+import trialRoutes from "./api/trial/trial.routes";
+import { trialGuard } from "./middleware/trialGuard";
+import { softAuth, accessLogger } from "./middleware/accessLog";
 
 const app = express();
 // Honour X-Forwarded-Proto from the TLS-terminating reverse proxy so req.secure is
@@ -123,6 +126,14 @@ app.use(express.json());
 // Parse cookies (refresh token + CSRF) for the web auth flow.
 app.use(cookieParser());
 
+// API access logging + suspicious-request detection. softAuth decodes a token if
+// present (without rejecting) so the logger knows if a call was authenticated;
+// accessLogger records each /api request to the apiaccesslog table on response
+// finish and feeds flagged requests to the batched email alerter. Both no-op when
+// ACCESS_LOG_ENABLED=false. Best-effort — never blocks or slows a request.
+app.use(softAuth);
+app.use(accessLogger);
+
 // Serve uploaded files
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
@@ -143,6 +154,23 @@ const loginLimiter = rateLimit({
   message: { message: "Too many login attempts from this IP. Please try again in 15 minutes." },
 });
 app.use("/api/users/login", loginLimiter);
+
+// Liveness probe. Deliberately mounted above the trial guard (and excluded from
+// it) so the Cloud Scheduler keep-warm ping keeps succeeding on an expired demo —
+// otherwise an ended trial would look like an outage.
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, uptime: process.uptime() });
+});
+
+// Demo/trial control API — reachable even when the trial has lapsed, since this
+// is how we extend or revoke it. Guarded by TRIAL_ADMIN_KEY, not the client's JWT.
+app.use("/api/trial", trialRoutes);
+
+// ── Demo trial checkpoint ────────────────────────────────────────────────────
+// Sits in front of every remaining /api route so an expired or revoked demo
+// freezes the entire application in one place. No-op unless TRIAL_ENABLED=true,
+// so production and dev instances are completely unaffected.
+app.use(trialGuard);
 
 // NOTE: Module access is enforced on the FRONTEND only (sidebar + route guards).
 // It governs UI navigation — which screens/menus a user can open. It must NOT gate

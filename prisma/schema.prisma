@@ -215,7 +215,7 @@ model Asset {
 
   // All supervisors assigned to this asset (incl. primary) — supports shift-wise
   // duty where several supervisors share one asset.
-  supervisors  AssetSupervisor[]
+  supervisors AssetSupervisor[]
 
   allottedToId    Int?
   allottedTo      Employee? @relation("AssetEndUser", fields: [allottedToId], references: [id])
@@ -665,10 +665,18 @@ model User {
   role         String
   lastLogin    DateTime?
 
-  loginHistory LoginHistory[]
+  // Single active web session per user. Stamped on login and re-issued on every
+  // access token; a login elsewhere overwrites it, so the previous session's
+  // next request carries a stale stamp and is rejected by authMiddleware. Null =
+  // no active session yet (or a token issued before this feature) → allowed, so
+  // enabling this never mass-logs-out anyone. Mobile app auth is separate and
+  // unaffected.
+  activeSessionId String?
+
+  loginHistory  LoginHistory[]
   refreshTokens RefreshToken[]
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @default(now()) @updatedAt
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @default(now()) @updatedAt
 
   @@map("users")
 }
@@ -677,15 +685,15 @@ model User {
 // token is stored (never the raw value), so a DB leak can't be used to mint
 // sessions. Rotated on every /refresh; revoked on logout or reuse.
 model RefreshToken {
-  id        Int      @id @default(autoincrement())
+  id        Int       @id @default(autoincrement())
   userId    Int
-  user      User     @relation(fields: [userId], references: [id])
-  tokenHash String   @unique
+  user      User      @relation(fields: [userId], references: [id])
+  tokenHash String    @unique
   expiresAt DateTime
   revokedAt DateTime?
   userAgent String?
   ipAddress String?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
   @@map("refreshtoken")
@@ -819,38 +827,38 @@ model SubTypeSupportConfig {
 }
 
 model Department {
-  id                 Int                     @id @default(autoincrement())
-  name               String                  @unique
-  code               String?                 @unique // Short code like ICU, OT, RADIOLOGY
-  parentDepartmentId Int?
-  parentDepartment   Department?             @relation("DeptHierarchy", fields: [parentDepartmentId], references: [id])
-  childDepartments   Department[]            @relation("DeptHierarchy")
-  isActive           Boolean                 @default(true)
+  id                    Int                     @id @default(autoincrement())
+  name                  String                  @unique
+  code                  String?                 @unique // Short code like ICU, OT, RADIOLOGY
+  parentDepartmentId    Int?
+  parentDepartment      Department?             @relation("DeptHierarchy", fields: [parentDepartmentId], references: [id])
+  childDepartments      Department[]            @relation("DeptHierarchy")
+  isActive              Boolean                 @default(true)
   // Which department-dashboard widget set this department sees. Admin-assigned.
   // STORES | PURCHASE | IT | MAINTENANCE | BIOMEDICAL | GENERIC (null → GENERIC)
-  dashboardProfile   String?
-  assets             Asset[]
-  tickets            Ticket[]                @relation("TicketDepartment")
-  employees          Employee[]
-  createdById        Int?
-  updatedById        Int?
-  createdAt          DateTime                @default(now())
-  updatedAt          DateTime                @default(now()) @updatedAt
-  escalationMatrixes EscalationMatrix[]
-  targetAssets       Asset[]                 @relation("TargetDept")
-  ownedTickets       Ticket[]                @relation("TicketOwningDept")
-  transferFrom       TicketTransferHistory[] @relation("TicketTransferFromDept")
-  transferTo         TicketTransferHistory[] @relation("TicketTransferToDept")
-  assetTransferFrom  AssetTransferHistory[]  @relation("AssetTransferFromDept")
-  assetTransferTo    AssetTransferHistory[]  @relation("AssetTransferToDept")
-  assetIndents       AssetIndent[]
-  purchaseOrders     PurchaseOrder[]         @relation("PODepartment")
-  financeVouchers    FinanceVoucher[]        @relation("VoucherDept")
-  voucherLines       FinanceVoucherLine[]    @relation("FVLineCostCentre")
-  capexBudgets       CapexBudget[]           @relation("CapexBudgetDept")
-  assetPools         AssetPool[]             @relation("AssetPoolDepartment")
-  subTypeSupportConfigs SubTypeSupportConfig[] @relation("SubTypeSupportDept")
-  assetSubTypes      AssetSubType[]          @relation("DeptSubTypes")
+  dashboardProfile      String?
+  assets                Asset[]
+  tickets               Ticket[]                @relation("TicketDepartment")
+  employees             Employee[]
+  createdById           Int?
+  updatedById           Int?
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @default(now()) @updatedAt
+  escalationMatrixes    EscalationMatrix[]
+  targetAssets          Asset[]                 @relation("TargetDept")
+  ownedTickets          Ticket[]                @relation("TicketOwningDept")
+  transferFrom          TicketTransferHistory[] @relation("TicketTransferFromDept")
+  transferTo            TicketTransferHistory[] @relation("TicketTransferToDept")
+  assetTransferFrom     AssetTransferHistory[]  @relation("AssetTransferFromDept")
+  assetTransferTo       AssetTransferHistory[]  @relation("AssetTransferToDept")
+  assetIndents          AssetIndent[]
+  purchaseOrders        PurchaseOrder[]         @relation("PODepartment")
+  financeVouchers       FinanceVoucher[]        @relation("VoucherDept")
+  voucherLines          FinanceVoucherLine[]    @relation("FVLineCostCentre")
+  capexBudgets          CapexBudget[]           @relation("CapexBudgetDept")
+  assetPools            AssetPool[]             @relation("AssetPoolDepartment")
+  subTypeSupportConfigs SubTypeSupportConfig[]  @relation("SubTypeSupportDept")
+  assetSubTypes         AssetSubType[]          @relation("DeptSubTypes")
 
   // Vendors that serve this department (M2M inverse).
   vendors Vendor[] @relation("VendorDepartments")
@@ -1145,9 +1153,9 @@ model BatchDepreciationRun {
 // required). When both cfoApprovedAt and caApprovedAt are set → status AUDITED.
 // Either approver may REJECT (with reason); FINANCE can revise and resubmit.
 model DepreciationAudit {
-  id           Int     @id @default(autoincrement())
-  fiscalYear   Int     @unique // e.g. 2025 = FY 2025-26 (FY start year)
-  status       String  @default("PENDING") // PENDING | AUDITED | REJECTED
+  id         Int    @id @default(autoincrement())
+  fiscalYear Int    @unique // e.g. 2025 = FY 2025-26 (FY start year)
+  status     String @default("PENDING") // PENDING | AUDITED | REJECTED
 
   // Snapshot of the depreciation position at creation time (for the record).
   totalDepreciation Decimal @default(0) @db.Decimal(14, 2)
@@ -1171,9 +1179,9 @@ model DepreciationAudit {
   caApprovedAt      DateTime?
 
   // Rejection (by CFO or CA).
-  rejectedByRole String? // CFO | CA
-  rejectedByName String?
-  rejectionReason String? @db.Text
+  rejectedByRole  String? // CFO | CA
+  rejectedByName  String?
+  rejectionReason String?   @db.Text
   rejectedAt      DateTime?
 
   createdAt DateTime @default(now())
@@ -1311,8 +1319,8 @@ model AssetLocation {
   employeeResponsibleId Int?
   employeeResponsible   Employee? @relation(fields: [employeeResponsibleId], references: [id])
 
-  isActive Boolean @default(true)
-  status   String  @default("REQUESTED") // REQUESTED | APPROVED | REJECTED
+  isActive      Boolean @default(true)
+  status        String  @default("REQUESTED") // REQUESTED | APPROVED | REJECTED
   // Which approver tier must sign off a pending change: HOD | MANAGEMENT.
   // Set from the requester's role at request time. Null on auto-approved rows.
   approvalLevel String?
@@ -1472,7 +1480,7 @@ model MaintenanceSchedule {
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
-  serviceInvoices ServiceInvoice[]
+  serviceInvoices      ServiceInvoice[]
   maintenanceHistories MaintenanceHistory[]
 
   @@index([assetId, nextDueAt])
@@ -4646,4 +4654,89 @@ model ReconciliationSnapshot {
   @@index([asOfDate, scope])
   @@index([varianceFlagged])
   @@map("reconciliationsnapshot")
+}
+
+// ═══════════════════════════════════════════════════════
+// DEMO / TRIAL LICENSING
+// ═══════════════════════════════════════════════════════
+// Terms of the demo running on THIS deployment. Single row — the lowest id wins.
+//
+// Every read is gated behind TRIAL_ENABLED=true in the environment, so a paying
+// client's instance carries these two tables but never touches them: the guard
+// short-circuits on the env check before any query. Checks also fail OPEN (no
+// row, unreadable row, DB error → allow), because a licensing bug must never be
+// able to lock a customer out of their own asset register.
+model TrialLicense {
+  id         Int      @id @default(autoincrement())
+  clientName String
+  status     String   @default("ACTIVE") // ACTIVE | REVOKED
+  startsAt   DateTime @default(now())
+  expiresAt  DateTime
+
+  // One live session per user: a login revokes every earlier refresh token, so a
+  // shared password kicks the previous person out instead of cloning access.
+  // Far more reliable than IP matching, which consumer networks break daily.
+  singleSession Boolean @default(true)
+
+  // Employee IDs permitted to sign in during the trial (JSON array of strings).
+  // Empty or null = no restriction.
+  allowedEmployeeIds Json?
+
+  ipMode     String  @default("ALERT") // OFF | ALERT | LOCK_FIRST | ALLOWLIST
+  allowedIps Json? // ALLOWLIST mode: array of exact IPs, CIDRs, or "1.2.3.*"
+  lockedIp   String? // LOCK_FIRST mode: bound on the first successful login
+
+  notes     String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@map("triallicense")
+}
+
+// Append-only audit of every trial rejection and every "someone else is using
+// this login" signal. This is what tells you the demo credentials got shared.
+model TrialViolation {
+  id         Int      @id @default(autoincrement())
+  occurredAt DateTime @default(now())
+  reason     String // EXPIRED | REVOKED | IP_BLOCKED | NEW_IP | USER_NOT_ALLOWED | SESSION_TAKEOVER
+  employeeId String?
+  ipAddress  String?
+  userAgent  String?  @db.Text
+  path       String?
+  detail     String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([occurredAt])
+  @@index([reason])
+  @@map("trialviolation")
+}
+
+// ═══════════════════════════════════════════════════════
+// API ACCESS LOG + SECURITY MONITORING
+// ═══════════════════════════════════════════════════════
+// One row per API request (see src/middleware/accessLog.ts). `suspicious` marks
+// requests that tripped a security rule (auth failure, brute force, file probe,
+// injection signature in the URL); those also feed the batched email alerter in
+// src/lib/securityAlert.ts. High-volume — the nightly retention purge in
+// scheduler.ts trims rows past SECURITY_RETENTION_DAYS.
+model ApiAccessLog {
+  id          Int      @id @default(autoincrement())
+  createdAt   DateTime @default(now())
+  method      String // GET / POST / PUT / DELETE / PATCH
+  path        String   @db.Text // request path (query string stripped)
+  statusCode  Int // final HTTP status
+  durationMs  Int // server processing time
+  ip          String? // client IP (X-Forwarded-For aware, normalized)
+  userAgent   String?  @db.Text
+  userId      Int? // User.id from a valid token, null if anonymous
+  employeeID  String? // employeeID from the token, for readability
+  isAnonymous Boolean  @default(true) // true = no valid JWT presented
+  suspicious  Boolean  @default(false) // true = a security rule flagged it
+  reason      String? // which rule(s) flagged it, comma-separated
+
+  @@index([createdAt])
+  @@index([ip])
+  @@index([suspicious])
+  @@index([userId])
+  @@map("apiaccesslog")
 }

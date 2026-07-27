@@ -2,6 +2,8 @@ import cron from "node-cron";
 import { runAllChecksInternal, runAssetStaleLocationCheck } from "./api/cron-jobs/cron-jobs.controller";
 import { runManagementAssetAlerts } from "./api/cron-jobs/mgmt-asset-alerts";
 import { syncAllToDirectory } from "./utilis/directory";
+import { flushSecurityAlerts, securityConfig } from "./lib/securityAlert";
+import prisma from "./prismaClient";
 
 // In-process daily scheduler for the alert / expiry checks.
 // Runs every day at 08:00 server time. Each individual check is also still
@@ -56,4 +58,34 @@ export function startScheduler() {
   });
 
   console.log("[scheduler] directory sync scheduled for 02:30 server time");
+
+  // Security alerts: every 5 min, flush the in-memory buffer of flagged API
+  // requests as ONE aggregated email (a burst of bad requests = one alert, not
+  // hundreds). No-op when access logging is disabled or nothing was flagged.
+  if (securityConfig.enabled) {
+    cron.schedule("*/5 * * * *", async () => {
+      try {
+        const r = await flushSecurityAlerts();
+        if (r.events > 0) {
+          console.log(`[scheduler] security alerts: ${r.events} flagged request(s), emailed=${r.sent}`);
+        }
+      } catch (err) {
+        console.error("[scheduler] flushSecurityAlerts failed:", err);
+      }
+    });
+    console.log("[scheduler] security alert flush scheduled every 5 minutes");
+
+    // Nightly at 03:30 — purge apiaccesslog rows past the retention window so the
+    // (high-volume, log-everything) table doesn't grow without bound.
+    cron.schedule("30 3 * * *", async () => {
+      try {
+        const cutoff = new Date(Date.now() - securityConfig.retentionDays * 24 * 60 * 60 * 1000);
+        const { count } = await prisma.apiAccessLog.deleteMany({ where: { createdAt: { lt: cutoff } } });
+        console.log(`[scheduler] apiaccesslog purge: removed ${count} row(s) older than ${securityConfig.retentionDays} day(s)`);
+      } catch (err) {
+        console.error("[scheduler] apiaccesslog purge failed:", err);
+      }
+    });
+    console.log(`[scheduler] apiaccesslog purge scheduled for 03:30 (retention ${securityConfig.retentionDays}d)`);
+  }
 }

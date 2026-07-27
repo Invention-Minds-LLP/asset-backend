@@ -45,15 +45,33 @@ export const authenticateToken = async (
     // A still-valid token must not outlive the employee's access: re-check the
     // ACTIVE flag on every request so deactivating someone ejects them right
     // away (the frontend interceptor logs out on 401). Same guarantee the
-    // external-auditor middleware gives. Fails open if the employee row can't
-    // be resolved, so a data anomaly never locks anyone out.
-    if (decoded.employeeDbId) {
-      const employee = await prisma.employee.findUnique({
-        where: { id: Number(decoded.employeeDbId) },
-        select: { isActive: true },
+    // external-auditor middleware gives. Fails open if the row can't be
+    // resolved, so a data anomaly never locks anyone out.
+    //
+    // Same query also enforces single web session: the token carries the stamp
+    // (`sid`) it was minted with; a login elsewhere overwrites User.activeSessionId,
+    // so a stale stamp here means this device has been superseded. Fails OPEN when
+    // either side is missing — tokens issued before this feature, or mobile tokens
+    // (no sid), are never blocked by it.
+    if (decoded.userId) {
+      const account = await prisma.user.findUnique({
+        where: { id: Number(decoded.userId) },
+        select: { activeSessionId: true, employee: { select: { isActive: true } } },
       });
-      if (employee && employee.isActive === false) {
+
+      if (account?.employee?.isActive === false) {
         res.status(401).json({ message: "Your account is inactive. Please contact your administrator." });
+        return;
+      }
+
+      if (
+        decoded.sid &&
+        account?.activeSessionId &&
+        decoded.sid !== account.activeSessionId
+      ) {
+        res.status(401).json({
+          message: "You have been signed out because this account was used to log in on another device.",
+        });
         return;
       }
     }

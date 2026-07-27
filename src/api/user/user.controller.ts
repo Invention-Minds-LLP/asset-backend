@@ -8,15 +8,145 @@ import {
   validateRefreshToken,
   revokeRefreshTokenById,
   revokeRefreshTokenByRaw,
+  rotateUserSession,
   setRefreshCookie,
   clearRefreshCookie,
   issueCsrfCookie,
   csrfOk,
   REFRESH_COOKIE,
 } from "./auth.helpers";
+import {
+  asStringArray,
+  checkTrialIp,
+  evaluateTrial,
+  getTrialLicense,
+  invalidateTrialCache,
+  normalizeIp,
+  recordTrialViolation,
+  trialEnabled,
+} from "../../lib/trial";
 
 // Validated at startup by src/config/validateEnv.ts — no insecure fallback.
 const JWT_SECRET = process.env.JWT_SECRET as string;
+
+/**
+ * Trial rules applied at the moment of login: is the demo still valid, is this
+ * employee on the permitted list, is the IP acceptable, and is anyone else
+ * already signed in as them.
+ *
+ * Runs only after the password has been verified, so it never leaks trial state
+ * to someone guessing credentials. Returns true when it has already answered the
+ * request and the caller must stop.
+ */
+async function enforceTrialOnLogin(
+  user: { id: number; employeeID: string },
+  ip: string,
+  userAgent: string,
+  res: Response
+): Promise<boolean> {
+  const license = await getTrialLicense();
+
+  const verdict = evaluateTrial(license);
+  if (!verdict.ok) {
+    recordTrialViolation({
+      reason: verdict.code === "TRIAL_REVOKED" ? "REVOKED" : "EXPIRED",
+      employeeId: user.employeeID,
+      ipAddress: ip,
+      userAgent,
+      path: "/api/users/login",
+    });
+    res.status(403).json({ code: verdict.code, message: verdict.message });
+    return true;
+  }
+
+  if (!license) return false;
+
+  // Named-user demo: only the evaluator we agreed on can sign in.
+  const allowed = asStringArray(license.allowedEmployeeIds);
+  if (allowed.length && !allowed.includes(user.employeeID)) {
+    recordTrialViolation({
+      reason: "USER_NOT_ALLOWED",
+      employeeId: user.employeeID,
+      ipAddress: ip,
+      userAgent,
+      detail: `permitted: ${allowed.join(", ")}`,
+    });
+    res.status(403).json({
+      code: "TRIAL_USER_NOT_ALLOWED",
+      message: "This login is not enabled for the demo. Please contact Invention Minds.",
+    });
+    return true;
+  }
+
+  const { blocked, newIp } = checkTrialIp(license, ip);
+  if (blocked) {
+    recordTrialViolation({
+      reason: "IP_BLOCKED",
+      employeeId: user.employeeID,
+      ipAddress: ip,
+      userAgent,
+      detail: `mode=${license.ipMode} bound=${license.lockedIp ?? "-"}`,
+    });
+    res.status(403).json({
+      code: "TRIAL_IP_BLOCKED",
+      message: "This demo is restricted to an approved network. Please contact Invention Minds.",
+    });
+    return true;
+  }
+  if (newIp) {
+    // ALERT mode: let them in, but leave a trail that the network changed.
+    recordTrialViolation({
+      reason: "NEW_IP",
+      employeeId: user.employeeID,
+      ipAddress: ip,
+      userAgent,
+      detail: `previously seen from ${license.lockedIp ?? "-"}`,
+    });
+  }
+
+  // LOCK_FIRST binds on the first successful login rather than up front, so we
+  // don't have to know the client's address before the demo starts.
+  if (license.ipMode === "LOCK_FIRST" && !license.lockedIp && ip) {
+    await prisma.trialLicense.update({ where: { id: license.id }, data: { lockedIp: ip } });
+    invalidateTrialCache();
+  } else if (license.ipMode === "ALERT" && !license.lockedIp && ip) {
+    // ALERT mode still needs a baseline to compare against.
+    await prisma.trialLicense.update({ where: { id: license.id }, data: { lockedIp: ip } });
+    invalidateTrialCache();
+  }
+
+  // One live session per user. Revoking beats IP matching for "only one person":
+  // if the password gets shared, the second person's login ejects the first.
+  if (license.singleSession) {
+    const live = await prisma.refreshToken.findMany({
+      where: { userId: user.id, revokedAt: null, expiresAt: { gt: new Date() } },
+      select: { id: true, ipAddress: true },
+    });
+
+    if (live.length) {
+      await prisma.refreshToken.updateMany({
+        where: { id: { in: live.map((t) => t.id) } },
+        data: { revokedAt: new Date() },
+      });
+
+      // Only worth reporting when the ejected session came from somewhere else —
+      // the same person reopening their browser is not a violation.
+      const elsewhere = live.find((t) => normalizeIp(t.ipAddress) !== ip);
+      if (elsewhere) {
+        recordTrialViolation({
+          reason: "SESSION_TAKEOVER",
+          employeeId: user.employeeID,
+          ipAddress: ip,
+          userAgent,
+          detail: `ejected an active session from ${normalizeIp(elsewhere.ipAddress) || "unknown"}`,
+          throttle: false,
+        });
+      }
+    }
+  }
+
+  return false;
+}
 
 export const loginUser = async (req: Request, res: Response) => {
   const { employeeId, password } = req.body;
@@ -61,11 +191,23 @@ export const loginUser = async (req: Request, res: Response) => {
     return;
   }
 
+  // Demo/trial gate. Entirely inert unless TRIAL_ENABLED=true on this instance —
+  // a paying client's deployment never enters this block.
+  if (trialEnabled()) {
+    const blocked = await enforceTrialOnLogin(user, normalizeIp(clientIp), userAgent, res);
+    if (blocked) return;
+  }
+
   // Successful login → update lastLogin
   await prisma.user.update({
     where: { id: user.id },
     data: { lastLogin: new Date() },
   });
+
+  // Start a fresh single web session: stamp the user and revoke prior refresh
+  // tokens. Runs before createRefreshToken below so THIS login's token survives.
+  // Any session already open elsewhere is ejected on its next request.
+  const sid = await rotateUserSession(user.id);
 
   // Short-lived access token (returned in the body → held in memory on the client).
   const token = signAccessToken({
@@ -75,6 +217,7 @@ export const loginUser = async (req: Request, res: Response) => {
     role: user.role,
     name: user.employee?.name,
     departmentId: user.employee?.departmentId,
+    sid,
   });
 
   // Long-lived refresh token → httpOnly cookie (hashed in DB) + CSRF cookie.
@@ -131,6 +274,9 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
   setRefreshCookie(res, nextRefresh, req);
   issueCsrfCookie(res, req);
 
+  // Re-issue with the session's CURRENT stamp so a legitimate rolling session
+  // keeps working. If a login elsewhere had already rotated it, this refresh
+  // would not reach here — the old refresh token was revoked and rejected above.
   const token = signAccessToken({
     userId: user.id,
     employeeID: user.employeeID,
@@ -138,6 +284,7 @@ export const refreshAccessToken = async (req: Request, res: Response) => {
     role: user.role,
     name: user.employee?.name,
     departmentId: user.employee?.departmentId,
+    sid: user.activeSessionId ?? undefined,
   });
 
   res.json({
