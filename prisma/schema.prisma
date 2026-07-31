@@ -223,6 +223,16 @@ model Asset {
   qrCode          String?   @unique
   qrGeneratedAt   DateTime?
   qrLabelPrinted  Boolean?  @default(false)
+
+  // Physical sticker on the asset. Distinct from qrLabelPrinted (which the bulk
+  // print endpoint sets automatically) — this is someone confirming the label is
+  // actually stuck on the equipment. Locked once set; only unlock roles can clear it.
+  qrStickered        Boolean?  @default(false)
+  qrStickeredAt      DateTime? // the date the sticker went on, entered by the user
+  qrStickeredById    Int?
+  qrStickeredBy      Employee? @relation("AssetQrStickeredBy", fields: [qrStickeredById], references: [id])
+  qrStickeredRemarks String?   @db.Text
+
   currentLocation String?
   fromLocation    String?
   toLocation      String?
@@ -889,6 +899,7 @@ model Employee {
   AssetLocation    AssetLocation[]
   supervisedAssets Asset[]         @relation("AssetSupervisor")
   allocatedAssets  Asset[]         @relation("AssetEndUser")
+  qrStickeredAssets Asset[]        @relation("AssetQrStickeredBy")
 
   qrScans       QRScanLog[]
   assetScanLogs AssetScanLog[]
@@ -1372,9 +1383,37 @@ model FloorPlan {
   updatedAt   DateTime @default(now()) @updatedAt
 
   locations AssetLocation[]
+  zones     FloorPlanZone[]
 
   @@index([branchId])
   @@map("floorplan")
+}
+
+// A room / area outline traced once on a floor-plan image. Turns the plan from a
+// bag of points into addressable spaces: filter to one room, zoom to it, colour
+// it by asset count or audit progress. Which assets sit in a zone is derived by
+// point-in-polygon against AssetLocation.planX/planY at read time, so pins and
+// zones can never drift out of sync.
+model FloorPlanZone {
+  id          Int       @id @default(autoincrement())
+  floorPlanId Int
+  floorPlan   FloorPlan @relation(fields: [floorPlanId], references: [id], onDelete: Cascade)
+
+  name       String
+  roomNumber String? // the hospital's own room number, e.g. "1521"
+  department String? // department that occupies it, when it is a fixed one
+  kind       String  @default("ROOM") // ROOM | CORRIDOR | WARD | OT | UTILITY | OUTDOOR
+
+  // Outline as [[x, y], …] with x/y as 0–100 percentages of the image, the same
+  // space AssetLocation.planX/planY uses.
+  polygon Json
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([floorPlanId])
+  @@map("floorplanzone")
 }
 
 model AssetTransferHistory {
@@ -3028,6 +3067,10 @@ model AssetAudit {
 
   auditorType String? // INTERNAL | EXTERNAL | BOTH
 
+  // How the auditor walks the audit. Saved as the audit's default; the auditor
+  // can still switch view while working, since it only changes traversal order.
+  groupBy String @default("FLOOR") // FLOOR | DEPARTMENT | ASSET
+
   conductedById Int?
   description   String? @db.Text
   remarks       String? @db.Text
@@ -3083,6 +3126,14 @@ model AssetAuditItem {
   asset     Asset     @relation("AuditItems", fields: [assetId], references: [id])
   status    String    @default("PENDING") // PENDING | VERIFIED | MISSING | MISMATCH
   scannedAt DateTime?
+
+  // The asset's lifecycle status when the audit was created (ACTIVE, IN_STORE,
+  // CONDEMNED, DISPOSED, UNDER_OBSERVATION…). Snapshotted so a completed audit
+  // still reads correctly after the asset moves on.
+  assetStatusAtAudit String?
+  // Only ACTIVE assets must be accounted for before an audit can be closed.
+  // Disposed / condemned ones are listed for completeness but never block it.
+  isRequired Boolean @default(true)
 
   locationMatch   Boolean?
   conditionMatch  Boolean?

@@ -265,6 +265,11 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       warrantyStatus: true,
       workingCondition: true,
       installedAt: true,
+      // QR sticker confirmation — drives the lockable toggle in the master table.
+      qrStickered: true,
+      qrStickeredAt: true,
+      qrStickeredRemarks: true,
+      qrStickeredBy: { select: { name: true } },
       assetCategory: { select: { name: true } },
       department: { select: { name: true } },
       allottedTo: { select: { name: true } },
@@ -1979,5 +1984,142 @@ export const getAssetScanDetails = async (req: Request, res: Response) => {
       message: "Error fetching asset scan details",
       error: err.message
     });
+  }
+};
+
+// ── QR sticker confirmation ────────────────────────────────────────────────
+// Records that the printed QR label was physically stuck on the equipment.
+// Separate from qrLabelPrinted (set automatically by the bulk-print endpoint):
+// printing a sheet of labels says nothing about them reaching the asset.
+//
+// Marking is one-way by design — the toggle locks in the UI and the API rejects
+// a second mark — so the confirmation can't be flipped casually. Replacing a
+// damaged sticker needs an explicit unlock from a management role, which is
+// recorded in the audit trail with a reason.
+const QR_STICKER_UNLOCK_ROLES = ["ADMIN", "CEO_COO", "OPERATIONS"];
+
+// POST /assets/:id/qr-sticker
+export const markAssetQrStickered = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { stickeredAt, stickeredById, remarks } = req.body;
+    const user = req.user as any;
+
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: { id: true, assetId: true, assetName: true, qrStickered: true },
+    });
+    if (!asset) { res.status(404).json({ message: "Asset not found" }); return; }
+
+    if (asset.qrStickered) {
+      res.status(400).json({ message: "QR sticker is already confirmed for this asset" });
+      return;
+    }
+
+    // Who did the stickering — usually the logged-in user, but a technician can
+    // be credited instead. Falls back to the caller when nothing is sent.
+    const byId = stickeredById ? Number(stickeredById) : (user?.employeeDbId ?? null);
+    if (byId) {
+      const employee = await prisma.employee.findUnique({ where: { id: byId }, select: { id: true } });
+      if (!employee) { res.status(400).json({ message: "stickeredById is not a valid employee" }); return; }
+    }
+
+    const when = stickeredAt ? new Date(stickeredAt) : new Date();
+    if (isNaN(when.getTime())) { res.status(400).json({ message: "stickeredAt is not a valid date" }); return; }
+
+    const updated = await prisma.asset.update({
+      where: { id },
+      data: {
+        qrStickered: true,
+        qrStickeredAt: when,
+        qrStickeredById: byId,
+        qrStickeredRemarks: remarks ?? null,
+      },
+      select: {
+        id: true,
+        qrStickered: true,
+        qrStickeredAt: true,
+        qrStickeredRemarks: true,
+        qrStickeredBy: { select: { id: true, name: true } },
+      },
+    });
+
+    logAction({
+      entityType: "ASSET",
+      entityId: id,
+      action: "STATUS_CHANGE",
+      description: `QR sticker confirmed for ${asset.assetId || `asset #${id}`}${remarks ? ` — ${remarks}` : ""}`,
+      newValue: JSON.stringify({ qrStickered: true, qrStickeredAt: when, qrStickeredById: byId }),
+      performedById: user?.employeeDbId ?? null,
+      performedBy: user?.name ?? user?.employeeID ?? null,
+    });
+
+    res.json({ message: "QR sticker confirmed", asset: updated });
+  } catch (err) {
+    console.error("markAssetQrStickered error:", err);
+    res.status(500).json({ message: "Failed to confirm QR sticker" });
+  }
+};
+
+// DELETE /assets/:id/qr-sticker — management-only unlock (e.g. sticker damaged,
+// asset re-labelled). Clears the confirmation so it can be marked again; the old
+// values are kept in the audit trail rather than on the row.
+export const unlockAssetQrSticker = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+    const { reason } = req.body ?? {};
+    const user = req.user as any;
+
+    if (!QR_STICKER_UNLOCK_ROLES.includes(user?.role ?? "")) {
+      res.status(403).json({ message: "Only management can unlock a QR sticker confirmation" });
+      return;
+    }
+
+    if (!reason || !String(reason).trim()) {
+      res.status(400).json({ message: "A reason is required to unlock the QR sticker confirmation" });
+      return;
+    }
+
+    const asset = await prisma.asset.findUnique({
+      where: { id },
+      select: {
+        id: true, assetId: true, qrStickered: true, qrStickeredAt: true,
+        qrStickeredById: true, qrStickeredRemarks: true,
+      },
+    });
+    if (!asset) { res.status(404).json({ message: "Asset not found" }); return; }
+    if (!asset.qrStickered) { res.status(400).json({ message: "QR sticker is not confirmed for this asset" }); return; }
+
+    const updated = await prisma.asset.update({
+      where: { id },
+      data: {
+        qrStickered: false,
+        qrStickeredAt: null,
+        qrStickeredById: null,
+        qrStickeredRemarks: null,
+      },
+      select: { id: true, qrStickered: true },
+    });
+
+    logAction({
+      entityType: "ASSET",
+      entityId: id,
+      action: "STATUS_CHANGE",
+      description: `QR sticker confirmation unlocked for ${asset.assetId || `asset #${id}`} — ${String(reason).trim()}`,
+      oldValue: JSON.stringify({
+        qrStickered: true,
+        qrStickeredAt: asset.qrStickeredAt,
+        qrStickeredById: asset.qrStickeredById,
+        qrStickeredRemarks: asset.qrStickeredRemarks,
+      }),
+      newValue: JSON.stringify({ qrStickered: false }),
+      performedById: user?.employeeDbId ?? null,
+      performedBy: user?.name ?? user?.employeeID ?? null,
+    });
+
+    res.json({ message: "QR sticker confirmation unlocked", asset: updated });
+  } catch (err) {
+    console.error("unlockAssetQrSticker error:", err);
+    res.status(500).json({ message: "Failed to unlock QR sticker confirmation" });
   }
 };
