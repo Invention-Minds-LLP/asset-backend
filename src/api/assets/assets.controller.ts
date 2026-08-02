@@ -325,6 +325,68 @@ export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
   }
 };
 
+// GET /assets/ticket-options — asset picker for the ticket form, role-scoped.
+// Mirrors the mobile raise-ticket rule (mobile-auth.controller getMyAssets):
+//   management roles      → every asset
+//   SUPERVISOR            → assets they supervise (primary or shift-wise) or hold
+//   everyone else         → assets allotted to them
+// Kept separate from /all-dropdown, which finance/disposal screens still use
+// unscoped.
+const TICKET_ALL_ASSETS_ROLES = ["HOD", "ADMIN", "FINANCE", "CFO", "OPERATIONS", "CEO", "COO", "CEO_COO"];
+
+export const getTicketAssetOptions = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user as any;
+    if (!user?.employeeDbId) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+
+    const role = String(user.role || "").toUpperCase();
+    const empId = Number(user.employeeDbId);
+
+    let ownerWhere: any = {};
+    if (!TICKET_ALL_ASSETS_ROLES.includes(role)) {
+      ownerWhere =
+        role === "SUPERVISOR"
+          ? {
+            OR: [
+              { supervisorId: empId },
+              { supervisors: { some: { employeeId: empId, isActive: true } } },
+              { allottedToId: empId },
+            ],
+          }
+          : { allottedToId: empId };
+    }
+
+    const where: any = {
+      ...ownerWhere,
+      status: { notIn: ["DISPOSED", "SCRAPPED", "IN_STORE", "RETIRED", "CONDEMNED", "REJECTED"] },
+    };
+    if (req.query.branchId) where.currentBranchId = Number(req.query.branchId);
+
+    const assets = await prisma.asset.findMany({
+      where,
+      select: {
+        id: true,
+        assetId: true,
+        assetName: true,
+        serialNumber: true,
+        status: true,
+        departmentId: true,
+        department: { select: { name: true } },
+        assetCategory: { select: { name: true } },
+        currentLocation: true,
+      },
+      orderBy: { assetName: "asc" },
+    });
+    res.json(assets);
+  } catch (error) {
+    console.error("getTicketAssetOptions error:", error);
+    res.status(500).json({ message: "Failed to fetch assets" });
+  }
+};
+
 export const getAssetById = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   const asset = await prisma.asset.findUnique(
