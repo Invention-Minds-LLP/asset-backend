@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import multer from "multer";
 import prisma from "../../prismaClient";
+import { asPolygon, pointInPolygon, polygonBounds, polygonCentroid } from "../../utilis/geometry";
 
 // ─── Image upload (stored under /uploads/floor-plans, served by static mw) ───
 const DEST = path.join(process.cwd(), "uploads", "floor-plans");
@@ -172,6 +173,181 @@ export const removePin = async (req: Request, res: Response): Promise<void> => {
   } catch (err: any) {
     console.error("removePin error:", err);
     res.status(500).json({ message: "Failed to remove pin" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  ZONES — traced room / area outlines on a plan
+//  Which assets are in a zone is always DERIVED from planX/planY by
+//  point-in-polygon, never stored, so pins and zones cannot drift apart.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ZONE_KINDS = ["ROOM", "CORRIDOR", "WARD", "OT", "UTILITY", "OUTDOOR"];
+
+/** Validates and clamps an incoming outline. */
+const cleanPolygon = (raw: any): [number, number][] | null => {
+  const poly = asPolygon(raw).map(
+    ([x, y]) => [Math.min(100, Math.max(0, x)), Math.min(100, Math.max(0, y))] as [number, number]
+  );
+  return poly.length >= 3 ? poly : null;
+};
+
+// ─── GET /api/floor-plan/:id/zones ───────────────────────────────────────────
+export const listZones = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const floorPlanId = Number(req.params.id);
+    const zones = await (prisma as any).floorPlanZone.findMany({
+      where: { floorPlanId },
+      orderBy: { name: "asc" },
+    });
+    res.json(zones.map(shapeZone));
+  } catch (err: any) {
+    console.error("listZones error:", err);
+    res.status(500).json({ message: "Failed to load zones", error: err?.message });
+  }
+};
+
+/** Adds the derived geometry the client would otherwise recompute. */
+const shapeZone = (z: any) => {
+  const poly = asPolygon(z.polygon);
+  return { ...z, polygon: poly, bounds: polygonBounds(poly), centroid: polygonCentroid(poly) };
+};
+
+// ─── POST /api/floor-plan/:id/zones ──────────────────────────────────────────
+export const createZone = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const floorPlanId = Number(req.params.id);
+    const { name, roomNumber, department, kind, polygon } = req.body || {};
+    if (!name?.trim()) { res.status(400).json({ message: "name is required" }); return; }
+    const poly = cleanPolygon(polygon);
+    if (!poly) { res.status(400).json({ message: "polygon needs at least 3 points" }); return; }
+
+    const plan = await (prisma as any).floorPlan.findUnique({ where: { id: floorPlanId } });
+    if (!plan) { res.status(404).json({ message: "Floor plan not found" }); return; }
+
+    const zone = await (prisma as any).floorPlanZone.create({
+      data: {
+        floorPlanId,
+        name: name.trim(),
+        roomNumber: roomNumber?.trim() || null,
+        department: department?.trim() || null,
+        kind: ZONE_KINDS.includes(String(kind).toUpperCase()) ? String(kind).toUpperCase() : "ROOM",
+        polygon: poly,
+        createdById: (req as any).user?.employeeDbId ?? null,
+      },
+    });
+    res.status(201).json(shapeZone(zone));
+  } catch (err: any) {
+    console.error("createZone error:", err);
+    res.status(500).json({ message: "Failed to create zone", error: err?.message });
+  }
+};
+
+// ─── PUT /api/floor-plan/:id/zones/:zoneId ───────────────────────────────────
+export const updateZone = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const zoneId = Number(req.params.zoneId);
+    const { name, roomNumber, department, kind, polygon } = req.body || {};
+    const data: any = {};
+    if (name !== undefined) {
+      if (!name?.trim()) { res.status(400).json({ message: "name cannot be blank" }); return; }
+      data.name = name.trim();
+    }
+    if (roomNumber !== undefined) data.roomNumber = roomNumber?.trim() || null;
+    if (department !== undefined) data.department = department?.trim() || null;
+    if (kind !== undefined && ZONE_KINDS.includes(String(kind).toUpperCase())) {
+      data.kind = String(kind).toUpperCase();
+    }
+    if (polygon !== undefined) {
+      const poly = cleanPolygon(polygon);
+      if (!poly) { res.status(400).json({ message: "polygon needs at least 3 points" }); return; }
+      data.polygon = poly;
+    }
+    const zone = await (prisma as any).floorPlanZone.update({ where: { id: zoneId }, data });
+    res.json(shapeZone(zone));
+  } catch (err: any) {
+    console.error("updateZone error:", err);
+    res.status(500).json({ message: "Failed to update zone", error: err?.message });
+  }
+};
+
+// ─── DELETE /api/floor-plan/:id/zones/:zoneId ────────────────────────────────
+export const deleteZone = async (req: Request, res: Response): Promise<void> => {
+  try {
+    await (prisma as any).floorPlanZone.delete({ where: { id: Number(req.params.zoneId) } });
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error("deleteZone error:", err);
+    res.status(500).json({ message: "Failed to delete zone", error: err?.message });
+  }
+};
+
+// ─── GET /api/floor-plan/:id/zone-stats ──────────────────────────────────────
+// Zones + which pinned assets fall inside each. Powers zone filtering, the
+// "show only this room" view and the asset-count heatmap.
+export const getZoneStats = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const floorPlanId = Number(req.params.id);
+    const [zones, pins] = await Promise.all([
+      (prisma as any).floorPlanZone.findMany({ where: { floorPlanId }, orderBy: { name: "asc" } }),
+      (prisma as any).assetLocation.findMany({
+        where: { floorPlanId, isActive: true, planX: { not: null }, planY: { not: null } },
+        select: {
+          planX: true,
+          planY: true,
+          asset: {
+            select: {
+              id: true,
+              assetId: true,
+              assetName: true,
+              status: true,
+              assetCategory: { select: { name: true } },
+            },
+          },
+        },
+      }),
+    ]);
+
+    const assigned = new Set<number>();
+    const out = zones.map((z: any) => {
+      const poly = asPolygon(z.polygon);
+      const inside = pins.filter(
+        (p: any) => p.asset && pointInPolygon(Number(p.planX), Number(p.planY), poly)
+      );
+      inside.forEach((p: any) => assigned.add(p.asset.id));
+      const byStatus: Record<string, number> = {};
+      const byCategory: Record<string, number> = {};
+      for (const p of inside) {
+        const s = p.asset.status || "UNKNOWN";
+        byStatus[s] = (byStatus[s] || 0) + 1;
+        const c = p.asset.assetCategory?.name || "Uncategorised";
+        byCategory[c] = (byCategory[c] || 0) + 1;
+      }
+      return {
+        ...shapeZone(z),
+        assetCount: inside.length,
+        byStatus,
+        byCategory,
+        assetIds: inside.map((p: any) => p.asset.id),
+      };
+    });
+
+    // Pins that fell outside every traced zone — the tracing to-do list.
+    const unzoned = pins.filter((p: any) => p.asset && !assigned.has(p.asset.id)).length;
+    const counts = out.map((z: any) => z.assetCount);
+
+    res.json({
+      zones: out,
+      totals: {
+        pins: pins.length,
+        zoned: pins.length - unzoned,
+        unzoned,
+        maxAssetCount: counts.length ? Math.max(...counts) : 0,
+      },
+    });
+  } catch (err: any) {
+    console.error("getZoneStats error:", err);
+    res.status(500).json({ message: "Failed to load zone stats", error: err?.message });
   }
 };
 

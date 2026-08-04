@@ -2,13 +2,35 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { notify, getAdminIds } from "../../utilis/notificationHelper";
-import { buildAuditMap, computeNextItem } from "../../utilis/auditMap";
+import { buildAuditMap, computeNextItem, buildZoneProgress } from "../../utilis/auditMap";
+import { buildGuidance } from "../../utilis/auditGuidance";
+import { buildStartOptions, buildRun, RUN_MODES, RunMode } from "../../utilis/auditRunPlan";
+import {
+  buildChecklist,
+  pendingRequiredItems,
+  resolveSticker,
+  applyStickerToAsset,
+  applyLocationNote,
+  buildLocationReadiness,
+} from "../../utilis/auditChecklist";
 
 // Accept categoryIds as number[], single value, or comma-separated string.
 const normalizeIds = (raw: any): number[] => {
   if (raw == null || raw === "") return [];
   const arr = Array.isArray(raw) ? raw : String(raw).split(",");
   return [...new Set(arr.map((v) => Number(v)).filter((n) => Number.isFinite(n) && n > 0))];
+};
+
+// Asset-level narrowing for a location-based scope, shared by every scope
+// selector and by createAudit so the preview always matches what gets enrolled.
+// Department and category MUST merge into one `asset` filter — assigning
+// `where.asset` twice silently drops the first condition, which is how
+// departmentId came to be ignored whenever a floor was also chosen.
+const assetScopeFilter = (departmentId: any, catIds: number[]): any | null => {
+  const f: any = {};
+  if (catIds.length) f.assetCategoryId = { in: catIds };
+  if (departmentId) f.departmentId = Number(departmentId);
+  return Object.keys(f).length ? f : null;
 };
 
 type AuditorRow =
@@ -286,7 +308,7 @@ export const createAudit = async (
   res: Response
 ) => {
   try {
-    const { auditName, auditDate, departmentId, branchId, floor, block, room, categoryIds, auditorType, auditors } = req.body;
+    const { auditName, auditDate, departmentId, branchId, floor, block, room, categoryIds, auditorType, auditors, groupBy } = req.body;
 
     if (!auditName || !auditDate) {
       res.status(400).json({ message: "auditName and auditDate are required" });
@@ -309,13 +331,14 @@ export const createAudit = async (
 
     if (useLocation) {
       // Location-based: assets whose current active approved location matches,
-      // optionally narrowed to the chosen categories.
+      // optionally narrowed to the chosen categories and/or department.
       const locationWhere: any = { isActive: true, status: "APPROVED" };
       if (branchId) locationWhere.branchId = Number(branchId);
       if (floor) locationWhere.floor = floor;
       if (block) locationWhere.block = block;
       if (room)  locationWhere.room  = room;
-      if (catIds.length) locationWhere.asset = { assetCategoryId: { in: catIds } };
+      const assetFilter = assetScopeFilter(departmentId, catIds);
+      if (assetFilter) locationWhere.asset = assetFilter;
 
       const locations = await prisma.assetLocation.findMany({
         where: locationWhere,
@@ -324,13 +347,28 @@ export const createAudit = async (
       });
       assetIds = locations.map(l => l.assetId);
     } else {
-      const assetWhere: any = { status: { not: "DISPOSED" } };
+      // Every asset in scope, whatever its lifecycle state. Disposed and
+      // condemned ones are listed so the auditor can see the full picture; they
+      // simply aren't required to be accounted for (see isRequired below).
+      const assetWhere: any = {};
       if (departmentId) assetWhere.departmentId = Number(departmentId);
-      if (branchId) assetWhere.branchId = Number(branchId);
+      // Asset has no branchId — the branch an asset currently sits at is the
+      // denormalized currentBranchId kept in sync by lib/assetLocation.
+      if (branchId) assetWhere.currentBranchId = Number(branchId);
       if (catIds.length) assetWhere.assetCategoryId = { in: catIds };
       const assets = await prisma.asset.findMany({ where: assetWhere, select: { id: true } });
       assetIds = assets.map(a => a.id);
     }
+
+    // Snapshot each asset's lifecycle status now, so the audit still reads
+    // correctly later, and decide which ones must be accounted for.
+    const scopedAssets = assetIds.length
+      ? await prisma.asset.findMany({
+          where: { id: { in: assetIds } },
+          select: { id: true, status: true },
+        })
+      : [];
+    const statusByAsset = new Map(scopedAssets.map((a) => [a.id, a.status]));
 
     // Resolve the floor plan captured in the location module (read-only consumer).
     let floorPlanId: number | null = null;
@@ -373,15 +411,24 @@ export const createAudit = async (
         floorPlanId,
         categoryScope,
         auditorType: auditorType || null,
+        groupBy: ["FLOOR", "DEPARTMENT", "ASSET"].includes(String(groupBy).toUpperCase())
+          ? String(groupBy).toUpperCase()
+          : "FLOOR",
         conductedById: req.user?.id ?? null,
         totalAssets: assetIds.length,
         ...(description ? { description } : {}),
         ...(auditorRows.rows.length ? { auditors: { create: auditorRows.rows } } : {}),
         items: {
-          create: assetIds.map((id) => ({
-            assetId: id,
-            status: "PENDING",
-          })),
+          create: assetIds.map((id) => {
+            const assetStatus = statusByAsset.get(id) ?? null;
+            return {
+              assetId: id,
+              status: "PENDING",
+              assetStatusAtAudit: assetStatus,
+              // Only live assets have to be found before the audit can close.
+              isRequired: assetStatus === "ACTIVE",
+            };
+          }),
         },
       },
       include: { items: true, auditors: true },
@@ -454,6 +501,9 @@ export const verifyItem = async (
       actualLocation,
       actualCondition,
       remarks,
+      stickerStatus,
+      scanned,
+      locationNote,
     } = req.body;
 
     if (!status || !["VERIFIED", "MISSING", "MISMATCH"].includes(status)) {
@@ -470,6 +520,10 @@ export const verifyItem = async (
       return;
     }
 
+    // A successful scan proves the sticker is on the asset and readable, so it
+    // counts as PRESENT without asking. Shared with the external portal.
+    const sticker = resolveSticker(stickerStatus, scanned);
+
     const updated = await prisma.assetAuditItem.update({
       where: { id: Number(itemId) },
       data: {
@@ -481,8 +535,18 @@ export const verifyItem = async (
         actualCondition: actualCondition || null,
         remarks: remarks || null,
         verifiedById: req.user?.id ?? null,
+        ...(sticker ? { stickerStatus: sticker, stickerCheckedAt: new Date() } : {}),
       },
     });
+
+    // Push the observation onto the asset itself, so the stickering programme
+    // is driven by what was actually seen on the floor.
+    await applyStickerToAsset(sticker, item.assetId, item.auditId, req.user?.id ?? null);
+
+    // The auditor is standing in front of the asset — the cheapest and most
+    // accurate moment to capture a location note that was never filled in.
+    // Writes onto the active location row so every later audit benefits.
+    await applyLocationNote(locationNote, item.assetId);
 
     res.json({ data: updated, message: "Audit item verified" });
   } catch (error: any) {
@@ -510,6 +574,24 @@ export const completeAudit = async (
 
     if (audit.status !== "IN_PROGRESS") {
       res.status(400).json({ message: "Audit must be in IN_PROGRESS status to complete" });
+      return;
+    }
+
+    // Every ACTIVE asset must be accounted for — verified, missing or mismatch.
+    // Disposed/condemned ones are listed for context and never block closure.
+    const blockers = await pendingRequiredItems(Number(id));
+    if (blockers.length) {
+      res.status(400).json({
+        message:
+          `${blockers.length} active asset${blockers.length === 1 ? "" : "s"} still unchecked. ` +
+          `Mark each one verified, missing or mismatch before completing the audit.`,
+        blockingCount: blockers.length,
+        examples: blockers.slice(0, 10).map((b) => ({
+          itemId: b.id,
+          assetCode: b.asset?.assetId ?? null,
+          assetName: b.asset?.assetName ?? null,
+        })),
+      });
       return;
     }
 
@@ -613,12 +695,13 @@ export const getAuditSummary = async (
 // Distinct floors from active+approved locations, optionally filtered by category.
 export const getScopeFloors = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId } = req.query as Record<string, string | undefined>;
+    const { branchId, departmentId } = req.query as Record<string, string | undefined>;
     const catIds = normalizeIds(req.query.categoryIds);
 
     const where: any = { isActive: true, status: "APPROVED" };
     if (branchId) where.branchId = Number(branchId);
-    if (catIds.length) where.asset = { assetCategoryId: { in: catIds } };
+    const assetFilter = assetScopeFilter(departmentId, catIds);
+    if (assetFilter) where.asset = assetFilter;
 
     const rows = await prisma.assetLocation.findMany({
       where,
@@ -639,11 +722,14 @@ export const getScopeFloors = async (req: AuthenticatedRequest, res: Response) =
 // Distinct blocks from active+approved locations, within the chosen branch/floor.
 export const getScopeBlocks = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId, floor } = req.query as Record<string, string | undefined>;
+    const { branchId, floor, departmentId } = req.query as Record<string, string | undefined>;
+    const catIds = normalizeIds(req.query.categoryIds);
 
     const where: any = { isActive: true, status: "APPROVED" };
     if (branchId) where.branchId = Number(branchId);
     if (floor) where.floor = floor;
+    const assetFilter = assetScopeFilter(departmentId, catIds);
+    if (assetFilter) where.asset = assetFilter;
 
     const rows = await prisma.assetLocation.findMany({
       where,
@@ -664,12 +750,15 @@ export const getScopeBlocks = async (req: AuthenticatedRequest, res: Response) =
 // Distinct rooms from active+approved locations, within the chosen branch/floor/block.
 export const getScopeRooms = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId, floor, block } = req.query as Record<string, string | undefined>;
+    const { branchId, floor, block, departmentId } = req.query as Record<string, string | undefined>;
+    const catIds = normalizeIds(req.query.categoryIds);
 
     const where: any = { isActive: true, status: "APPROVED" };
     if (branchId) where.branchId = Number(branchId);
     if (floor) where.floor = floor;
     if (block) where.block = block;
+    const assetFilter = assetScopeFilter(departmentId, catIds);
+    if (assetFilter) where.asset = assetFilter;
 
     const rows = await prisma.assetLocation.findMany({
       where,
@@ -690,13 +779,16 @@ export const getScopeRooms = async (req: AuthenticatedRequest, res: Response) =>
 // Categories present in the scope, each with a distinct-asset count.
 export const getScopeCategories = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId, floor, block, room } = req.query as Record<string, string | undefined>;
+    const { branchId, floor, block, room, departmentId } = req.query as Record<string, string | undefined>;
 
     const where: any = { isActive: true, status: "APPROVED" };
     if (branchId) where.branchId = Number(branchId);
     if (floor) where.floor = floor;
     if (block) where.block = block;
     if (room) where.room = room;
+    // Category deliberately not applied — this endpoint IS the category picker.
+    const assetFilter = assetScopeFilter(departmentId, []);
+    if (assetFilter) where.asset = assetFilter;
 
     const locations = await prisma.assetLocation.findMany({
       where,
@@ -729,7 +821,7 @@ export const getScopeCategories = async (req: AuthenticatedRequest, res: Respons
 // the previewed count matches the assets actually enrolled.
 export const getScopePreview = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { branchId, floor, block, room } = req.query as Record<string, string | undefined>;
+    const { branchId, floor, block, room, departmentId } = req.query as Record<string, string | undefined>;
     const catIds = normalizeIds(req.query.categoryIds);
 
     const where: any = { isActive: true, status: "APPROVED" };
@@ -737,7 +829,8 @@ export const getScopePreview = async (req: AuthenticatedRequest, res: Response) 
     if (floor) where.floor = floor;
     if (block) where.block = block;
     if (room) where.room = room;
-    if (catIds.length) where.asset = { assetCategoryId: { in: catIds } };
+    const assetFilter = assetScopeFilter(departmentId, catIds);
+    if (assetFilter) where.asset = assetFilter;
 
     const locations = await prisma.assetLocation.findMany({
       where,
@@ -803,6 +896,195 @@ export const getFloorMap = async (req: AuthenticatedRequest, res: Response) => {
     });
   } catch (error: any) {
     console.error("Error building floor map:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/:id/zone-progress
+// Room-level rollup of the audit onto the floor plan's traced zones: per-room
+// verified/missing/pending counts, the room walking order, and the not-found
+// list. Drives the progress heatmap on the audit map.
+export const getZoneProgress = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const result = await buildZoneProgress(Number(req.params.id));
+    if (!result) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const { audit, plan, zones, walkingOrder, notFound, totals } = result;
+    res.json({
+      data: {
+        auditId: audit.id,
+        auditName: audit.auditName,
+        status: audit.status,
+        plan,
+        zones,
+        walkingOrder,
+        notFound,
+        totals,
+      },
+    });
+  } catch (error: any) {
+    console.error("Error building zone progress:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  CHECKLIST — the primary way to work an audit.
+//  A grouped, filterable list rather than a plan covered in pins. Every asset in
+//  scope appears, whatever its lifecycle state, so the auditor can see that a
+//  missing machine was actually disposed of last year.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GROUP_MODES = ["FLOOR", "DEPARTMENT", "ASSET"];
+
+/** Disposal requests that are still open — an asset in this state isn't "missing". */
+const OPEN_DISPOSAL = ["REQUESTED", "COMMITTEE_REVIEW", "APPROVED"];
+
+// GET /asset-audit/location-readiness?branchId=&departmentId=&floor=&block=&room=
+// How much of a prospective scope the guided audit can actually direct someone
+// to. Shown on the create-audit screen so gaps get fixed before audit day.
+export const getLocationReadiness = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const data = await buildLocationReadiness({
+      branchId: req.query.branchId ? Number(req.query.branchId) : null,
+      departmentId: req.query.departmentId ? Number(req.query.departmentId) : null,
+      floor: (req.query.floor as string) || null,
+      block: (req.query.block as string) || null,
+      room: (req.query.room as string) || null,
+    });
+    res.json({ data });
+  } catch (error: any) {
+    console.error("Error building location readiness:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/:id/checklist?groupBy=&assetStatus=&itemStatus=&q=
+export const getChecklist = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const data = await buildChecklist(Number(req.params.id), {
+      groupBy: req.query.groupBy as string,
+      assetStatus: req.query.assetStatus as string,
+      itemStatus: req.query.itemStatus as string,
+      sticker: req.query.sticker as string,
+      q: req.query.q as string,
+    });
+    if (!data) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data });
+  } catch (error: any) {
+    console.error("Error building checklist:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/:id/completion-check
+// Lets the UI explain why "Complete audit" is disabled before it is pressed.
+export const getCompletionCheck = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    const audit = await prisma.assetAudit.findUnique({ where: { id: auditId } });
+    if (!audit) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const blockers = await pendingRequiredItems(auditId);
+    res.json({
+      data: {
+        canComplete: blockers.length === 0 && audit.status === "IN_PROGRESS",
+        auditStatus: audit.status,
+        blockingCount: blockers.length,
+        examples: blockers.slice(0, 10).map((b) => ({
+          itemId: b.id,
+          assetCode: b.asset?.assetId ?? null,
+          assetName: b.asset?.assetName ?? null,
+        })),
+      },
+    });
+  } catch (error: any) {
+    console.error("Error checking completion:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  RUN PLAN — "how do you want to start?" then work the assets
+//  Built from AssetLocation text, so it works whether or not a floor plan or
+//  traced rooms exist. See utilis/auditRunPlan.ts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const asRunMode = (v: any): RunMode => {
+  const m = String(v ?? "").toUpperCase();
+  return (RUN_MODES as string[]).includes(m) ? (m as RunMode) : ("FLOOR" as RunMode);
+};
+
+// GET /asset-audit/:id/start-options?mode=FLOOR|DEPARTMENT|ASSET
+// The floors / departments this audit actually covers, with what is left in each.
+export const getStartOptions = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    const audit = await prisma.assetAudit.findUnique({ where: { id: auditId } });
+    if (!audit) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const mode = req.query.mode ? asRunMode(req.query.mode) : (((audit as any).groupBy as RunMode) || "FLOOR");
+    const result = await buildStartOptions(auditId, mode);
+    if (!result) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data: result });
+  } catch (error: any) {
+    console.error("Error building start options:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/:id/run?mode=&group=&fromItemId=
+// The ordered walk through one floor/department: where you are and what's next.
+export const getRun = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    const result = await buildRun(auditId, {
+      mode: req.query.mode ? asRunMode(req.query.mode) : undefined,
+      group: req.query.group != null ? String(req.query.group) : null,
+      fromItemId: req.query.fromItemId ? Number(req.query.fromItemId) : null,
+      placement: req.query.placement as any,
+    });
+    if (!result) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data: result });
+  } catch (error: any) {
+    console.error("Error building run plan:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};
+
+// GET /asset-audit/:id/guidance?roomId=&fromItemId=
+// Guidance mode: one room at a time with ready-to-speak lines, instead of a plan
+// covered in pins. Returns the room being worked, its assets in sweep order, the
+// next room, and the remaining route.
+export const getGuidance = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const roomId = req.query.roomId ? Number(req.query.roomId) : null;
+    const fromItemId = req.query.fromItemId ? Number(req.query.fromItemId) : null;
+    const stopIndex = req.query.stopIndex != null ? Number(req.query.stopIndex) : null;
+    const result = await buildGuidance(Number(req.params.id), { roomId, fromItemId, stopIndex });
+    if (!result) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data: result });
+  } catch (error: any) {
+    console.error("Error building guidance:", error);
     res.status(500).json({ message: "Internal server error", error: error.message });
   }
 };

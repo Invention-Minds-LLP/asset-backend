@@ -6,8 +6,23 @@ import path from "path";
 import { Client } from "basic-ftp";
 import { AcknowledgementPurpose } from "@prisma/client";
 import { logAction } from "../audit-trail/audit-trail.controller";
-import { notify, getDepartmentHODs, getSecurityTeam } from "../../utilis/notificationHelper";
-import { syncCurrentBranch } from "../../lib/assetLocation";
+import { notify, getDepartmentHODs, getSecurityTeam, getEmployeeIdsByRole, getAdminIds } from "../../utilis/notificationHelper";
+import { syncCurrentBranch, carryFloorPlanPin } from "../../lib/assetLocation";
+
+// Who may sign off a permanent transfer. Same shape as asset-indent's
+// MGMT_APPROVAL_ROLES — matched against User.role (the JWT role), which
+// carries ADMIN on top of the EmployeeRole enum values.
+const MGMT_APPROVAL_ROLES = ["ADMIN", "CEO_COO", "FINANCE", "OPERATIONS"];
+
+// Notification recipients for management sign-off. ADMIN lives on User.role,
+// the rest on Employee.role, so both sources are merged. Falls back to admins
+// so a request is never left with nobody able to action it.
+async function getTransferMgmtApproverIds(): Promise<number[]> {
+  const byEmployeeRole = await getEmployeeIdsByRole(["CEO_COO", "FINANCE", "OPERATIONS"]);
+  const admins = await getAdminIds();
+  const ids = [...new Set([...byEmployeeRole, ...admins])];
+  return ids.length > 0 ? ids : admins;
+}
 
 
 const FTP_CONFIG = {
@@ -102,9 +117,16 @@ export const requestAssetTransfer = async (
 
     logAction({ entityType: "TRANSFER", entityId: transfer.id, action: "CREATE", description: `Transfer request for asset #${assetId} (${transferType})`, performedById: req.user?.employeeDbId });
 
-    // Notify HODs about transfer request
-    const hodIds = await getDepartmentHODs(asset.departmentId);
-    notify({ type: "TRANSFER", title: "Transfer Request", message: `Asset transfer requested for ${asset.assetName || asset.assetId} (${transferType})`, recipientIds: hodIds, assetId: asset.id, createdById: req.user?.employeeDbId, channel: "BOTH", templateCode: "TRANSFER_REQUEST", templateData: { assetName: asset.assetName || asset.assetId, transferType } });
+    // Route the notification to whoever acts next. Permanent transfers sit with
+    // management first — the HOD is only pulled in once management signs off
+    // (see managementApproveTransfer), so notifying them now would be noise.
+    if (transfer.managementApprovalStatus === "PENDING") {
+      const mgmtIds = await getTransferMgmtApproverIds();
+      notify({ type: "TRANSFER", title: "Transfer Awaiting Management Approval", message: `Permanent transfer requested for ${asset.assetName || asset.assetId} (${transferType})`, recipientIds: mgmtIds, assetId: asset.id, createdById: req.user?.employeeDbId, channel: "BOTH" });
+    } else {
+      const hodIds = await getDepartmentHODs(asset.departmentId);
+      notify({ type: "TRANSFER", title: "Transfer Request", message: `Asset transfer requested for ${asset.assetName || asset.assetId} (${transferType})`, recipientIds: hodIds, assetId: asset.id, createdById: req.user?.employeeDbId, channel: "BOTH", templateCode: "TRANSFER_REQUEST", templateData: { assetName: asset.assetName || asset.assetId, transferType } });
+    }
 
     res.status(201).json({
       message: "Transfer request submitted",
@@ -136,6 +158,14 @@ export const approveAssetTransfer = async (
 
     if (transfer.status !== "REQUESTED") {
       res.status(400).json({ message: "Only requested transfers can be approved" });
+      return;
+    }
+
+    // Permanent transfers are gated on management sign-off (set at request time).
+    // Without this the HOD could approve — and physically move the asset — while
+    // management is still deciding.
+    if (transfer.managementApprovalStatus === "PENDING") {
+      res.status(400).json({ message: "This transfer is awaiting management approval and cannot be approved yet" });
       return;
     }
 
@@ -173,14 +203,29 @@ export const approveAssetTransfer = async (
         }
 
         if (targetBranchId) {
+          const isInternal = transfer.transferType === "INTERNAL";
+          const place = {
+            branchId: targetBranchId,
+            block: isInternal ? transfer.block : null,
+            floor: isInternal ? transfer.floor : null,
+            room: isInternal ? transfer.room : null,
+          };
+
+          // Keep the floor-plan pin only on an internal move that stays in the
+          // same room. Anything leaving the building (SERVICE / TEMP_USE /
+          // BRANCH) must not keep a pin on a plan it is no longer standing on.
+          const pin = isInternal
+            ? carryFloorPlanPin(currentLocation, place)
+            : { floorPlanId: null, planX: null, planY: null };
+
           newLocation = await tx.assetLocation.create({
             data: {
               assetId: transfer.assetId,
-              branchId: targetBranchId,
-              block: transfer.transferType === "INTERNAL" ? transfer.block : null,
-              floor: transfer.transferType === "INTERNAL" ? transfer.floor : null,
-              room: transfer.transferType === "INTERNAL" ? transfer.room : null,
-              isActive: true
+              ...place,
+              ...pin,
+              isActive: true,
+              // An approved transfer is an applied move, not a request.
+              status: "APPROVED"
             }
           });
         }
@@ -437,7 +482,10 @@ export const returnTransferredAsset = async (
       data: {
         assetId: originalTransfer.assetId,
         branchId: originalTransfer.fromBranchId,
-        isActive: true
+        isActive: true,
+        // Applied move, not a request. The pin is deliberately left null: the
+        // asset is back at its origin branch with no room recorded yet.
+        status: "APPROVED"
       }
     });
 
@@ -757,7 +805,14 @@ export const getMyPendingTransferApprovals = async (
         status: "REQUESTED",
         asset: {
           departmentId: me.departmentId
-        }
+        },
+        // Permanent transfers still with management aren't actionable by the HOD
+        // yet. Spelled out as an OR because `not` on a nullable column drops the
+        // NULL rows (temporary transfers / returns) that must stay visible.
+        OR: [
+          { managementApprovalStatus: null },
+          { managementApprovalStatus: { not: "PENDING" } }
+        ]
       },
       include: {
         asset: true,
@@ -994,7 +1049,9 @@ export const completeTransferredAssetReturn = async (
       data: {
         assetId: returnRequest.assetId,
         branchId: returnRequest.toBranchId,
-        isActive: true
+        isActive: true,
+        // Applied move, not a request. Pin left null — no room recorded yet.
+        status: "APPROVED"
       }
     });
 
@@ -1158,10 +1215,15 @@ export const getTransferredAssetReturnChecklist = async (
 // POST /api/transfers/assets/transfer/:id/management-approve
 // Management approves or rejects a permanent transfer before HOD approval
 export const getPendingMgmtApprovals = async (
-  _req: AuthenticatedRequest,
+  req: AuthenticatedRequest,
   res: Response
 ) => {
   try {
+    if (!MGMT_APPROVAL_ROLES.includes(req.user?.role ?? "")) {
+      res.status(403).json({ message: "Only management can view pending transfer approvals" });
+      return;
+    }
+
     const rows = await prisma.assetTransferHistory.findMany({
       where: { managementApprovalStatus: "PENDING" } as any,
       include: {
@@ -1187,6 +1249,11 @@ export const managementApproveTransfer = async (
     const transferId = Number(req.params.id);
     const { decision, remarks } = req.body; // APPROVED | REJECTED
 
+    if (!MGMT_APPROVAL_ROLES.includes(req.user?.role ?? "")) {
+      res.status(403).json({ message: "Only management can process transfer approvals" });
+      return;
+    }
+
     if (!["APPROVED", "REJECTED"].includes(decision)) {
       res.status(400).json({ message: "decision must be APPROVED or REJECTED" });
       return;
@@ -1205,6 +1272,8 @@ export const managementApproveTransfer = async (
       return;
     }
 
+    const rejected = decision === "REJECTED";
+
     const updated = await prisma.assetTransferHistory.update({
       where: { id: transferId },
       data: {
@@ -1213,9 +1282,30 @@ export const managementApproveTransfer = async (
         managementApprovedAt: new Date(),
         managementRemarks: remarks ?? null,
         // If rejected, close the transfer
-        status: decision === "REJECTED" ? "REJECTED" : "REQUESTED",
+        status: rejected ? "REJECTED" : "REQUESTED",
+        rejectedAt: rejected ? new Date() : null,
+        rejectionReason: rejected ? (remarks ?? "Rejected by management") : null,
       } as any,
     });
+
+    logAction({ entityType: "TRANSFER", entityId: transferId, action: rejected ? "STATUS_CHANGE" : "APPROVE", description: `Transfer #${transferId} ${decision.toLowerCase()} by management`, performedById: req.user?.employeeDbId });
+
+    const asset = await prisma.asset.findUnique({
+      where: { id: transfer.assetId },
+      select: { assetId: true, assetName: true, departmentId: true },
+    });
+
+    // Tell the requester either way; on approval the ball moves to the HOD.
+    if (transfer.requestedById) {
+      notify({ type: "TRANSFER", title: `Transfer ${rejected ? "Rejected" : "Approved"} by Management`, message: `Transfer for ${asset?.assetName || asset?.assetId || `asset #${transfer.assetId}`} was ${decision.toLowerCase()} by management${remarks ? `. Remarks: ${remarks}` : ""}`, recipientIds: [transfer.requestedById], assetId: transfer.assetId, createdById: req.user?.employeeDbId });
+    }
+
+    if (!rejected) {
+      const hodIds = await getDepartmentHODs(asset?.departmentId);
+      if (hodIds.length > 0) {
+        notify({ type: "TRANSFER", title: "Transfer Request", message: `Asset transfer requested for ${asset?.assetName || asset?.assetId} (${transfer.transferType}) — management approved, awaiting your approval`, recipientIds: hodIds, assetId: transfer.assetId, createdById: req.user?.employeeDbId, channel: "BOTH", templateCode: "TRANSFER_REQUEST", templateData: { assetName: asset?.assetName || asset?.assetId || "", transferType: transfer.transferType } });
+      }
+    }
 
     res.json({ message: `Transfer ${decision.toLowerCase()} by management`, transfer: updated });
   } catch (err: any) {

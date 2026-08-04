@@ -59,7 +59,12 @@ export function buildRoleFilter(user: any): any {
   const employeeDbId = user?.employeeDbId || user?.employeeId || user?.id;
 
   if (role === "HOD") return { departmentId: Number(departmentId) };
-  if (role === "SUPERVISOR") return { supervisorId: Number(employeeDbId) };
+  if (role === "SUPERVISOR") return {
+    OR: [
+      { supervisorId: Number(employeeDbId) },
+      { supervisors: { some: { employeeId: Number(employeeDbId), isActive: true } } },
+    ],
+  };
   return {}; // ADMIN and others see everything
 }
 
@@ -102,8 +107,11 @@ export function buildRawWhereClause(query: any, user: any): { clause: string; pa
     params.push(Number(user.departmentId));
   } else if (role === "SUPERVISOR") {
     const empId = user?.employeeDbId || user?.employeeId || user?.id;
-    conditions.push("a.supervisorId = ?");
-    params.push(Number(empId));
+    // Primary supervisor OR a co-supervisor in the AssetSupervisor set.
+    conditions.push(
+      "(a.supervisorId = ? OR EXISTS (SELECT 1 FROM assetsupervisor asv WHERE asv.assetId = a.id AND asv.employeeId = ? AND asv.isActive = 1))"
+    );
+    params.push(Number(empId), Number(empId));
   }
 
   // User filters

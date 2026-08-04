@@ -2,6 +2,14 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { ExternalAuditorRequest } from "../../middleware/externalAuditorMiddleware";
 import { buildAuditMap, computeNextItem } from "../../utilis/auditMap";
+import {
+  buildChecklist,
+  pendingRequiredItems,
+  resolveSticker,
+  applyStickerToAsset,
+  applyLocationNote,
+} from "../../utilis/auditChecklist";
+import { buildStartOptions, buildRun, RUN_MODES, RunMode } from "../../utilis/auditRunPlan";
 
 // External auditor's scoped view onto audits. Every endpoint must funnel
 // through requireAuditAccess() before reading/writing audit data — that's
@@ -186,6 +194,9 @@ export const verifyMyAuditItem = async (req: ExternalAuditorRequest, res: Respon
       actualLocation,
       actualCondition,
       remarks,
+      stickerStatus,
+      scanned,
+      locationNote,
     } = req.body || {};
 
     if (!status || !["VERIFIED", "MISSING", "MISMATCH"].includes(status)) {
@@ -195,7 +206,7 @@ export const verifyMyAuditItem = async (req: ExternalAuditorRequest, res: Respon
 
     const item = await prisma.assetAuditItem.findUnique({
       where: { id: itemId },
-      select: { id: true, auditId: true },
+      select: { id: true, auditId: true, assetId: true },
     });
 
     if (!item) {
@@ -210,6 +221,9 @@ export const verifyMyAuditItem = async (req: ExternalAuditorRequest, res: Respon
       return;
     }
 
+    // A successful scan proves the sticker is present and readable.
+    const sticker = resolveSticker(stickerStatus, scanned);
+
     const updated = await prisma.assetAuditItem.update({
       where: { id: itemId },
       data: {
@@ -223,8 +237,15 @@ export const verifyMyAuditItem = async (req: ExternalAuditorRequest, res: Respon
         // verifiedById stays null — external auditors aren't Users.
         // verifiedByExternalAuditorId carries the attribution instead.
         verifiedByExternalAuditorId: req.externalAuditor?.id ?? null,
+        ...(sticker ? { stickerStatus: sticker, stickerCheckedAt: new Date() } : {}),
       },
     });
+
+    // qrStickeredById stays null — external auditors aren't Employees — but the
+    // observation still drives Asset.qrStickered and the audit item keeps the
+    // attribution via verifiedByExternalAuditorId.
+    await applyStickerToAsset(sticker, item.assetId, item.auditId, null);
+    await applyLocationNote(locationNote, item.assetId);
 
     res.json({ data: updated, message: "Audit item verified" });
   } catch (error: any) {
@@ -245,6 +266,25 @@ export const completeMyAudit = async (req: ExternalAuditorRequest, res: Response
 
     if (access.status !== "IN_PROGRESS") {
       res.status(400).json({ message: "Audit must be in IN_PROGRESS status to complete" });
+      return;
+    }
+
+    // Same rule as the internal flow: every ACTIVE asset must be accounted for.
+    // An external audit is the one that most needs this guarantee, so it is not
+    // a softer check here.
+    const blockers = await pendingRequiredItems(auditId);
+    if (blockers.length) {
+      res.status(400).json({
+        message:
+          `${blockers.length} active asset${blockers.length === 1 ? "" : "s"} still unchecked. ` +
+          `Mark each one verified, missing or mismatch before completing the audit.`,
+        blockingCount: blockers.length,
+        examples: blockers.slice(0, 10).map((b) => ({
+          itemId: b.id,
+          assetCode: b.asset?.assetId ?? null,
+          assetName: b.asset?.assetName ?? null,
+        })),
+      });
       return;
     }
 
@@ -271,5 +311,117 @@ export const completeMyAudit = async (req: ExternalAuditorRequest, res: Response
   } catch (error: any) {
     console.error("external completeMyAudit error:", error);
     res.status(500).json({ message: "Failed to complete audit" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Parity with the internal auditor screens.
+//  Same shared builders, same shapes — only the scope gate differs, so the two
+//  flows cannot drift apart again.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const asRunMode = (v: any): RunMode => {
+  const m = String(v ?? "").toUpperCase();
+  return (RUN_MODES as string[]).includes(m) ? (m as RunMode) : ("FLOOR" as RunMode);
+};
+
+// GET /external-audit/audits/:id/checklist
+export const getMyAuditChecklist = async (req: ExternalAuditorRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    if (!(await requireAuditAccess(req, auditId))) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const data = await buildChecklist(auditId, {
+      groupBy: req.query.groupBy as string,
+      assetStatus: req.query.assetStatus as string,
+      itemStatus: req.query.itemStatus as string,
+      sticker: req.query.sticker as string,
+      q: req.query.q as string,
+    });
+    if (!data) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data });
+  } catch (error: any) {
+    console.error("external getMyAuditChecklist error:", error);
+    res.status(500).json({ message: "Failed to load checklist" });
+  }
+};
+
+// GET /external-audit/audits/:id/start-options?mode=
+export const getMyAuditStartOptions = async (req: ExternalAuditorRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    const access = await requireAuditAccess(req, auditId);
+    if (!access) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const mode = req.query.mode ? asRunMode(req.query.mode) : (((access as any).groupBy as RunMode) || "FLOOR");
+    const data = await buildStartOptions(auditId, mode);
+    if (!data) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data });
+  } catch (error: any) {
+    console.error("external getMyAuditStartOptions error:", error);
+    res.status(500).json({ message: "Failed to load start options" });
+  }
+};
+
+// GET /external-audit/audits/:id/run?mode=&group=&fromItemId=
+export const getMyAuditRun = async (req: ExternalAuditorRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    if (!(await requireAuditAccess(req, auditId))) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const data = await buildRun(auditId, {
+      mode: req.query.mode ? asRunMode(req.query.mode) : undefined,
+      group: req.query.group != null ? String(req.query.group) : null,
+      fromItemId: req.query.fromItemId ? Number(req.query.fromItemId) : null,
+      placement: req.query.placement as any,
+    });
+    if (!data) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    res.json({ data });
+  } catch (error: any) {
+    console.error("external getMyAuditRun error:", error);
+    res.status(500).json({ message: "Failed to load run plan" });
+  }
+};
+
+// GET /external-audit/audits/:id/completion-check
+export const getMyAuditCompletionCheck = async (req: ExternalAuditorRequest, res: Response) => {
+  try {
+    const auditId = Number(req.params.id);
+    const access = await requireAuditAccess(req, auditId);
+    if (!access) {
+      res.status(404).json({ message: "Audit not found" });
+      return;
+    }
+    const blockers = await pendingRequiredItems(auditId);
+    res.json({
+      data: {
+        canComplete: blockers.length === 0 && access.status === "IN_PROGRESS",
+        auditStatus: access.status,
+        blockingCount: blockers.length,
+        examples: blockers.slice(0, 10).map((b) => ({
+          itemId: b.id,
+          assetCode: b.asset?.assetId ?? null,
+          assetName: b.asset?.assetName ?? null,
+        })),
+      },
+    });
+  } catch (error: any) {
+    console.error("external getMyAuditCompletionCheck error:", error);
+    res.status(500).json({ message: "Failed to check completion" });
   }
 };

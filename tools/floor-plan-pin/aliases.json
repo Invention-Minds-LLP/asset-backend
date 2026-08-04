@@ -1,0 +1,151 @@
+{
+  "_readme": [
+    "Hand-maintained lookup table. This is the part the drawings cannot give you.",
+    "",
+    "floors  : your sheet's Floor value  ->  the FloorPlan.floor value the app uses.",
+    "sheets  : FloorPlan.floor value     ->  the extract-labels slug to search in.",
+    "blocks  : your sheet's Block value  ->  null = use the sheets map above,",
+    "                                       'NO_PLAN' = no drawing exists, never match.",
+    "rooms   : room number from the Room column or from a 'room no NNNN' placement",
+    "          label -> the drawing label to pin on. EMPTY BY DESIGN: the as-built",
+    "          drawings contain no room numbers (verified — the only 4-digit tokens",
+    "          are door/window sizes). Fill these in as you learn them; every entry",
+    "          you add converts a whole group of assets from manual to automatic.",
+    "departments : Department value -> ordered list of {floor, match} candidates.",
+    "          'match' is a case-insensitive regex tested against the extracted",
+    "          label text. First candidate whose floor equals the asset's floor and",
+    "          whose regex hits a label on that sheet wins.",
+    "keywords : substring found in the Placement Label -> same candidate shape.",
+    "          Checked before departments, because a placement label is more",
+    "          specific than a department name."
+  ],
+
+  "floors": {
+    "BASEMENT": "Lower Ground",
+    "LOWER GROUND": "Lower Ground",
+    "LOWER GROUND FLOOR": "Lower Ground",
+    "GROUND FLOOR": "Ground",
+    "GROUND": "Ground",
+    "FIRST FLOOR": "First",
+    "FIRST": "First",
+    "SECOND FLOOR": "Second",
+    "SECOND": "Second",
+    "THIRD FLOOR": "Third",
+    "THIRD": "Third"
+  },
+
+  "sheets": {
+    "Lower Ground": "1-jmr-as-built-arch-dwg-28mar2023-lower-ground-floor-plan-1",
+    "Ground": "2-jmr-as-built-arch-dwg-28mar2023-ground-floor-plan-1",
+    "First": "3-jmr-as-built-arch-dwg-28mar2023-first-floor-plan-1",
+    "Second": "wd-2nd-floor-05sept2023-1",
+    "Third": "5-jmr-as-built-arch-dwg-28mar2023-third-floor-plan-1"
+  },
+
+  "blocks": {
+    "MAIN BUILDING": null,
+    "ADMIN BLOCK": "NO_PLAN"
+  },
+
+  "rooms": {},
+
+  "keywords": {
+    "admin block": [{ "noPlan": "placement label says Admin Block, which has no drawing" }],
+    "inside icu": [{ "floor": "First", "match": "ICU WARD - 03 BEDS" }],
+    "liquid plant": [{ "floor": "*", "match": "MAIN STORE" }],
+    "bed lift": [{ "floor": "*", "match": "PROPOSED BED LIFT" }],
+    "guest lift": [{ "floor": "*", "match": "^LIFT" }],
+    "ahu room": [
+      { "floor": "First", "match": "SPACE FOR AHU" },
+      { "floor": "Ground", "match": "GF AHU AREA" }
+    ],
+    "cssd": [{ "floor": "*", "match": "^CSSD" }],
+    "sicu": [{ "floor": "First", "match": "ICU WARD" }],
+    "medical transcription": [{ "floor": "First", "match": "NURSE STATION - 7" }],
+    "ip billing": [
+      { "floor": "Second", "match": "IPD BILLING" },
+      { "floor": "Ground", "match": "BILLING COUNTER" }
+    ],
+    "house keeping": [{ "floor": "Second", "match": "HOUSE KEEPING" }],
+    "obg nurshing station": [{ "floor": "First", "match": "LABOUR ROOM-1" }],
+    "nursing obg": [{ "floor": "First", "match": "LABOUR ROOM-1" }],
+    "nursing superdent": [{ "floor": "Second", "match": "NURSING DIRECTOR" }],
+    "nurse educator": [{ "floor": "*", "match": "NURSE STATION" }],
+    "nursing a wing": [{ "floor": "*", "match": "NURSE STATION - 1" }],
+    "nursing b wing": [{ "floor": "*", "match": "NURSE STATION - 2" }],
+    "radiology waiting": [{ "floor": "Lower Ground", "match": "WAITING AREA 28" }],
+    "dietry": [{ "floor": "Lower Ground", "match": "DIETARY KITCHEN" }],
+    "medical laboratory": [{ "floor": "Lower Ground", "match": "HEMATOLOGY LAB" }]
+  },
+
+  "departments": {
+    "MRD": [{ "floor": "Lower Ground", "match": "MEDICAL RECORDS" }],
+    "Physiotheraphy": [{ "floor": "Lower Ground", "match": "PHYSIOTHERAPY" }],
+    "CSSD": [{ "floor": "*", "match": "^CSSD" }],
+    "Medical Laboratory": [
+      { "floor": "Lower Ground", "match": "HEMATOLOGY LAB" },
+      { "floor": "Lower Ground", "match": "CLINICAL PATHOLOGY" }
+    ],
+    "RADIOLOGY": [
+      { "floor": "Lower Ground", "match": "CT SCAN" },
+      { "floor": "Lower Ground", "match": "^MRI" },
+      { "floor": "Lower Ground", "match": "X - RAY-1" }
+    ],
+    "Dietician": [{ "floor": "Lower Ground", "match": "DIETARY KITCHEN" }],
+    "Stores": [
+      { "floor": "Lower Ground", "match": "MAIN STORE" },
+      { "floor": "Ground", "match": "^STORE" }
+    ],
+    "Main Store": [{ "floor": "Lower Ground", "match": "MAIN STORE" }],
+    "IP Pharmacy": [
+      { "floor": "Ground", "match": "PHARMACY ROOM" },
+      { "floor": "Lower Ground", "match": "PHARMACY STORE" }
+    ],
+    "Ayurveda": [
+      { "floor": "Lower Ground", "match": "THERAPY ROOM 1" },
+      { "floor": "Lower Ground", "match": "PANCHAKARMA" }
+    ],
+    "Billing": [
+      { "floor": "Ground", "match": "BILLING COUNTER" },
+      { "floor": "Second", "match": "IPD BILLING" }
+    ],
+    "Reception": [
+      { "floor": "Ground", "match": "RECEPTION / WAITING LOBBY" },
+      { "floor": "Lower Ground", "match": "^RECEPTION" }
+    ],
+    "OPD": [
+      { "floor": "Ground", "match": "OPD RECEPTION" },
+      { "floor": "Lower Ground", "match": "OPD - 01" }
+    ],
+    "Operations": [{ "floor": "Ground", "match": "SENIOR OPERATIONS MANAGER" }],
+    "MICU": [{ "floor": "First", "match": "MICU - 11 BEDS" }],
+    "micu2": [{ "floor": "First", "match": "MICU/ PICU" }],
+    "picu": [{ "floor": "First", "match": "PICU \\(3\\) BEDS" }],
+    "nicu": [{ "floor": "First", "match": "NICU" }],
+    "OT": [{ "floor": "First", "match": "OT COMPLEX" }],
+    "Information Techonology": [
+      { "floor": "First", "match": "SERVER ROOM" },
+      { "floor": "First", "match": "IT ROOM" }
+    ],
+    "DNS": [{ "floor": "Second", "match": "NURSING DIRECTOR" }],
+    "Nursing superdent": [{ "floor": "Second", "match": "NURSING DIRECTOR" }],
+    "House Keeping": [{ "floor": "Second", "match": "HOUSE KEEPING" }],
+    "Nursing OBG": [{ "floor": "First", "match": "LABOUR ROOM-1" }],
+    "Nurse Educator": [{ "floor": "*", "match": "NURSE STATION" }],
+    "Nursing": [{ "floor": "*", "match": "NURSE STATION" }],
+    "Chemotherapy": [{ "floor": "Second", "match": "CHEMOTHERAPY ROOM" }],
+    "Dialysis": [{ "floor": "Ground", "match": "DIALYSIS" }],
+    "Emergency": [{ "floor": "Ground", "match": "EMERGENCY WARD" }],
+    "Casualty": [{ "floor": "Ground", "match": "CASUALTY" }]
+  },
+
+  "_unmapped_on_purpose": {
+    "note": "These departments have no label anywhere in the 5 drawings, and most of them sit in ADMIN BLOCK, which has no drawing at all. They will always land in unmatched.csv until either an Admin Block plan is uploaded or you add a rooms/keywords entry pointing them at a location on an existing sheet.",
+    "departments": [
+      "Accounts", "Purchase", "Human Resources", "Finance", "Marketing",
+      "Medical Transcription", "Telephone Console", "Biomedical", "Infection Control",
+      "Quality Assurance", "Maintenance and Engineering", "CSR", "Swasthya Bharathi",
+      "ENT", "Opthamology"
+    ]
+  }
+}

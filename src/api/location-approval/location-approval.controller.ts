@@ -3,7 +3,7 @@ import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
-import { syncCurrentBranch } from "../../lib/assetLocation";
+import { syncCurrentBranch, carryFloorPlanPin } from "../../lib/assetLocation";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Location Approval module (modeled on the asset-transfer flow).
@@ -103,6 +103,23 @@ export const requestLocationChange = async (req: AuthenticatedRequest, res: Resp
 
     const data = locationDataFrom({ ...req.body, branchId });
 
+    // Carry the asset's floor-plan pin onto the replacement row when the place
+    // itself is unchanged. Without this, every approved edit — even one that
+    // only touched the mount type — dropped the asset off the floor map, the
+    // zone stats and audit guidance. Snapshotted at request time alongside the
+    // rest of the payload, so what the approver signs off is what gets applied.
+    const currentActive = await prisma.assetLocation.findFirst({
+      where: { assetId: asset.id, isActive: true },
+      orderBy: { id: "desc" },
+      select: { branchId: true, block: true, floor: true, room: true, floorPlanId: true, planX: true, planY: true },
+    });
+    const pin = carryFloorPlanPin(currentActive, {
+      branchId: Number(branchId),
+      block: data.block,
+      floor: data.floor,
+      room: data.room,
+    });
+
     // ── Auto-approve path (management/admin): apply immediately. ──
     if (level === null) {
       const result = await prisma.$transaction(async (tx) => {
@@ -111,6 +128,7 @@ export const requestLocationChange = async (req: AuthenticatedRequest, res: Resp
           data: {
             assetId: asset.id,
             ...data,
+            ...pin,
             status: "APPROVED",
             isActive: true,
             requestedById: me,
@@ -140,6 +158,7 @@ export const requestLocationChange = async (req: AuthenticatedRequest, res: Resp
       data: {
         assetId: asset.id,
         ...data,
+        ...pin,
         status: "REQUESTED",
         isActive: false,
         requestedById: me,

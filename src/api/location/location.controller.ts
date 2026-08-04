@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
-import { syncCurrentBranch } from "../../lib/assetLocation";
+import { syncCurrentBranch, carryFloorPlanPin } from "../../lib/assetLocation";
 
 export const addAssetLocation = async (
   req: AuthenticatedRequest,
@@ -29,6 +29,13 @@ export const addAssetLocation = async (
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // 0️⃣ Read the row being replaced, so its floor-plan pin can be carried
+      //    across when the asset hasn't actually moved.
+      const previous = await tx.assetLocation.findFirst({
+        where: { assetId, isActive: true },
+        orderBy: { id: "desc" }
+      });
+
       // 1️⃣ Close previous active locations
       await tx.assetLocation.updateMany({
         where: { assetId, isActive: true },
@@ -45,6 +52,10 @@ export const addAssetLocation = async (
           room,
           employeeResponsibleId,
             departmentSnapshot,
+          ...carryFloorPlanPin(previous, { branchId, block, floor, room }),
+          // Written directly, so it is already in force — the REQUESTED default
+          // would hide the asset from every audit scope query.
+          status: "APPROVED",
           placementProfile: placementProfile ?? null,
           placementType: placementType ?? null,
           placementLabel: placementLabel ?? null,
@@ -96,6 +107,12 @@ export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Resp
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // 0) read the row being replaced, to carry its floor-plan pin across
+      const previous = await tx.assetLocation.findFirst({
+        where: { assetId, isActive: true },
+        orderBy: { id: "desc" }
+      });
+
       // 1) deactivate current active location(s)
       await tx.assetLocation.updateMany({
         where: { assetId, isActive: true },
@@ -112,6 +129,9 @@ export const updateCurrentLocation = async (req: AuthenticatedRequest, res: Resp
           room,
           employeeResponsibleId,
             departmentSnapshot,
+          ...carryFloorPlanPin(previous, { branchId, block, floor, room }),
+          // Written directly, so it is already in force.
+          status: "APPROVED",
           placementProfile: placementProfile ?? null,
           placementType: placementType ?? null,
           placementLabel: placementLabel ?? null,

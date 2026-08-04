@@ -1361,6 +1361,10 @@ export async function importAssetsExcel(req: Request, res: Response) {
                         departmentSnapshot: toStringOrNull(row.departmentSnapshot),
                         employeeResponsibleId,
                         isActive: isActiveLocation,
+                        // Imported placements are already-applied facts, not
+                        // pending requests — the default REQUESTED would hide
+                        // them from every audit scope query.
+                        status: 'APPROVED',
                     }
                 });
 

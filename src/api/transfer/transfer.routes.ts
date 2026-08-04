@@ -30,8 +30,11 @@ router.get("/assets/:assetId/transfer-history", authenticateToken, getTransferHi
 router.get("/assets/transfer/pending", authenticateToken, getPendingTransferRequests);
 router.get("/assets/transfer/my-pending-approvals", authenticateToken, getMyPendingTransferApprovals);
 router.get("/assets/transfer/pending-mgmt-approvals", authenticateToken, getPendingMgmtApprovals);
-router.post("/assets/transfer/:id/return", authenticateToken, requestTransferredAssetReturn);
 router.post("/assets/transfer/:id/approve-return", authenticateToken, approveTransferredAssetReturn);
+// A return row is an AssetTransferHistory row in REQUESTED state, so the same
+// HOD-scoped rejection handler applies — it just closes the return request and
+// leaves the parent transfer approved, so the return can be re-raised.
+router.post("/assets/transfer/:id/reject-return", authenticateToken, rejectAssetTransfer);
 router.get(
   "/assets/transfer/:id/return-checklist",
   authenticateToken,

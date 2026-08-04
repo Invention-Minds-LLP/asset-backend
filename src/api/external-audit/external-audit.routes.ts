@@ -5,6 +5,10 @@ import {
   getMyAuditById,
   getMyAuditFloorMap,
   getMyAuditNextItem,
+  getMyAuditChecklist,
+  getMyAuditStartOptions,
+  getMyAuditRun,
+  getMyAuditCompletionCheck,
   startMyAudit,
   verifyMyAuditItem,
   completeMyAudit,
@@ -20,6 +24,10 @@ router.get("/audits", listMyAudits);
 router.get("/audits/:id", getMyAuditById);
 router.get("/audits/:id/floor-map", getMyAuditFloorMap);
 router.get("/audits/:id/next-item", getMyAuditNextItem);
+router.get("/audits/:id/checklist", getMyAuditChecklist);
+router.get("/audits/:id/start-options", getMyAuditStartOptions);
+router.get("/audits/:id/run", getMyAuditRun);
+router.get("/audits/:id/completion-check", getMyAuditCompletionCheck);
 router.put("/audits/:id/start", startMyAudit);
 router.put("/audits/:id/complete", completeMyAudit);
 router.put("/audit-items/:itemId/verify", verifyMyAuditItem);

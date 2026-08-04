@@ -34,6 +34,13 @@ export const authenticateToken = async (
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
         req.user = {
+      // `id` is the Employee.id, matching mobileAuthMiddleware and every
+      // *ById column in the schema (they all FK to Employee). It was missing
+      // here, so controllers reading req.user.id — audit's conductedById /
+      // verifiedById / qrStickeredById, disposal's requestedById /
+      // approvedById / completedById, cost-analysis's recordedById — silently
+      // persisted NULL for every web request.
+      id: decoded.employeeDbId,
       userId: decoded.userId,
       employeeID: decoded.employeeID,
       employeeDbId: decoded.employeeDbId,

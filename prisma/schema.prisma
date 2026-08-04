@@ -3135,6 +3135,12 @@ model AssetAuditItem {
   // Disposed / condemned ones are listed for completeness but never block it.
   isRequired Boolean @default(true)
 
+  // Was the QR sticker physically on the asset when it was checked? A successful
+  // scan proves PRESENT by definition; the manual path has to ask. Recorded here
+  // as audit evidence as well as pushed onto Asset.qrStickered.
+  stickerStatus    String? // PRESENT | MISSING | DAMAGED | NOT_APPLICABLE
+  stickerCheckedAt DateTime?
+
   locationMatch   Boolean?
   conditionMatch  Boolean?
   actualLocation  String?
