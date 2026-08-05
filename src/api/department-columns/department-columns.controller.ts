@@ -7,8 +7,8 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 // the keys to validate what gets saved. Keep the two in sync.
 export const COLUMN_KEYS = [
   "assetId", "storeAssetId", "referenceCode", "assetName", "assetType",
-  "departmentName", "currentBranchName", "assetCategoryName", "allottedToName",
-  "supervisorName", "subTypeName", "serialNumber", "manufacturer", "modelNumber",
+  "departmentName", "targetDepartmentName", "currentBranchName", "assetCategoryName", "allottedToName",
+  "supervisorName", "vendorName", "subTypeName", "serialNumber", "manufacturer", "modelNumber",
   "status", "purchaseDate", "purchaseCost", "currentLocation", "criticalityLevel",
   "warrantyStatus", "workingCondition", "installedAt", "assetPhoto",
 ] as const;

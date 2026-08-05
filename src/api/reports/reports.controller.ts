@@ -100,7 +100,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
         ...(!exportFormat ? { skip: (page - 1) * limit, take: limit } : {}),
         orderBy: { purchaseDate: "desc" },
         select: {
-          id: true, assetId: true, assetName: true, serialNumber: true,
+          id: true, assetId: true, assetName: true, referenceCode: true, serialNumber: true,
           purchaseDate: true, purchaseCost: true, modeOfProcurement: true,
           status: true, manufacturer: true, modelNumber: true,
           currentLocation: true, physicalCondition: true, warrantyStatus: true,
@@ -125,6 +125,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
       return {
         assetId: a.assetId,
         assetName: a.assetName,
+        referenceCode: a.referenceCode || "",
         serialNumber: a.serialNumber,
         category: a.assetCategory?.name || "N/A",
         department: a.department?.name || "N/A",
@@ -148,6 +149,7 @@ export const getAssetRegisterReport = async (req: AuthenticatedRequest, res: Res
       const exportRows = data.map((d) => ({
         "Asset ID": d.assetId,
         "Asset Name": d.assetName,
+        "Reference Code": d.referenceCode,
         "Serial Number": d.serialNumber,
         "Category": d.category,
         "Department": d.department,

@@ -201,6 +201,7 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       categoryName: 'assetCategory',
       'assetCategory?.name': 'assetCategory',
       department: 'department',
+      targetDepartment: 'targetDepartment',
       vendor: 'vendor',
       allottedTo: 'allottedTo',
       supervisor: 'supervisor',
@@ -272,6 +273,8 @@ export const getAssetsPaginated = async (req: Request, res: Response) => {
       qrStickeredBy: { select: { name: true } },
       assetCategory: { select: { name: true } },
       department: { select: { name: true } },
+      targetDepartment: { select: { name: true } },
+      vendor: { select: { name: true } },
       allottedTo: { select: { name: true } },
       supervisor: { select: { name: true } },
       assetSubType: { select: { name: true } },
@@ -1000,7 +1003,9 @@ export const updateAsset = async (req: Request, res: Response) => {
     // SUB-TYPE (optional; empty clears it)
     // ---------------------------
     if ("assetSubTypeId" in data) {
-      updateData.assetSubTypeId = data.assetSubTypeId ? Number(data.assetSubTypeId) : null;
+      updateData.assetSubType = data.assetSubTypeId
+        ? { connect: { id: Number(data.assetSubTypeId) } }
+        : { disconnect: true };
     }
 
     // ---------------------------
