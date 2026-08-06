@@ -329,13 +329,17 @@ export const getAllAssetsForDropdown = async (_req: Request, res: Response) => {
 };
 
 // GET /assets/ticket-options — asset picker for the ticket form, role-scoped.
-// Mirrors the mobile raise-ticket rule (mobile-auth.controller getMyAssets):
-//   management roles      → every asset
-//   SUPERVISOR            → assets they supervise (primary or shift-wise) or hold
-//   everyone else         → assets allotted to them
+// Mirrors the mobile raise-ticket rule (mobile-auth.controller getMyAssets),
+// plus a department scope for HOD:
+//   HOD                    → assets owned by their department (departmentId)
+//                             OR handed over to it (targetDepartmentId) —
+//                             see the HOD_SOURCE/HOD_TARGET assignment flow
+//   other management roles → every asset
+//   SUPERVISOR              → assets they supervise (primary or shift-wise) or hold
+//   everyone else           → assets allotted to them
 // Kept separate from /all-dropdown, which finance/disposal screens still use
 // unscoped.
-const TICKET_ALL_ASSETS_ROLES = ["HOD", "ADMIN", "FINANCE", "CFO", "OPERATIONS", "CEO", "COO", "CEO_COO"];
+const TICKET_ALL_ASSETS_ROLES = ["ADMIN", "FINANCE", "CFO", "OPERATIONS", "CEO", "COO", "CEO_COO"];
 
 export const getTicketAssetOptions = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -349,7 +353,14 @@ export const getTicketAssetOptions = async (req: AuthenticatedRequest, res: Resp
     const empId = Number(user.employeeDbId);
 
     let ownerWhere: any = {};
-    if (!TICKET_ALL_ASSETS_ROLES.includes(role)) {
+    if (role === "HOD") {
+      const me = await prisma.employee.findUnique({ where: { id: empId }, select: { departmentId: true } });
+      if (!me?.departmentId) {
+        res.json([]);
+        return;
+      }
+      ownerWhere = { OR: [{ departmentId: me.departmentId }, { targetDepartmentId: me.departmentId }] };
+    } else if (!TICKET_ALL_ASSETS_ROLES.includes(role)) {
       ownerWhere =
         role === "SUPERVISOR"
           ? {
