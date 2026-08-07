@@ -353,24 +353,31 @@ export const getTicketAssetOptions = async (req: AuthenticatedRequest, res: Resp
     const empId = Number(user.employeeDbId);
 
     let ownerWhere: any = {};
-    if (role === "HOD") {
+    if (role === "HOD" || role === "SUPERVISOR") {
       const me = await prisma.employee.findUnique({ where: { id: empId }, select: { departmentId: true } });
-      if (!me?.departmentId) {
-        res.json([]);
-        return;
+      const deptId = me?.departmentId ?? null;
+
+      if (role === "HOD") {
+        if (!deptId) {
+          res.json([]);
+          return;
+        }
+        ownerWhere = { OR: [{ departmentId: deptId }, { targetDepartmentId: deptId }] };
+      } else {
+        // Supervisors see what they personally supervise or hold, PLUS everything
+        // sitting in their department. The department clause is what covers common
+        // assets — shared equipment with no end user allotted, worked by whichever
+        // supervisor is on shift — without attaching every supervisor to every asset.
+        const or: any[] = [
+          { supervisorId: empId },
+          { supervisors: { some: { employeeId: empId, isActive: true } } },
+          { allottedToId: empId },
+        ];
+        if (deptId) or.push({ departmentId: deptId }, { targetDepartmentId: deptId });
+        ownerWhere = { OR: or };
       }
-      ownerWhere = { OR: [{ departmentId: me.departmentId }, { targetDepartmentId: me.departmentId }] };
     } else if (!TICKET_ALL_ASSETS_ROLES.includes(role)) {
-      ownerWhere =
-        role === "SUPERVISOR"
-          ? {
-            OR: [
-              { supervisorId: empId },
-              { supervisors: { some: { employeeId: empId, isActive: true } } },
-              { allottedToId: empId },
-            ],
-          }
-          : { allottedToId: empId };
+      ownerWhere = { allottedToId: empId };
     }
 
     const where: any = {
