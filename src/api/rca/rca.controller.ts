@@ -35,6 +35,12 @@ interface CreateRcaBody {
   workOrderId?: number;
   framework: "FIVE_WHYS" | "SIX_M" | "COMBINED";
   performedById?: number;
+  status?: string;
+  summary?: string;
+  conclusion?: string;
+  correctiveAction?: string;
+  preventiveAction?: string;
+  performedAt?: string;
   fiveWhys?: FiveWhyInput[];
   sixMItems?: SixMItemInput[];
 }
@@ -94,6 +100,9 @@ export const getRcaById = async (req: AuthenticatedRequest, res: Response) => {
   }
 };
 
+// Only COMPLETED / REVIEWED analyses are published to the Knowledge Base.
+const VALID_RCA_STATUSES = ["DRAFT", "COMPLETED", "REVIEWED"];
+
 export const createRca = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const body = req.body as CreateRcaBody;
@@ -134,7 +143,14 @@ export const createRca = async (req: AuthenticatedRequest, res: Response) => {
           workOrderId: body.workOrderId,
           framework: body.framework,
           performedById: body.performedById,
-          status: "DRAFT",
+          // These four were previously dropped on create and only settable via
+          // update, which silently lost whatever the form sent.
+          summary: body.summary ?? null,
+          conclusion: body.conclusion ?? null,
+          correctiveAction: body.correctiveAction ?? null,
+          preventiveAction: body.preventiveAction ?? null,
+          performedAt: body.performedAt ? new Date(body.performedAt) : null,
+          status: VALID_RCA_STATUSES.includes(String(body.status)) ? String(body.status) : "DRAFT",
         },
       });
 

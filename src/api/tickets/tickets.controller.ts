@@ -2234,6 +2234,18 @@ export const completeTicketWork = async (req: any, res: Response) => {
       return;
     }
 
+    // Root cause + resolution are what make a closed ticket reusable — they are
+    // the entire content of the Knowledge Base. Optional fields never get filled,
+    // so they are mandatory here.
+    if (!rootCause) {
+      res.status(400).json({ message: "Root cause required" });
+      return;
+    }
+    if (!resolutionSummary) {
+      res.status(400).json({ message: "Resolution summary required" });
+      return;
+    }
+
     const ticket = await requireAssignedTo(user, ticketId);
     ensureStatus(ticket, ["IN_PROGRESS", "ON_HOLD"]);
 
