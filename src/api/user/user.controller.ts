@@ -365,6 +365,120 @@ export const createUser = async (req: Request, res: Response) => {
   return
 };
 
+/**
+ * POST /api/users/provision
+ *
+ * Bulk-creates login accounts for employees that don't have one yet — the
+ * back-fill after employees have been imported and only some users were made
+ * by hand.
+ *
+ * Password is derived from the employee code: JMRH001 → JMRH@001, i.e. an "@"
+ * inserted between the letter prefix and the trailing digits.
+ *
+ * Defaults to a DRY RUN: it reports exactly what it would create, including the
+ * derived passwords, and writes nothing until { dryRun: false } is sent.
+ */
+const EMPLOYEE_CODE_PATTERN = /^([A-Za-z]+)(\d+)$/;
+
+function derivePassword(employeeID: string): string | null {
+  const m = EMPLOYEE_CODE_PATTERN.exec(String(employeeID || "").trim());
+  return m ? `${m[1]}@${m[2]}` : null;
+}
+
+export const provisionUsersForEmployees = async (req: Request, res: Response) => {
+  try {
+    const caller = (req as any).user;
+    if (!caller?.employeeDbId) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    // Minting credentials for other people is an administrative act.
+    if (String(caller.role || "").toUpperCase() !== "ADMIN") {
+      res.status(403).json({ message: "Only ADMIN can provision user accounts" });
+      return;
+    }
+
+    const dryRun = req.body?.dryRun !== false;          // safe default: preview
+    const includeInactive = req.body?.includeInactive === true;
+
+    const employees = await prisma.employee.findMany({
+      where: {
+        user: { is: null },
+        ...(includeInactive ? {} : { isActive: true }),
+      },
+      select: { id: true, employeeID: true, name: true, role: true, isActive: true },
+      orderBy: { employeeID: "asc" },
+    });
+
+    // Usernames are unique independently of employeeID, so check up front rather
+    // than letting individual inserts fail halfway through the batch.
+    const takenUsernames = new Set(
+      (await prisma.user.findMany({ select: { username: true } })).map((u) => u.username.toLowerCase())
+    );
+
+    const toCreate: Array<{ employeeID: string; name: string; role: string; password: string }> = [];
+    const skipped: Array<{ employeeID: string; reason: string }> = [];
+
+    for (const e of employees) {
+      const password = derivePassword(e.employeeID);
+      if (!password) {
+        skipped.push({ employeeID: e.employeeID, reason: "Employee code is not <letters><digits> — cannot derive a password" });
+        continue;
+      }
+      if (takenUsernames.has(e.employeeID.toLowerCase())) {
+        skipped.push({ employeeID: e.employeeID, reason: "Username already taken" });
+        continue;
+      }
+      takenUsernames.add(e.employeeID.toLowerCase());
+      toCreate.push({ employeeID: e.employeeID, name: e.name, role: String(e.role), password });
+    }
+
+    if (dryRun) {
+      res.json({
+        dryRun: true,
+        message: `${toCreate.length} account(s) would be created, ${skipped.length} skipped. Send { "dryRun": false } to apply.`,
+        wouldCreate: toCreate,
+        skipped,
+      });
+      return;
+    }
+
+    const created: Array<{ employeeID: string; username: string; password: string }> = [];
+    const failed: Array<{ employeeID: string; reason: string }> = [];
+
+    for (const row of toCreate) {
+      try {
+        const passwordHash = await bcrypt.hash(row.password, 10);
+        await prisma.user.create({
+          data: {
+            // employeeID is copied verbatim from the employee row so the Prisma
+            // relation always resolves — a case/space variant here is what makes
+            // user.findMany({ include: { employee: true } }) crash the engine.
+            employeeID: row.employeeID,
+            username: row.employeeID,
+            passwordHash,
+            role: row.role,
+          },
+        });
+        created.push({ employeeID: row.employeeID, username: row.employeeID, password: row.password });
+      } catch (err: any) {
+        failed.push({ employeeID: row.employeeID, reason: err?.message || "Insert failed" });
+      }
+    }
+
+    res.status(201).json({
+      dryRun: false,
+      message: `${created.length} account(s) created, ${skipped.length} skipped, ${failed.length} failed.`,
+      created,
+      skipped,
+      failed,
+    });
+  } catch (error: any) {
+    console.error("provisionUsersForEmployees error:", error);
+    res.status(500).json({ message: "Failed to provision users", error: error?.message });
+  }
+};
+
 export const deleteUser = async (req: Request, res: Response) => {
   const id = parseInt(req.params.id);
   await prisma.user.delete({ where: { id } });

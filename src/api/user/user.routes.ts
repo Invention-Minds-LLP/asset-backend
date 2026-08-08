@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword, refreshAccessToken, logoutUser } from "./user.controller";
+import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword, refreshAccessToken, logoutUser, provisionUsersForEmployees } from "./user.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import { validateBody } from "../../middleware/validate";
 
@@ -23,6 +23,10 @@ const resetPasswordSchema = z.object({
 
 router.get("/", authenticateToken, getAllUsers);
 router.post("/", validateBody(createUserSchema), createUser);
+
+// Bulk back-fill of logins for employees that have none. Dry run by default;
+// must be above "/:id" so it isn't captured as an id.
+router.post("/provision", authenticateToken, provisionUsersForEmployees);
 
 router.put("/reset-password", authenticateToken, validateBody(resetPasswordSchema), resetPassword);
 router.post("/login", validateBody(loginSchema), loginUser);
