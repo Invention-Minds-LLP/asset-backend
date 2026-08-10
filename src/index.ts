@@ -88,6 +88,14 @@ import reconciliationRoutes from "./api/reconciliation/reconciliation.routes";
 import exportRoutes from "./api/export/export.routes";
 import floorPlanRoutes from "./api/floor-plan/floor-plan.routes";
 import assetScanRoutes from "./api/asset-scan/asset-scan.routes";
+// ── Admin / Security registers (ported from physical register formats) ────────
+import vehicleRegisterRoutes from "./api/vehicle-register/vehicle-register.routes";
+import rentalAssetRegisterRoutes from "./api/rental-asset-register/rental-asset-register.routes";
+import keyRegisterRoutes from "./api/key-register/key-register.routes";
+import idCardRegisterRoutes from "./api/id-card-register/id-card-register.routes";
+import gensetLogRoutes from "./api/genset-log/genset-log.routes";
+import electricityLogRoutes from "./api/electricity-log/electricity-log.routes";
+import materialInwardRegisterRoutes from "./api/material-inward-register/material-inward-register.routes";
 
 import cors from "cors";
 import path from "path";
@@ -285,6 +293,15 @@ app.use("/api/floor-plan", floorPlanRoutes);
 
 // ── CCTV marker scan ingest (machine-to-machine, API-key auth) ───────────────
 app.use("/api/asset-scan", assetScanRoutes);
+
+// ── Admin / Security registers ───────────────────────────────────────────────
+app.use("/api/vehicle-register", vehicleRegisterRoutes);
+app.use("/api/rental-asset-register", rentalAssetRegisterRoutes);
+app.use("/api/key-register", keyRegisterRoutes);
+app.use("/api/id-card-register", idCardRegisterRoutes);
+app.use("/api/genset-log", gensetLogRoutes);
+app.use("/api/electricity-log", electricityLogRoutes);
+app.use("/api/material-inward-register", materialInwardRegisterRoutes);
 
 // Default route
 app.get("/", (req, res) => {

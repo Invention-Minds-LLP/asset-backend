@@ -36,6 +36,11 @@ type GatePassForPdf = {
   vehicleNo: string | null;
   vehicleType: string | null;
   courierDetails: string | null;
+  carriedBy: string | null;
+  employeeCode: string | null;
+  employeeContact: string | null;
+  processDept: string | null;
+  toAddress: string | null;
   reason: string | null;
   approvalRemarks: string | null;
   rejectionReason: string | null;
@@ -64,6 +69,9 @@ function fmt(d: Date | null | undefined): string {
 
 export async function streamGatePassPdf(gp: GatePassForPdf, res: Response): Promise<void> {
   const orgName = process.env.HOSPITAL_NAME || process.env.ORG_NAME || "Smart Assets";
+  // Company identity for the printed pass — constant per deployment (env-driven).
+  const orgGstin = process.env.ORG_GSTIN || process.env.COMPANY_GSTIN || "";
+  const orgAddress = process.env.ORG_ADDRESS || process.env.COMPANY_ADDRESS || "";
 
   const qrPayload = JSON.stringify({ gatePassNo: gp.gatePassNo, id: gp.id });
   const qrDataUrl = await QRCode.toDataURL(qrPayload, { width: 120, margin: 0 });
@@ -86,6 +94,14 @@ export async function streamGatePassPdf(gp: GatePassForPdf, res: Response): Prom
 
   doc.fillColor("black").y = 115;
 
+  // Company identity (From / GSTIN) — env-driven, constant per deployment.
+  if (orgAddress || orgGstin) {
+    doc.fontSize(8).font("Helvetica-Bold").fillColor("#64748b").text("FROM", 55, doc.y, { width: 500 });
+    if (orgAddress) doc.fontSize(9).font("Helvetica").fillColor("black").text(orgAddress, 55, doc.y, { width: 500 });
+    if (orgGstin) doc.fontSize(9).font("Helvetica-Bold").fillColor("#475569").text(`GSTIN: `, { continued: true }).font("Helvetica").fillColor("black").text(orgGstin);
+    doc.moveDown(0.4);
+  }
+
   // Type & status banner
   doc.moveDown(0.6);
   doc.fontSize(10).font("Helvetica-Bold").fillColor("#475569")
@@ -103,8 +119,22 @@ export async function streamGatePassPdf(gp: GatePassForPdf, res: Response): Prom
   metaPair(doc, "Issued To", gp.issuedTo, left, yMeta);
   metaPair(doc, "Vehicle", gp.vehicleNo ? `${gp.vehicleNo} (${gp.vehicleType || "—"})` : "—", right, yMeta);
 
-  metaPair(doc, "Purpose", gp.purpose, left, doc.y);
-  metaPair(doc, "Expected Return", fmt(gp.expectedReturnDate), right, doc.y - 14);
+  const rowPurpose = doc.y;
+  metaPair(doc, "Purpose", gp.purpose, left, rowPurpose);
+  metaPair(doc, "Expected Return", fmt(gp.expectedReturnDate), right, rowPurpose);
+
+  // Employee / movement details (from the physical gate-pass form)
+  if (gp.carriedBy || gp.employeeCode) {
+    const r = doc.y;
+    metaPair(doc, "Carried By", gp.carriedBy || "—", left, r);
+    metaPair(doc, "Employee ID", gp.employeeCode || "—", right, r);
+  }
+  if (gp.processDept || gp.employeeContact) {
+    const r = doc.y;
+    metaPair(doc, "Process / Dept", gp.processDept || "—", left, r);
+    metaPair(doc, "Employee Contact", gp.employeeContact || "—", right, r);
+  }
+  if (gp.toAddress) metaPair(doc, "To (Destination)", gp.toAddress, left, doc.y);
 
   if (gp.courierDetails) metaPair(doc, "Courier", gp.courierDetails, left, doc.y);
   if (gp.reason) metaPair(doc, "Reason", gp.reason, left, doc.y);

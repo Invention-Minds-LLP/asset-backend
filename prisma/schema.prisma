@@ -1652,6 +1652,13 @@ model GatePass {
   vehicleNo      String?
   vehicleType    String? // HOSPITAL_VEHICLE | OUTSIDE_VEHICLE
 
+  // ── Employee / movement details (from the physical gate-pass form) ──────────
+  carriedBy       String? // person physically carrying the items (may differ from issuedTo)
+  employeeCode    String? // employee ID number
+  employeeContact String? // employee contact number
+  processDept     String? // process / department name
+  toAddress       String? // destination address (the "TO." block on the paper form)
+
   // ── Approval workflow (mandatory for both RETURNABLE & NON_RETURNABLE) ─────
   approvalStatus     String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPROVED
   requestedById      Int?
@@ -1731,6 +1738,191 @@ model GatePassItem {
   @@index([gatePassId])
   @@index([assetId])
   @@map("gatepassitem")
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Admin / Security Registers (ported from the physical register formats)
+// Self-contained log tables — no cross-model relations by design.
+// ════════════════════════════════════════════════════════════════════════════
+
+model RentalAssetRegister {
+  id             Int       @id @default(autoincrement())
+  direction      String // INWARD | OUTWARD
+  entryDate      DateTime
+  vendorName     String?
+  description    String?
+  brand          String?
+  serialOrTagNo  String?
+  gatePassOrDcNo String?
+  quantity       Int?      @default(1)
+  returnableType String? // RETURNABLE | REPLACEMENT
+  returnDate     DateTime?
+  handledBy      String? // received / issued by (name & sign)
+  remarks        String?
+  createdById    Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  @@index([direction, entryDate])
+  @@map("rentalassetregister")
+}
+
+model KeyRegister {
+  id              Int      @id @default(autoincrement())
+  entryDate       DateTime
+  keyIssuedTo     String
+  cabinNameOrNo   String?
+  purpose         String?
+  keyReceivedTime String?
+  keyReturnTime   String?
+  receiverSign    String?
+  remarks         String?
+  createdById     Int?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+
+  @@index([entryDate])
+  @@map("keyregister")
+}
+
+model IdCardRegister {
+  id           Int      @id @default(autoincrement())
+  entryDate    DateTime
+  employeeName String
+  contactNo    String?
+  tempIdNo     String?
+  inTime       String?
+  outTime      String?
+  issuedBy     String?
+  remarks      String?
+  createdById  Int?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @default(now()) @updatedAt
+
+  @@index([entryDate])
+  @@map("idcardregister")
+}
+
+model VehicleRegister {
+  id            Int      @id @default(autoincrement())
+  entryDate     DateTime
+  employeeName  String?
+  contactNo     String?
+  vehicleType   String?
+  vehicleRegnNo String
+  inTime        String?
+  outTime       String?
+  purpose       String?
+  remarks       String?
+  createdById   Int?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @default(now()) @updatedAt
+
+  @@index([entryDate])
+  @@map("vehicleregister")
+}
+
+model GensetLog {
+  id                    Int      @id @default(autoincrement())
+  logDate               DateTime
+  genSetOnTime          String?
+  genSetOffTime         String?
+  openingMeterReading   Float?
+  closingMeterReading   Float?
+  totalHoursRun         Float?
+  dieselOpeningStock    Float?
+  dieselPurchasedBillNo String?
+  litersPurchased       Float?
+  dieselClosingStock    Float?
+  consumptionLiters     Float?
+  authorisedBy          String?
+  remarks               String?
+  createdById           Int?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @default(now()) @updatedAt
+
+  @@index([logDate])
+  @@map("gensetlog")
+}
+
+model ElectricityMeterLog {
+  id             Int       @id @default(autoincrement())
+  month          String? // e.g. Jun-26
+  floor          String? // Floor / Common Area label
+  meterName      String?
+  startDate      DateTime?
+  startTime      String?
+  openingReading Float?
+  endDate        DateTime?
+  endTime        String?
+  closingReading Float?
+  totalUnits     Float?
+  remarks        String?
+  createdById    Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  @@index([month])
+  @@map("electricitymeterlog")
+}
+
+model MaterialInwardRegister {
+  id        Int      @id @default(autoincrement())
+  inwardNo  String?  @unique // auto gate-inward / visit number, e.g. MIN-20260808-0001
+  entryDate DateTime
+  timeIn    String? // arrival time at the gate
+  status    String   @default("AT_GATE") // AT_GATE | RECEIVED | HANDED_OVER
+
+  // Reason for the visit — link to a real PO/WO when available, else free text
+  referenceType   String? // PURCHASE_ORDER | WORK_ORDER | RETURNABLE_INWARD | SERVICE_RETURN | SAMPLE_DEMO | OTHER
+  referenceNo     String? // PO / WO number (typed or copied from the linked record)
+  purchaseOrderId Int? // optional link to PurchaseOrder (scalar, no relation)
+  workOrderId     Int? // optional link to WorkOrder (scalar, no relation)
+
+  // Who is delivering
+  vendorName           String? // vendor / coming from
+  deliveryPersonName   String?
+  deliveryPersonContact String?
+  govtIdType           String? // AADHAAR | PAN | DL | VOTER_ID | OTHER
+  govtIdNumber         String?
+  vehicleNo            String?
+  vehicleType          String?
+
+  // Documents
+  dcOrInvoiceNo String?
+  ewayBillNo    String?
+
+  // Material
+  returnableType    String? // RETURNABLE | NON_RETURNABLE
+  description       String
+  brand             String?
+  serialOrTagNo     String?
+  quantity          Int?    @default(1)
+  packageCount      Int?
+  conditionOnArrival String? // SEALED | OPEN | DAMAGED
+
+  // Internal receiving
+  whomToMeet String? // person / department the delivery is for
+  department String?
+  receivedBy String? // who physically received it inside
+  gatePassNo String? // linked outbound pass, for returnable inward
+
+  // Returnable tracking
+  returnDate DateTime?
+
+  // Security
+  securityGuardName String?
+  senderAddress     String?
+  timeOut           String?
+  remarks           String?
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([entryDate])
+  @@index([status])
+  @@map("materialinwardregister")
 }
 
 /**

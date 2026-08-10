@@ -51,6 +51,8 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
     const {
       type, issuedTo, purpose, expectedReturnDate,
       courierDetails, vehicleNo, vehicleType,
+      // employee / movement details (physical gate-pass form)
+      carriedBy, employeeCode, employeeContact, processDept, toAddress,
       reason, ticketId,
       // multi-asset payload
       items,
@@ -113,6 +115,11 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
         courierDetails: courierDetails ?? null,
         vehicleNo: vehicleNo ?? null,
         vehicleType: vehicleType ?? null,
+        carriedBy: carriedBy ?? null,
+        employeeCode: employeeCode ?? null,
+        employeeContact: employeeContact ?? null,
+        processDept: processDept ?? null,
+        toAddress: toAddress ?? null,
         reason: reason ?? null,
         ticketId: ticketId ? Number(ticketId) : null,
         requestedById: userId(req),

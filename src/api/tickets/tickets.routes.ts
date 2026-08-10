@@ -22,7 +22,8 @@ import {
   getTicketMetrics,
   completeTicketWork,
   resolveTicket,
-  addCollectionNote
+  addCollectionNote,
+  getTicketTatAnalytics
 } from "./tickets.controller";
 import { authenticateToken } from "../../middleware/authMiddleware";
 
@@ -35,6 +36,10 @@ router.post("/", authenticateToken, createTicket);
 
 router.get("/my-assigned", authenticateToken, getMyAssignedTickets);
 router.get("/my-raised", authenticateToken, getMyRaisedTickets);
+
+// Aggregated turnaround analytics (HOD = own department, management = all).
+// Must stay above "/:ticketId" so it isn't captured as a ticket id.
+router.get("/analytics/tat", authenticateToken, getTicketTatAnalytics);
 
 router.put("/:id", authenticateToken, updateTicket);
 

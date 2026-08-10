@@ -62,6 +62,7 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "hierarchy-dashboard",    label: "Hierarchy Dashboard",    path: "/hierarchy-config",        icon: "pi pi-sitemap",   sortOrder: 7 },
           { name: "knowledge-base",         label: "Knowledge Base",         path: "/knowledge-base",          icon: "pi pi-book",      sortOrder: 8 },
           { name: "rca",                    label: "Root Cause Analysis",    path: "/rca",                     icon: "pi pi-search-minus", sortOrder: 9 },
+          { name: "ticket-tat",             label: "Ticket TAT Analytics",   path: "/ticket-tat",              icon: "pi pi-clock",     sortOrder: 10 },
         ]
       },
 
@@ -110,6 +111,13 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
         items: [
           { name: "gate-pass",          label: "Gate Pass",            path: "/gate-pass",          icon: "pi pi-id-card",      sortOrder: 1 },
           { name: "gate-pass-security", label: "Gate Pass — Security", path: "/gate-pass/security", icon: "pi pi-shield",       sortOrder: 2 },
+          { name: "material-inward-register", label: "Material Inward Register", path: "/material-inward-register", icon: "pi pi-arrow-down-left", sortOrder: 20 },
+          { name: "rental-asset-register", label: "Rental Asset Register", path: "/rental-asset-register", icon: "pi pi-sync",     sortOrder: 21 },
+          { name: "key-register",       label: "Key Register",         path: "/key-register",       icon: "pi pi-key",          sortOrder: 22 },
+          { name: "id-card-register",   label: "Temp ID Card Register", path: "/id-card-register",  icon: "pi pi-id-card",      sortOrder: 23 },
+          { name: "vehicle-register",   label: "Vehicle Register",     path: "/vehicle-register",   icon: "pi pi-car",          sortOrder: 24 },
+          { name: "genset-log",         label: "Genset & Diesel Log",  path: "/genset-log",         icon: "pi pi-bolt",         sortOrder: 25 },
+          { name: "electricity-log",    label: "Electricity Meter Log", path: "/electricity-log",   icon: "pi pi-flash",        sortOrder: 26 },
           { name: "acknowledgement",    label: "Acknowledgement",      path: "/acknowledgement",    icon: "pi pi-check-square", sortOrder: 3 },
           { name: "physical-audit",  label: "Physical Audit",      path: "/asset-audit",     icon: "pi pi-clipboard",    sortOrder: 3 },
           { name: "employee-exit",   label: "Employee Exit",       path: "/employee-exit",   icon: "pi pi-sign-out",     sortOrder: 4 },

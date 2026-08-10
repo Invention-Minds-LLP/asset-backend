@@ -155,6 +155,32 @@ export const getTicketMetrics = async (req: Request, res: Response) => {
         ms: slaMs || null,
       },
 
+      // What kind of job this was, and who carried it out. serviceType is null
+      // on tickets raised before it was defaulted — surfaced as "not recorded"
+      // rather than assumed to be internal.
+      work: {
+        category: ticket.workCategory ?? null,
+        serviceType: ticket.serviceType ?? null,
+      },
+
+      // Internal vs vendor commitments kept apart, so a breach can be attributed.
+      // `source` says which one governs (the stricter of the two).
+      slaDetail: {
+        source: ticket.slaSource ?? null,
+        internal: {
+          value: ticket.internalSlaValue ?? null,
+          unit: ticket.internalSlaUnit ?? null,
+          ms: toMs(ticket.internalSlaValue, ticket.internalSlaUnit) || null,
+          breached: ticket.slaBreached ?? null,
+        },
+        vendor: {
+          value: ticket.vendorSlaValue ?? null,
+          unit: ticket.vendorSlaUnit ?? null,
+          ms: toMs(ticket.vendorSlaValue, ticket.vendorSlaUnit) || null,
+          breached: ticket.vendorSlaBreached ?? null,
+        },
+      },
+
       resolved: {
         resolvedAt,
         ms: resolvedTatMs,
@@ -178,6 +204,210 @@ export const getTicketMetrics = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to compute metrics", error: e.message });
   }
 };
+
+function median(values: number[]): number {
+  if (!values.length) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+const MANAGEMENT_ROLES = ["ADMIN", "CEO_COO", "FINANCE", "CFO", "OPERATIONS"];
+
+/**
+ * GET /api/tickets/analytics/tat
+ *
+ * Where time actually goes, aggregated — the management view that the per-ticket
+ * metrics popup can't answer. HODs are locked to their own department; the
+ * management roles see everything and may filter to one department.
+ *
+ * Query: from, to (ISO dates; default last 30 days), departmentId (management only)
+ */
+export const getTicketTatAnalytics = async (req: any, res: Response) => {
+  try {
+    const user = mustUser(req);
+    const role = String(user.role || "").toUpperCase();
+    const isManagement = MANAGEMENT_ROLES.includes(role);
+
+    if (!isManagement && role !== "HOD") {
+      res.status(403).json({ message: "Only HOD and management can view ticket analytics" });
+      return;
+    }
+
+    // Default window: last 30 days of raised tickets.
+    const to = req.query.to ? new Date(String(req.query.to)) : new Date();
+    const from = req.query.from
+      ? new Date(String(req.query.from))
+      : new Date(to.getTime() - 30 * 86_400_000);
+    to.setHours(23, 59, 59, 999);
+
+    const where: any = { createdAt: { gte: from, lte: to } };
+
+    if (role === "HOD") {
+      const me = await prisma.employee.findUnique({
+        where: { id: user.employeeDbId },
+        select: { departmentId: true },
+      });
+      if (!me?.departmentId) {
+        res.json({ scope: "DEPARTMENT", departmentId: null, from, to, summary: null, perStatus: [], byDepartment: [], stuck: [] });
+        return;
+      }
+      where.departmentId = me.departmentId;
+    } else if (req.query.departmentId) {
+      where.departmentId = Number(req.query.departmentId);
+    }
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      select: {
+        id: true,
+        ticketId: true,
+        status: true,
+        createdAt: true,
+        closedAt: true,
+        slaResolvedAt: true,
+        slaBreached: true,
+        departmentId: true,
+        department: { select: { name: true } },
+        asset: { select: { assetName: true } },
+        assignedTo: { select: { name: true } },
+        statusHistory: { orderBy: { changedAt: "asc" }, select: { status: true, changedAt: true } },
+      },
+    });
+
+    const now = new Date();
+
+    // status → every duration observed, plus how many separate visits it took
+    const durationsByStatus: Record<string, number[]> = {};
+    const visitsByStatus: Record<string, number> = {};
+    const ticketsTouchingStatus: Record<string, number> = {};
+
+    const deptAgg: Record<number, { name: string; count: number; total: number; active: number }> = {};
+    const stuck: any[] = [];
+
+    let totalSum = 0;
+    let activeSum = 0;
+    let resolvedCount = 0;
+    let breachedCount = 0;
+
+    const OPEN_STATUSES = ["OPEN", "ASSIGNED", "IN_PROGRESS", "ON_HOLD", "WORK_COMPLETED"];
+
+    for (const t of tickets) {
+      const endAt = t.closedAt ?? t.slaResolvedAt ?? now;
+      const totalMs = Math.max(0, endAt.getTime() - t.createdAt.getTime());
+      const byStatus = buildStatusTat(t.statusHistory, endAt);
+      const onHold = byStatus["ON_HOLD"] || 0;
+      const activeMs = Math.max(0, totalMs - onHold);
+
+      totalSum += totalMs;
+      activeSum += activeMs;
+      if (t.slaResolvedAt) resolvedCount++;
+      if (t.slaBreached) breachedCount++;
+
+      for (const [status, ms] of Object.entries(byStatus)) {
+        (durationsByStatus[status] ||= []).push(ms);
+        ticketsTouchingStatus[status] = (ticketsTouchingStatus[status] || 0) + 1;
+      }
+      // Visits counted from the history itself, so a ticket that bounces
+      // IN_PROGRESS → ON_HOLD → IN_PROGRESS registers two visits, not one.
+      for (const h of t.statusHistory) {
+        visitsByStatus[h.status] = (visitsByStatus[h.status] || 0) + 1;
+      }
+
+      if (t.departmentId) {
+        const d = (deptAgg[t.departmentId] ||= {
+          name: t.department?.name || `Department ${t.departmentId}`,
+          count: 0, total: 0, active: 0,
+        });
+        d.count++;
+        d.total += totalMs;
+        d.active += activeMs;
+      }
+
+      if (OPEN_STATUSES.includes(t.status)) {
+        const last = t.statusHistory[t.statusHistory.length - 1];
+        const since = last?.changedAt ?? t.createdAt;
+        stuck.push({
+          id: t.id,
+          ticketId: t.ticketId,
+          status: t.status,
+          assetName: t.asset?.assetName ?? null,
+          department: t.department?.name ?? null,
+          assignedTo: t.assignedTo?.name ?? null,
+          sinceMs: Math.max(0, now.getTime() - new Date(since).getTime()),
+          totalMs,
+        });
+      }
+    }
+
+    const perStatus = Object.keys(durationsByStatus)
+      .map((status) => {
+        const list = durationsByStatus[status];
+        const sum = list.reduce((a, b) => a + b, 0);
+        const visits = visitsByStatus[status] || list.length;
+        const ticketsSeen = ticketsTouchingStatus[status] || list.length;
+        return {
+          status,
+          tickets: ticketsSeen,
+          visits,
+          // Extra entries beyond one-per-ticket = how much work bounced back here.
+          revisits: Math.max(0, visits - ticketsSeen),
+          totalMs: sum,
+          avgMs: Math.round(sum / list.length),
+          medianMs: median(list),
+          maxMs: Math.max(...list),
+        };
+      })
+      .sort((a, b) => b.totalMs - a.totalMs);
+
+    const byDepartment = Object.entries(deptAgg)
+      .map(([id, d]) => ({
+        departmentId: Number(id),
+        department: d.name,
+        tickets: d.count,
+        avgTotalMs: Math.round(d.total / d.count),
+        avgActiveMs: Math.round(d.active / d.count),
+      }))
+      .sort((a, b) => b.avgTotalMs - a.avgTotalMs);
+
+    stuck.sort((a, b) => b.sinceMs - a.sinceMs);
+
+    res.json({
+      scope: role === "HOD" ? "DEPARTMENT" : "ALL",
+      from,
+      to,
+      summary: {
+        tickets: tickets.length,
+        resolved: resolvedCount,
+        breached: breachedCount,
+        openNow: stuck.length,
+        avgTotalMs: tickets.length ? Math.round(totalSum / tickets.length) : 0,
+        avgActiveMs: tickets.length ? Math.round(activeSum / tickets.length) : 0,
+      },
+      perStatus,
+      byDepartment,
+      stuck: stuck.slice(0, 20),
+    });
+  } catch (e: any) {
+    console.error("getTicketTatAnalytics error:", e);
+    res.status(500).json({ message: "Failed to compute ticket analytics", error: e.message });
+  }
+};
+
+/**
+ * The web form historically sent "PM" while the schema documents
+ * PREVENTIVE_MAINTENANCE, so stored values were inconsistent between web and
+ * mobile. Normalise on write; existing rows are left untouched.
+ */
+function normalizeWorkCategory(value: any): string | null {
+  const v = String(value ?? "").trim().toUpperCase();
+  if (!v) return null;
+  if (v === "PM" || v === "PREVENTIVE" || v === "PREVENTIVE_MAINTENANCE") return "PREVENTIVE_MAINTENANCE";
+  if (v === "BREAKDOWN") return "BREAKDOWN";
+  if (v === "CORRECTIVE") return "CORRECTIVE";
+  if (v === "CALIBRATION") return "CALIBRATION";
+  return null;
+}
 
 async function detectServiceType(tx: any, assetId: number) {
   const now = new Date();
@@ -683,7 +913,12 @@ export const createTicket = async (req: Request, res: Response) => {
         internalSlaUnit,
         vendorSlaValue,
         vendorSlaUnit,
-        workCategory: req.body.workCategory ?? null,
+        workCategory: normalizeWorkCategory(req.body.workCategory),
+        // Work starts in-house. If the ticket is later sent to a vendor or
+        // service centre, requestTicketTransfer overwrites this with the
+        // detected WARRANTY / AMC / CMC / PAID. Tickets raised before this
+        // default keep NULL and are reported as "not recorded".
+        serviceType: "INTERNAL",
       },
     } as any);
 
