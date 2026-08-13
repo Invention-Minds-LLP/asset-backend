@@ -875,6 +875,9 @@ model Department {
 
   storeTransfersIn StoreTransfer[] @relation("TransferToDepartment")
 
+  gatePassesToApprove GatePass[] @relation("GatePassApproverDept")
+  gatePassesProcess   GatePass[] @relation("GatePassProcessDept")
+
   @@map("department")
 }
 
@@ -891,6 +894,15 @@ model Employee {
   reportingTo      Employee?       @relation("EmployeeReporting", fields: [reportingToId], references: [id])
   directReports    Employee[]      @relation("EmployeeReporting")
   isActive         Boolean         @default(true)
+  // Contract / agency staff (e.g. outsourced security) rather than payroll.
+  // They need Employee rows because User.employeeID FKs to this table, so a
+  // login can't exist without one — this flag is what keeps them out of
+  // headcount reporting. Their employeeID also carries an "OS-" prefix.
+  //
+  // Set at creation only: updateEmployee deliberately ignores it, because the
+  // employeeID it pairs with is itself immutable (renaming would orphan the
+  // User FK), so a later flip would leave the flag and the ID disagreeing.
+  isOutsourced     Boolean         @default(false)
   assets           Asset[]
   user             User?
   role             EmployeeRole    @default(EXECUTIVE)
@@ -952,6 +964,10 @@ model Employee {
   gatePassesRequested         GatePass[]            @relation("GatePassRequester")
   gatePassesGatedOut          GatePass[]            @relation("GatePassSecurityOut")
   gatePassesGatedIn           GatePass[]            @relation("GatePassSecurityIn")
+  gatePassLabelsPrinted       GatePass[]            @relation("GatePassLabelPrinter")
+  gatePassesCarried           GatePass[]            @relation("GatePassCarriedBy")
+  gatePassesOpsApproved       GatePass[]            @relation("GatePassOpsApprover")
+  gatePassesSecurityCleared   GatePass[]            @relation("GatePassSecurityCleared")
   assetIndents                AssetIndent[]         @relation("IndentRaisedBy")
   assetIndentApprovals        AssetIndent[]         @relation("IndentApprovedBy")
   employeeExits               EmployeeExit[]        @relation("ExitEmployee")
@@ -1630,9 +1646,22 @@ model GatePass {
   gatePassNo String @unique
 
   type   String // RETURNABLE | NON_RETURNABLE
-  // Lifecycle:
-  // DRAFT → PENDING_APPROVAL → APPROVED → ISSUED → (RETURNED) → CLOSED
-  //                          ↘ REJECTED                ↘ CANCELLED
+  // Lifecycle — approval is TWO stages: the accountable department's HOD, then
+  // Operations (falling back to CEO_COO where no Operations user exists).
+  //
+  // DRAFT → PENDING_APPROVAL → PENDING_OPS_APPROVAL → APPROVED
+  //       → SECURITY_CLEARED → ISSUED → (RETURNED) → CLOSED
+  //                ↘ REJECTED          ↘ REJECTED         ↘ CANCELLED
+  //
+  // SECURITY_CLEARED and ISSUED are deliberately separate. The supervisor
+  // verifies the items and records the vehicle at the desk (cleared), the label
+  // is printed, and only then does the parcel actually leave (issued). Collapsing
+  // the two would stamp gatedOutAt while the goods were still on site, so
+  // "when did this leave?" could never be answered honestly.
+  //
+  // A pass raised BY an HOD skips straight to PENDING_OPS_APPROVAL — raising it
+  // is their endorsement, and leaving stage one in place would just put the pass
+  // back in its own author's queue to approve.
   status String @default("DRAFT")
 
   // Multi-asset items now live in GatePassItem (junction table).
@@ -1653,13 +1682,35 @@ model GatePass {
   vehicleType    String? // HOSPITAL_VEHICLE | OUTSIDE_VEHICLE
 
   // ── Employee / movement details (from the physical gate-pass form) ──────────
+  //
+  // The five strings below are a SNAPSHOT, written at creation from the linked
+  // employee/department. They stay strings because the printed pass must show
+  // the details as they were when it was issued, even if the person later moves
+  // department or changes number — and because the carrier is not always an
+  // employee (couriers and vendor reps carry items out too, and have no record).
   carriedBy       String? // person physically carrying the items (may differ from issuedTo)
   employeeCode    String? // employee ID number
   employeeContact String? // employee contact number
   processDept     String? // process / department name
   toAddress       String? // destination address (the "TO." block on the paper form)
 
+  // Real links behind that snapshot. Null for an external carrier, which is why
+  // these supplement the strings rather than replacing them.
+  carriedByEmployeeId Int?
+  carriedByEmployee   Employee? @relation("GatePassCarriedBy", fields: [carriedByEmployeeId], references: [id])
+  // Department accountable for the movement — not always the carrier's own
+  // (a biomedical technician routinely carries an ICU asset).
+  processDepartmentId Int?
+  processDepartment   Department? @relation("GatePassProcessDept", fields: [processDepartmentId], references: [id])
+
   // ── Approval workflow (mandatory for both RETURNABLE & NON_RETURNABLE) ─────
+  // Approver department is resolved ONCE at submit and stored, so the HOD inbox
+  // query and the approval notification can't disagree. Resolution order:
+  // first asset-linked item's department → requester's own department → null
+  // (null falls back to notifying admins, so a pass is never orphaned).
+  approverDepartmentId Int?
+  approverDepartment   Department? @relation("GatePassApproverDept", fields: [approverDepartmentId], references: [id])
+
   approvalStatus     String    @default("PENDING") // PENDING | APPROVED | REJECTED | AUTO_APPROVED
   requestedById      Int?
   requestedBy        Employee? @relation("GatePassRequester", fields: [requestedById], references: [id])
@@ -1670,17 +1721,39 @@ model GatePass {
   approvalRemarks    String?
   rejectionReason    String?
 
+  // ── Stage two: Operations sign-off ────────────────────────────────────────
+  // Separate columns rather than reusing approvedBy*, so the printed pass can
+  // show both signatures and an audit can tell the two decisions apart.
+  opsApprovedById    Int?
+  opsApprovedBy      Employee? @relation("GatePassOpsApprover", fields: [opsApprovedById], references: [id])
+  opsApprovedAt      DateTime?
+  opsApprovalRemarks String?
+
   // Free-text fallbacks (kept for backwards compat with existing rows)
   approvedBy String?
   issuedBy   String?
 
-  // ── Security verification (gate-out / gate-in) ───────────────────────────
+  // ── Security verification (clear → gate-out → gate-in) ───────────────────
+  // Desk clearance: items checked against the pass, transport recorded.
+  securityClearedAt   DateTime?
+  securityClearedById Int?
+  securityClearedBy   Employee? @relation("GatePassSecurityCleared", fields: [securityClearedById], references: [id])
+
+  // Actual departure.
   gatedOutAt   DateTime?
   gatedOutById Int?
   gatedOutBy   Employee? @relation("GatePassSecurityOut", fields: [gatedOutById], references: [id])
   gatedInAt    DateTime?
   gatedInById  Int?
   gatedInBy    Employee? @relation("GatePassSecurityIn", fields: [gatedInById], references: [id])
+
+  // ── Label printing (security executive prints the sticker for the parcel) ──
+  // Stamped when the compact label PDF is generated, so a supervisor can see
+  // whether a parcel was labelled before releasing it, and two executives don't
+  // print the same one twice.
+  labelPrintedAt   DateTime?
+  labelPrintedById Int?
+  labelPrintedBy   Employee? @relation("GatePassLabelPrinter", fields: [labelPrintedById], references: [id])
 
   // Return tracking (whole pass — per-item return is on GatePassItem)
   returnedAt      DateTime?
@@ -1706,6 +1779,8 @@ model GatePass {
 
   @@index([assetId, createdAt])
   @@index([approvalStatus, status])
+  @@index([status, approverDepartmentId])
+  @@index([gatedOutAt])
   @@map("gatepass")
 }
 

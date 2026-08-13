@@ -53,9 +53,51 @@ async function backfillEwasteFk() {
   console.log(`[e-waste] Linked ${linked} of ${records.length} EWasteRecord rows to gatePassId`);
 }
 
+/**
+ * 3. Populate GatePass.approverDepartmentId on rows submitted before the field
+ *    existed. Uses the same resolution order as submitForApproval: first
+ *    asset-linked item's department → requester's own department → leave null.
+ *
+ *    Without this, already-pending passes only reach an HOD inbox through the
+ *    legacy items→asset→department branch — so a spares-only pass raised before
+ *    the fix would still be invisible.
+ */
+async function backfillApproverDepartment() {
+  const passes = await prisma.gatePass.findMany({
+    where: { approverDepartmentId: null },
+    select: {
+      id: true,
+      requestedById: true,
+      items: { select: { assetId: true }, orderBy: { id: "asc" } },
+    },
+  });
+
+  let set = 0;
+  for (const p of passes) {
+    let deptId: number | null = null;
+
+    for (const it of p.items) {
+      if (it.assetId == null) continue;
+      const a = await prisma.asset.findUnique({ where: { id: it.assetId }, select: { departmentId: true } });
+      if (a?.departmentId != null) { deptId = a.departmentId; break; }
+    }
+
+    if (deptId == null && p.requestedById != null) {
+      const e = await prisma.employee.findUnique({ where: { id: p.requestedById }, select: { departmentId: true } });
+      deptId = e?.departmentId ?? null;
+    }
+
+    if (deptId == null) continue; // nothing to resolve — admins handle these
+    await prisma.gatePass.update({ where: { id: p.id }, data: { approverDepartmentId: deptId } });
+    set++;
+  }
+  console.log(`[gate-pass] Set approverDepartmentId on ${set} of ${passes.length} passes`);
+}
+
 async function main() {
   await backfillItems();
   await backfillEwasteFk();
+  await backfillApproverDepartment();
 }
 
 main()

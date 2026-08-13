@@ -17,6 +17,11 @@ export interface AuthUserPayload {
   role: string;
   name?: string;
   departmentId?: number;   // present on the decoded JWT (set in authenticateToken)
+  // Employee.role (SUPERVISOR | EXECUTIVE | HOD | ...). NOT on the JWT — it's
+  // read from the account row below, so a role change takes effect on the next
+  // request instead of waiting for a re-login. Undefined when the account
+  // lookup is skipped (no userId on the token) or fails.
+  employeeRole?: string;
 }
 
 
@@ -63,8 +68,13 @@ export const authenticateToken = async (
     if (decoded.userId) {
       const account = await prisma.user.findUnique({
         where: { id: Number(decoded.userId) },
-        select: { activeSessionId: true, employee: { select: { isActive: true } } },
+        // `employee.role` rides along on this existing lookup — no extra query.
+        // It's what separates two users who share a User.role (e.g. both
+        // SECURITY) but hold different Employee roles (SUPERVISOR vs EXECUTIVE).
+        select: { activeSessionId: true, employee: { select: { isActive: true, role: true } } },
       });
+
+      req.user.employeeRole = account?.employee?.role ?? undefined;
 
       if (account?.employee?.isActive === false) {
         res.status(401).json({ message: "Your account is inactive. Please contact your administrator." });

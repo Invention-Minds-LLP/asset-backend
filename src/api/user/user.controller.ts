@@ -236,7 +236,8 @@ export const loginUser = async (req: Request, res: Response) => {
       role: user.role,
       name: user.employee?.name,
       lastLogin: new Date(),
-      departmentId: user.employee?.departmentId
+      departmentId: user.employee?.departmentId,
+      employeeRole: user.employee?.role,
     },
   });
   return;
