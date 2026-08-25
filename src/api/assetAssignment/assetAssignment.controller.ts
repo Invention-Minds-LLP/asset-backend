@@ -9,7 +9,6 @@ import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { AssignmentAction, AssignmentStage, AssignmentStatus, AcknowledgementPurpose } from "@prisma/client";
 import { generateAssetId } from "../../utilis/assetIdGenerator";
 import { generateTransferNumber } from "../store-transfer/store-transfer.controller";
-import { closeIndentsForAsset } from "../../utilis/procurementHandoverHelper";
 
 
 
@@ -507,27 +506,12 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
         },
       });
 
-      // The person who asked for it now has it — close the indent behind it.
-      // Non-blocking: an acknowledgement must not fail over bookkeeping.
-      try {
-        closedIndents = await closeIndentsForAsset(
-          assignment.assetId,
-          req.user?.employeeDbId ?? null
-        );
-      } catch (err: any) {
-        console.error("Closing indent on acknowledgement failed:", err?.message);
-      }
-
-      // Carry the in-service date onto any open commissioning sign-off so the
-      // verifier sees when it actually went live.
-      try {
-        await prisma.commissioningSignoff.updateMany({
-          where: { assetId: assignment.assetId, status: "PENDING", installedAt: null },
-          data: { installedAt },
-        });
-      } catch (err: any) {
-        console.error("Stamping commissioning installedAt failed:", err?.message);
-      }
+      // Closing the indent behind the asset, and stamping the in-service date
+      // onto its commissioning sign-off, both belong here — but both need
+      // procurement schema (AssetIndent.closedAt, CommissioningSignoff) that is
+      // not deployed yet. They were non-blocking bookkeeping either way, so
+      // they are left out until the schema ships rather than breaking the build.
+      // `closedIndents` stays empty, keeping the response shape unchanged.
     }
 
     res.json({
