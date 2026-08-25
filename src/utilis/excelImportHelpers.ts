@@ -1,6 +1,7 @@
 import multer from "multer";
 import path from "path";
 import * as XLSX from "xlsx";
+import { tempUploadDir } from "../lib/fileStorage";
 
 const ALLOWED_EXTS = [".xlsx", ".xls"];
 const ALLOWED_MIMES = [
@@ -17,9 +18,15 @@ const excelFileFilter: multer.Options["fileFilter"] = (_req, file, cb) => {
   cb(new Error(`Invalid file type. Only Excel (${ALLOWED_EXTS.join(", ")}) is allowed. Received "${file.originalname}" (${file.mimetype}).`));
 };
 
-/** Multer instance enforcing .xlsx/.xls + 25 MB cap. Use for all import routes. */
+/**
+ * Multer instance enforcing .xlsx/.xls + 25 MB cap. Use for all import routes.
+ *
+ * Staged in the temp directory, not under UPLOADS_DIR: an import sheet is
+ * parsed and discarded, and "uploads/" put it inside the tree served at
+ * /uploads, where anyone could fetch a supplier price list by guessing a name.
+ */
 export const excelUpload = multer({
-  dest: "uploads/",
+  dest: tempUploadDir(),
   fileFilter: excelFileFilter,
   limits: { fileSize: 25 * 1024 * 1024 },
 });
