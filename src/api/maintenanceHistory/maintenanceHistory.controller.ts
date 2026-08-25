@@ -3,30 +3,13 @@ import prisma from "../../prismaClient";
 import formidable from "formidable";
 import fs from "fs";
 import path from "path";
-import { Client } from "basic-ftp";
+import { saveAndGetUrl, uniqueFileName } from "../../lib/fileStorage";
 
 /**
  * ✅ env based
  * PUBLIC_MAINT_REPORT_BASE=https://smartassets.inventionminds.com/maintenance_reports
  */
-// const FTP_CONFIG = {
-//   host: process.env.FTP_HOST || "",
-//   user: process.env.FTP_USER || "",
-//   password: process.env.FTP_PASSWORD || "",
-//   secure: (process.env.FTP_SECURE || "false") === "true",
-// };
-const FTP_CONFIG = {
-  host: "srv680.main-hosting.eu",  // Your FTP hostname
-  user: "u948610439",       // Your FTP username
-  // password: "Bsrenuk@1993",  
-  password: "My@!!iTuD3@202!" ,
-  // Your FTP password
-  secure: false                    // Set to true if using FTPS
-};
 
-const PUBLIC_MAINT_REPORT_BASE =
-  process.env.PUBLIC_MAINT_REPORT_BASE ||
-  "https://smartassets.inventionminds.com/maintenance_reports";
 
 export const getMaintenanceHistory = async (req: Request, res: Response) => {
   const user = (req as any).user;
@@ -89,25 +72,9 @@ export const getMaintenanceHistoryByAsset = async (req: Request, res: Response) 
 const TEMP_FOLDER = path.join(__dirname, "../../temp");
 if (!fs.existsSync(TEMP_FOLDER)) fs.mkdirSync(TEMP_FOLDER, { recursive: true });
 
+// Stored on the server's disk now (src/lib/fileStorage.ts), served from /uploads.
 async function uploadToFTP(localFilePath: string, remoteFilePath: string): Promise<string> {
-  const client = new Client();
-  client.ftp.verbose = false;
-
-  try {
-    await client.access(FTP_CONFIG);
-
-    const remoteDir = path.dirname(remoteFilePath);
-    await client.ensureDir(remoteDir);
-
-    await client.uploadFrom(localFilePath, remoteFilePath);
-    await client.close();
-
-    const fileName = path.basename(remoteFilePath);
-    return `${PUBLIC_MAINT_REPORT_BASE}/${fileName}`;
-  } catch (error) {
-    console.error("FTP upload error:", error);
-    throw new Error("FTP upload failed");
-  }
+  return saveAndGetUrl(localFilePath, remoteFilePath);
 }
 
 export const uploadMaintenanceReport = async (req: Request, res: Response) => {
@@ -157,7 +124,7 @@ export const uploadMaintenanceReport = async (req: Request, res: Response) => {
       const originalFileName = file.originalFilename || `maintenance-${Date.now()}.pdf`;
 
       try {
-        const remoteFilePath = `/public_html/smartassets/maintenance_reports/${originalFileName}`;
+        const remoteFilePath = `maintenance_reports/${uniqueFileName(originalFileName)}`;
         fileUrl = await uploadToFTP(tempPath, remoteFilePath);
         fs.unlinkSync(tempPath);
       } catch (e) {

@@ -2,18 +2,15 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
+import { rejectBlockedUploads, saveUpload, tempUploadDir } from "../../lib/fileStorage";
 
 // ── File upload ────────────────────────────────────────────────────────────────
-const uploadDir = path.join(process.cwd(), "uploads", "service-invoices");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-export const uploadStorage = multer.diskStorage({
-  destination: uploadDir,
-  filename: (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, "_")}`),
+// multer only stages the file; src/lib/fileStorage.ts owns where it lands.
+export const upload = multer({
+  dest: tempUploadDir(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: rejectBlockedUploads,
 });
-export const upload = multer({ storage: uploadStorage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 // ── Shared include ─────────────────────────────────────────────────────────────
 const fullInclude = {
@@ -185,7 +182,7 @@ export const uploadDoc = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = Number(req.params.id);
     if (!req.file) { res.status(400).json({ message: "No file uploaded" }); return; }
-    const fileUrl = `/uploads/service-invoices/${req.file.filename}`;
+    const fileUrl = await saveUpload(req.file.path, "service-invoices", req.file.originalname);
     const updated = await prisma.serviceInvoice.update({
       where: { id }, data: { fileUrl }, include: fullInclude,
     });

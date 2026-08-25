@@ -17,8 +17,11 @@ import {
     directAssignWithAck,
 } from "./assetAssignment.controller";
 import multer from "multer";
+import { tempUploadDir } from "../../lib/fileStorage";
 
-const upload = multer({ dest: "uploads/" });
+// Staging only — the controller moves the photo into permanent storage. "uploads/"
+// staged it inside the tree served at /uploads, exposing it before it was named.
+const upload = multer({ dest: tempUploadDir() });
 
 const router = Router();
 

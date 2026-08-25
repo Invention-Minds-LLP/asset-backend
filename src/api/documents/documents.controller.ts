@@ -2,18 +2,21 @@ import { Request, Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import formidable from "formidable";
-import fs from "fs";
 import path from "path";
-
-const UPLOAD_DIR = path.join(process.cwd(), "uploads", "documents");
-
-// Ensure upload directory exists
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
+import {
+  UnsupportedUploadTypeError,
+  blockedUploadExtension,
+  deleteLocal,
+  saveUpload,
+  tempUploadDir,
+} from "../../lib/fileStorage";
 
 export const uploadDocument = async (req: AuthenticatedRequest, res: Response) => {
-  const form = formidable({ uploadDir: UPLOAD_DIR, keepExtensions: true, maxFileSize: 20 * 1024 * 1024 });
+  const form = formidable({
+    uploadDir: tempUploadDir(),
+    keepExtensions: true,
+    maxFileSize: 20 * 1024 * 1024,
+  });
 
   form.parse(req, async (err, fields, files) => {
     if (err) {
@@ -42,7 +45,19 @@ export const uploadDocument = async (req: AuthenticatedRequest, res: Response) =
         return;
       }
 
-      const fileUrl = `/uploads/documents/${path.basename(file.filepath)}`;
+      // Checked here rather than in formidable's `filter`, which drops the part
+      // silently — the uploader would just be told "no file", which is wrong.
+      const blocked = blockedUploadExtension(file.originalFilename || file.filepath);
+      if (blocked) {
+        res.status(400).json({ message: new UnsupportedUploadTypeError(blocked).message });
+        return;
+      }
+
+      const fileUrl = await saveUpload(
+        file.filepath,
+        "documents",
+        file.originalFilename || path.basename(file.filepath)
+      );
 
       const doc = await prisma.document.create({
         data: {
@@ -119,11 +134,9 @@ export const deleteDocument = async (req: AuthenticatedRequest, res: Response) =
       return;
     }
 
-    // Remove physical file
-    const filePath = path.join(process.cwd(), doc.fileUrl);
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
+    // Remove the physical file. Resolved against UPLOADS_DIR, not the working
+    // directory — the two differ in production, so the old join deleted nothing.
+    await deleteLocal(doc.fileUrl.replace(/^\/?uploads\//i, ""));
 
     await prisma.document.delete({ where: { id } });
     res.status(204).send();

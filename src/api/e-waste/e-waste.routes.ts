@@ -1,8 +1,7 @@
 import { Router } from "express";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import multer from "multer";
-import fs from "fs";
-import path from "path";
+import { rejectBlockedUploads, tempUploadDir } from "../../lib/fileStorage";
 import {
   getAllEWaste,
   getEWasteById,
@@ -13,15 +12,13 @@ import {
   uploadRecyclerCert,
 } from "./e-waste.controller";
 
-// Ensure upload directory exists
-const uploadDir = path.join(process.cwd(), "uploads", "e-waste");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: uploadDir,
-  filename: (_req, file, cb) => cb(null, Date.now() + "-" + file.originalname.replace(/\s+/g, "_")),
+// multer only stages the file; the controller hands it to fileStorage.ts, which
+// owns where uploads actually live.
+const upload = multer({
+  dest: tempUploadDir(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
+  fileFilter: rejectBlockedUploads,
 });
-const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } }); // 10 MB
 
 const router = Router();
 

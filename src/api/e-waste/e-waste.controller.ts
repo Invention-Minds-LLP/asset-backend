@@ -2,6 +2,7 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { notify, getAdminIds } from "../../utilis/notificationHelper";
+import { saveUpload } from "../../lib/fileStorage";
 
 // ── Auto-ref number generator ─────────────────────────────────────────────────
 async function generateEWasteRef(): Promise<string> {
@@ -228,7 +229,7 @@ export const uploadRecyclerCert = async (req: AuthenticatedRequest, res: Respons
     const id = Number(req.params.id);
     if (!req.file) { res.status(400).json({ message: "No file uploaded" }); return; }
 
-    const fileUrl = `/uploads/e-waste/${req.file.filename}`;
+    const fileUrl = await saveUpload(req.file.path, "e-waste", req.file.originalname);
 
     const updated = await prisma.eWasteRecord.update({
       where: { id },

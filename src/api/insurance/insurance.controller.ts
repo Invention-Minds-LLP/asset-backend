@@ -2,6 +2,7 @@
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
+import { saveUpload } from "../../lib/fileStorage";
 
 export const addInsurancePolicy = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -165,7 +166,7 @@ export const uploadInsuranceDocument = async (req: AuthenticatedRequest, res: Re
       return;
     }
 
-    const filePath = `/uploads/insurance/${req.file.filename}`;
+    const filePath = await saveUpload(req.file.path, "insurance", req.file.originalname);
 
     const updated = await prisma.assetInsurance.update({
       where: { id },

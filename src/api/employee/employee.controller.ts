@@ -1,5 +1,12 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
+import {
+  MAX_SCOPED_DEPARTMENTS,
+  getConfiguredDepartmentIds,
+  getResponsibleDepartments,
+  hasBroadDepartmentAccess,
+  setConfiguredDepartmentIds,
+} from "../../utilis/departmentScopeHelper";
 
 export const getAllEmployees = async (req: Request, res: Response) => {
   try {
@@ -73,7 +80,36 @@ function pickEmployeeFields(body: any) {
     email:         trim(body.email),
     phone:         trim(body.phone),
     isActive:      typeof body.isActive === 'boolean' ? body.isActive : undefined,
+    isOutsourced:  typeof body.isOutsourced === 'boolean' ? body.isOutsourced : undefined,
   };
+}
+
+// Outsourced staff carry an "OS-" prefix in front of their normal employee ID,
+// so IM001 becomes OS-IM001. The base ID is kept intact rather than renumbered:
+// it stays readable, and agency numbering survives.
+const OS_PREFIX = 'OS-';
+const hasOsPrefix = (id: string) => id.toUpperCase().startsWith(OS_PREFIX);
+
+/**
+ * Apply the prefix rule to a new employee.
+ *
+ * Enforced here, not just in the form: createEmployee takes whatever
+ * employeeID is posted, so a direct API call would otherwise sidestep it.
+ * Idempotent — an operator who types "OS-IM001" with the toggle on doesn't get
+ * "OS-OS-IM001".
+ *
+ * Returns an error message instead of throwing so the caller can 400 cleanly.
+ */
+function applyOutsourcedPrefix(employeeID: string, isOutsourced: boolean): { id?: string; error?: string } {
+  if (isOutsourced) {
+    return { id: hasOsPrefix(employeeID) ? employeeID : `${OS_PREFIX}${employeeID}` };
+  }
+  // Guard the other direction too, so an in-house record can't be given an
+  // outsourced-looking ID and quietly skew headcount the other way.
+  if (hasOsPrefix(employeeID)) {
+    return { error: `Employee ID "${employeeID}" starts with ${OS_PREFIX}, which is reserved for outsourced staff. Tick "Outsourced employee" or use a different ID.` };
+  }
+  return { id: employeeID };
 }
 
 export const createEmployee = async (req: Request, res: Response) => {
@@ -83,6 +119,13 @@ export const createEmployee = async (req: Request, res: Response) => {
       res.status(400).json({ message: 'name and employeeID are required' });
       return;
     }
+
+    const isOutsourced = data.isOutsourced === true;
+    const { id, error } = applyOutsourcedPrefix(data.employeeID, isOutsourced);
+    if (error) { res.status(400).json({ message: error }); return; }
+    data.employeeID = id;
+    data.isOutsourced = isOutsourced;
+
     const employee = await prisma.employee.create({ data: data as any });
     res.status(201).json(employee);
   } catch (err: any) {
@@ -100,6 +143,13 @@ export const updateEmployee = async (req: Request, res: Response) => {
     for (const [k, v] of Object.entries(raw)) {
       if (v !== undefined) data[k] = v;
     }
+
+    // Outsourced status is fixed at creation. The employeeID it pairs with is
+    // immutable (User.employeeID FKs to it, so renaming orphans the login),
+    // which means flipping the flag later would leave an "OS-" ID on someone
+    // marked in-house, or the reverse. Existing staff are not reclassified —
+    // deactivate and re-create instead.
+    delete data.isOutsourced;
     const employee = await prisma.employee.update({
       where: { id },
       data,
@@ -197,5 +247,88 @@ export const getEmployeeAssets = async (req: Request, res: Response) => {
     res.json({ employee, totalAssets: tagged.length, assets: tagged });
   } catch (e: any) {
     res.status(500).json({ message: e.message || "Failed to fetch employee assets" });
+  }
+};
+
+// ── Department responsibility ────────────────────────────────────────────────
+// One HOD can answer for several departments. See utilis/departmentScopeHelper
+// for where that list is held and how it is derived.
+
+// GET /api/employees/my-departments — what the caller is responsible for.
+export const getMyDepartments = async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const departments = await getResponsibleDepartments(user);
+    res.json({
+      departments,
+      primaryDepartmentId: departments.find((d) => d.isPrimary)?.id ?? null,
+      // Broad-access roles see every department anyway, so the switcher these
+      // feed should offer the full list instead of this one.
+      hasBroadAccess: hasBroadDepartmentAccess(user),
+    });
+  } catch (e: any) {
+    console.error("getMyDepartments error:", e);
+    res.status(500).json({ message: e.message || "Failed to load departments" });
+  }
+};
+
+function isAdmin(user: any): boolean {
+  return ["ADMIN", "CEO_COO", "OPERATIONS"].includes((user?.role || "").toUpperCase());
+}
+
+// GET /api/employees/:id/departments — the granted list, for the admin screen.
+export const getEmployeeDepartments = async (req: Request, res: Response) => {
+  try {
+    if (!isAdmin((req as any).user)) { res.status(403).json({ message: "Admin only" }); return; }
+    const id = Number(req.params.id);
+    const employee = await prisma.employee.findUnique({
+      where: { id },
+      select: { id: true, name: true, employeeID: true, role: true, departmentId: true },
+    });
+    if (!employee) { res.status(404).json({ message: "Employee not found" }); return; }
+
+    const granted = await getConfiguredDepartmentIds(id);
+    res.json({
+      employee,
+      primaryDepartmentId: employee.departmentId,
+      // The primary department is implicit and cannot be revoked here.
+      departmentIds: granted.filter((d) => d !== employee.departmentId),
+      maxDepartments: MAX_SCOPED_DEPARTMENTS,
+    });
+  } catch (e: any) {
+    console.error("getEmployeeDepartments error:", e);
+    res.status(500).json({ message: e.message || "Failed to load departments" });
+  }
+};
+
+// PUT /api/employees/:id/departments — body { departmentIds: number[] }.
+export const setEmployeeDepartments = async (req: Request, res: Response) => {
+  try {
+    if (!isAdmin((req as any).user)) { res.status(403).json({ message: "Admin only" }); return; }
+    const id = Number(req.params.id);
+    const requested: unknown[] | null = Array.isArray(req.body?.departmentIds) ? req.body.departmentIds : null;
+    if (!requested) { res.status(400).json({ message: "departmentIds must be an array" }); return; }
+
+    const employee = await prisma.employee.findUnique({ where: { id }, select: { id: true, departmentId: true } });
+    if (!employee) { res.status(404).json({ message: "Employee not found" }); return; }
+
+    const wanted: number[] = [...new Set(requested.map(Number).filter((n) => Number.isFinite(n) && n > 0))]
+      .filter((d) => d !== employee.departmentId);
+    if (wanted.length > MAX_SCOPED_DEPARTMENTS) {
+      res.status(400).json({ message: `At most ${MAX_SCOPED_DEPARTMENTS} extra departments` });
+      return;
+    }
+
+    const existing = await prisma.department.findMany({ where: { id: { in: wanted } }, select: { id: true } });
+    if (existing.length !== wanted.length) {
+      res.status(400).json({ message: "One or more departments do not exist" });
+      return;
+    }
+
+    const saved = await setConfiguredDepartmentIds(id, wanted);
+    res.json({ employeeId: id, departmentIds: saved });
+  } catch (e: any) {
+    console.error("setEmployeeDepartments error:", e);
+    res.status(500).json({ message: e.message || "Failed to save departments" });
   }
 };

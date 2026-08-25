@@ -4,19 +4,14 @@ import prisma from "../../prismaClient";
 import formidable from "formidable";
 import fs from "fs";
 import path from "path";
-import { Client } from "basic-ftp";
+import { saveAndGetUrl } from "../../lib/fileStorage";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { AssignmentAction, AssignmentStage, AssignmentStatus, AcknowledgementPurpose } from "@prisma/client";
 import { generateAssetId } from "../../utilis/assetIdGenerator";
 import { generateTransferNumber } from "../store-transfer/store-transfer.controller";
+import { closeIndentsForAsset } from "../../utilis/procurementHandoverHelper";
 
 
-const FTP_CONFIG = {
-    host: "srv680.main-hosting.eu",  // Your FTP hostname
-    user: "u948610439",       // Your FTP username
-    password: "My@!!iTuD3@202!",   // Your FTP password
-    secure: false                    // Set to true if using FTPS
-};
 
 
 // -----------------------------
@@ -257,7 +252,7 @@ export const getMyPendingAcknowledgements = async (req: AuthenticatedRequest, re
 //         let photoUrl: string | null = null;
 //         if (req.file?.path) {
 //             const original = req.file.originalname || `ack-${assignmentId}-${Date.now()}.jpg`;
-//             const remotePath = `/public_html/smartassets/assignment_photos/${Date.now()}-${original}`;
+//             const remotePath = `assignment_photos/${Date.now()}-${original}`;
 
 //             photoUrl = await uploadToFTP(req.file.path, remotePath);
 
@@ -375,7 +370,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
 
     if (req.file?.path) {
       const original = req.file.originalname || `ack-${assignmentId}-${Date.now()}.jpg`;
-      const remotePath = `/public_html/smartassets/assignment_photos/${Date.now()}-${original}`;
+      const remotePath = `assignment_photos/${Date.now()}-${original}`;
       photoUrl = await uploadToFTP(req.file.path, remotePath);
       fs.unlinkSync(req.file.path);
     }
@@ -495,19 +490,44 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
 
     // End-user acknowledgement puts the asset into service → ACTIVE.
     // (HOD / supervisor / target-HOD stages leave it IN_STORE.)
+    let closedIndents: any[] = [];
     if (assignment.stage === AssignmentStage.END_USER) {
       const a = await prisma.asset.findUnique({
         where: { id: assignment.assetId },
         select: { installedAt: true },
       });
+      const installedAt = a?.installedAt ?? new Date();
+
       await prisma.asset.update({
         where: { id: assignment.assetId },
         data: {
           status: "ACTIVE",
           // Stamp the in-service date if it wasn't already set.
-          ...(a?.installedAt ? {} : { installedAt: new Date() }),
+          ...(a?.installedAt ? {} : { installedAt }),
         },
       });
+
+      // The person who asked for it now has it — close the indent behind it.
+      // Non-blocking: an acknowledgement must not fail over bookkeeping.
+      try {
+        closedIndents = await closeIndentsForAsset(
+          assignment.assetId,
+          req.user?.employeeDbId ?? null
+        );
+      } catch (err: any) {
+        console.error("Closing indent on acknowledgement failed:", err?.message);
+      }
+
+      // Carry the in-service date onto any open commissioning sign-off so the
+      // verifier sees when it actually went live.
+      try {
+        await prisma.commissioningSignoff.updateMany({
+          where: { assetId: assignment.assetId, status: "PENDING", installedAt: null },
+          data: { installedAt },
+        });
+      } catch (err: any) {
+        console.error("Stamping commissioning installedAt failed:", err?.message);
+      }
     }
 
     res.json({
@@ -515,6 +535,7 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
       assignment: updatedAssignment,
       acknowledgementRun,
       ...(issuedAssetId ? { issuedAssetId } : {}),
+      ...(closedIndents.length ? { closedIndents } : {}),
     });
   } catch (e: any) {
     console.error(e);
@@ -1072,29 +1093,11 @@ const TEMP_FOLDER = path.join(__dirname, "../../temp");
 if (!fs.existsSync(TEMP_FOLDER)) {
     fs.mkdirSync(TEMP_FOLDER, { recursive: true });
 }
+// Stored on the server's disk now (src/lib/fileStorage.ts), served from /uploads.
+// The old version returned an assets_images URL regardless of where the file
+// actually went, so these photos never loaded; the URL now follows the path.
 async function uploadToFTP(localFilePath: string, remoteFilePath: string): Promise<string> {
-    const client = new Client();
-    client.ftp.verbose = true;
-
-    try {
-        await client.access(FTP_CONFIG);
-
-        console.log("Connected to FTP server for asset image upload");
-
-        const remoteDir = path.dirname(remoteFilePath);
-        await client.ensureDir(remoteDir);
-
-        await client.uploadFrom(localFilePath, remoteFilePath);
-        console.log(`Uploaded asset image to: ${remoteFilePath}`);
-
-        await client.close();
-
-        const fileName = path.basename(remoteFilePath);
-        return `https://smartassets.inventionminds.com/assets_images/${fileName}`;
-    } catch (error) {
-        console.error("FTP upload error:", error);
-        throw new Error("FTP upload failed");
-    }
+    return saveAndGetUrl(localFilePath, remoteFilePath);
 }
 
 export const resendAcknowledgement = async (req: AuthenticatedRequest, res: Response) => {

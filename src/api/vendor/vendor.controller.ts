@@ -4,9 +4,7 @@ import XLSX from "xlsx";
 import multer from "multer";
 import fs from "fs";
 import path from "path";
-
-const uploadDir = path.join(process.cwd(), "uploads", "vendor-import");
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+import { tempUploadDir } from "../../lib/fileStorage";
 
 const ALLOWED_EXTS = [".xlsx", ".xls"];
 const ALLOWED_MIMES = [
@@ -14,8 +12,10 @@ const ALLOWED_MIMES = [
   "application/vnd.ms-excel",
   "application/octet-stream",
 ];
+// Staged, parsed, discarded — an import sheet is never stored, so it must not
+// land under UPLOADS_DIR where it would be fetchable at /uploads/<file>.
 export const vendorUpload = multer({
-  dest: uploadDir,
+  dest: tempUploadDir(),
   limits: { fileSize: 10 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     const ext = path.extname(file.originalname).toLowerCase();

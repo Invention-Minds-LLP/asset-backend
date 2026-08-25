@@ -3,18 +3,15 @@ import prisma from "../../prismaClient";
 import formidable from "formidable";
 import fs from "fs";
 import path from "path";
-import { Client } from "basic-ftp";
+import { saveAndGetUrl, uniqueFileName } from "../../lib/fileStorage";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { logAction } from "../audit-trail/audit-trail.controller";
 import { generateAssetId, generateLegacyAssetId, generateStoreAssetId } from "../../utilis/assetIdGenerator";
+import { manualAssetAllowed } from "../../utilis/procurementControlsHelper";
+import { getResponsibleDepartmentIds } from "../../utilis/departmentScopeHelper";
 
 
-const FTP_CONFIG = {
-  host: "srv680.main-hosting.eu",  // Your FTP hostname
-  user: "u948610439",       // Your FTP username
-  password: "My@!!iTuD3@202!",   // Your FTP password
-  secure: false                    // Set to true if using FTPS
-};
+// Asset images live under uploads/assets_images (src/lib/fileStorage.ts).
 
 
 // export const getAllAssets = async (req: Request, res: Response) => {
@@ -46,17 +43,11 @@ export const getAllAssets = async (req: Request, res: Response) => {
     if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'CFO' || role === 'OPERATIONS' || isStoreDept) {
       where = {};
     } else if (role === 'HOD') {
-      where ={
-        departmentId: Number(departmentId)
+      // An HOD can answer for several departments. An asset sits in exactly one
+      // of them, so this stays a plain IN — no asset is shared between HODs.
+      where = {
+        departmentId: { in: await getResponsibleDepartmentIds(user, { includeSupervised: false }) }
       }
-      // where = {
-      //   OR: [
-      //     { departmentId: Number(departmentId) },
-      //   ],
-      //   NOT: {
-      //     targetDepartmentId: Number(departmentId)
-      //   }
-      // }
     } else if (role === 'SUPERVISOR') {
       where = {
         OR: [
@@ -65,9 +56,9 @@ export const getAllAssets = async (req: Request, res: Response) => {
         ],
       };
     } else {
-      // EXECUTIVE — see assets in their department
+      // EXECUTIVE — see assets in their department(s)
       where = departmentId
-        ? { departmentId: Number(departmentId) }
+        ? { departmentId: { in: await getResponsibleDepartmentIds(user, { includeSupervised: false }) } }
         : { allottedToId: Number(employeeDbId) };
     }
 
@@ -151,7 +142,7 @@ async function buildAssetAccessWhere(user: any): Promise<any> {
   if (role === 'ADMIN' || role === 'CEO_COO' || role === 'FINANCE' || role === 'OPERATIONS' || isStoreDept) {
     return {};
   } else if (role === 'HOD') {
-    return { departmentId: Number(departmentId) };
+    return { departmentId: { in: await getResponsibleDepartmentIds(user, { includeSupervised: false }) } };
   } else if (role === 'SUPERVISOR') {
     return {
       OR: [
@@ -161,7 +152,9 @@ async function buildAssetAccessWhere(user: any): Promise<any> {
     };
   } else {
     // EXECUTIVE — department assets, else own allotted
-    return departmentId ? { departmentId: Number(departmentId) } : { allottedToId: Number(employeeDbId) };
+    return departmentId
+      ? { departmentId: { in: await getResponsibleDepartmentIds(user, { includeSupervised: false }) } }
+      : { allottedToId: Number(employeeDbId) };
   }
 }
 
@@ -482,6 +475,25 @@ export const getAssetById = async (req: Request, res: Response) => {
 export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const data = req.body;
+
+    // ── Procurement provenance ───────────────────────────────────────────────
+    // A tenant that buys everything through this system can insist an asset
+    // trace back to a receipt. Otherwise an asset appears in the register with
+    // no order, no invoice and no vendor behind it — and reconciling the
+    // register to the books becomes guesswork.
+    //
+    // Legacy assets are exempt by definition: they pre-date the system, which
+    // is the whole reason the legacy flag exists.
+    const isLegacyForProvenance = data.isLegacyAsset === true || data.isLegacyAsset === "true";
+    if (!isLegacyForProvenance && !data.goodsReceiptId && !(await manualAssetAllowed())) {
+      res.status(403).json({
+        message:
+          "This tenant requires every asset to come from a goods receipt. " +
+          "Receive it against its purchase order, or mark it as a legacy asset if it pre-dates the system. " +
+          "(MANUAL_ASSET_WITHOUT_PROCUREMENT in Configuration controls this.)",
+      });
+      return;
+    }
 
     // ── 7-year lifetime guard ────────────────────────────────────────────────
     if (data.expectedLifetime && data.expectedLifetimeUnit) {
@@ -952,6 +964,35 @@ export const updateAsset = async (req: Request, res: Response) => {
       return;
     }
 
+    // ── Uniqueness pre-check (serialNumber / referenceCode are @unique on Asset) ──
+    // Sub-assets, GRN-accepted units and work-order replacements are rows in the same
+    // table, so a serial the user types may already sit on a record that never shows
+    // up in the asset list. Name the clashing asset instead of letting Prisma throw
+    // an opaque P2002 that the form reports as a bare "Failed to save".
+    const referenceProvided = data.referenceCode !== undefined && data.referenceCode !== null && String(data.referenceCode).trim() !== "";
+    if (serialProvided) {
+      const serial = String(data.serialNumber).trim();
+      const clash = await prisma.asset.findFirst({
+        where: { serialNumber: serial, NOT: { id } },
+        select: { assetId: true },
+      });
+      if (clash) {
+        res.status(400).json({ message: `Serial number "${serial}" already belongs to asset ${clash.assetId}` });
+        return;
+      }
+    }
+    if (referenceProvided) {
+      const reference = String(data.referenceCode).trim();
+      const clash = await prisma.asset.findFirst({
+        where: { referenceCode: reference, NOT: { id } },
+        select: { assetId: true },
+      });
+      if (clash) {
+        res.status(400).json({ message: `Reference code "${reference}" already belongs to asset ${clash.assetId}` });
+        return;
+      }
+    }
+
     const updateData: any = {
       assetName: data.assetName,
       assetType: data.assetType,
@@ -962,8 +1003,6 @@ export const updateAsset = async (req: Request, res: Response) => {
       amortizationMethod: data.amortizationMethod ?? null,
       amortizationStartDate: data.amortizationStartDate ? new Date(data.amortizationStartDate) : null,
       residualValuePercent: data.residualValuePercent ? Number(data.residualValuePercent) : null,
-      referenceCode: data.referenceCode ? String(data.referenceCode).trim() : null,
-      serialNumber: serialProvided ? String(data.serialNumber).trim() : null,
       assetPhoto: data.assetPhoto,
       rfidCode: data.rfidCode,
       manufacturer: data.manufacturer ?? null,
@@ -1007,6 +1046,16 @@ export const updateAsset = async (req: Request, res: Response) => {
       // Revenue log applicability
       isRevenueLogApplicable: data.isRevenueLogApplicable ? true : false,
     };
+
+    // Unique identifiers are written only when the key is present in the body —
+    // a partial PUT (section saves, voucher patches) that omits them must not blank
+    // the stored values. Same guard as purchaseVoucherNo below.
+    if (Object.prototype.hasOwnProperty.call(data, "serialNumber")) {
+      updateData.serialNumber = serialProvided ? String(data.serialNumber).trim() : null;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, "referenceCode")) {
+      updateData.referenceCode = referenceProvided ? String(data.referenceCode).trim() : null;
+    }
 
     // ---------------------------
     // CATEGORY (SAFE CONNECT)
@@ -1142,6 +1191,21 @@ export const updateAsset = async (req: Request, res: Response) => {
 
   } catch (err: any) {
     console.error(err);
+    // Unique-constraint violation — name the field rather than returning a bare 500.
+    // MySQL reports meta.target as the constraint name (asset_serialNumber_key), so
+    // match on substring rather than expecting a field list.
+    if (err?.code === "P2002") {
+      const target = Array.isArray(err?.meta?.target)
+        ? err.meta.target.join(",")
+        : String(err?.meta?.target ?? "");
+      const label = /serialNumber/i.test(target) ? "serial number"
+        : /referenceCode/i.test(target) ? "reference code"
+          : /storeAssetId/i.test(target) ? "stores reference"
+            : /assetId/i.test(target) ? "asset ID"
+              : "value";
+      res.status(409).json({ message: `Another asset already uses this ${label}.` });
+      return;
+    }
     res.status(500).json({ message: "Asset update error", error: err.message });
   }
 };
@@ -1204,29 +1268,9 @@ const TEMP_FOLDER = path.join(__dirname, "../../temp");
 if (!fs.existsSync(TEMP_FOLDER)) {
   fs.mkdirSync(TEMP_FOLDER, { recursive: true });
 }
+// Stored on the server's disk now (src/lib/fileStorage.ts), served from /uploads.
 async function uploadToFTP(localFilePath: string, remoteFilePath: string): Promise<string> {
-  const client = new Client();
-  client.ftp.verbose = true;
-
-  try {
-    await client.access(FTP_CONFIG);
-
-    console.log("Connected to FTP server for asset image upload");
-
-    const remoteDir = path.dirname(remoteFilePath);
-    await client.ensureDir(remoteDir);
-
-    await client.uploadFrom(localFilePath, remoteFilePath);
-    console.log(`Uploaded asset image to: ${remoteFilePath}`);
-
-    await client.close();
-
-    const fileName = path.basename(remoteFilePath);
-    return `https://smartassets.inventionminds.com/assets_images/${fileName}`;
-  } catch (error) {
-    console.error("FTP upload error:", error);
-    throw new Error("FTP upload failed");
-  }
+  return saveAndGetUrl(localFilePath, remoteFilePath);
 }
 
 // Targeted update of make/model only — used from the Specifications tab so
@@ -1356,7 +1400,7 @@ export const uploadAssetImage = async (req: Request, res: Response) => {
         return
       }
 
-      const remoteFilePath = `/public_html/smartassets/assets_images/${originalFileName}`;
+      const remoteFilePath = `assets_images/${uniqueFileName(originalFileName)}`;
 
       let fileUrl: string;
       try {

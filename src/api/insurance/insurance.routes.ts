@@ -1,15 +1,15 @@
 import express from "express";
 import { authenticateToken } from "../../middleware/authMiddleware";
 import multer from "multer";
+import { rejectBlockedUploads, tempUploadDir } from "../../lib/fileStorage";
 
-const storage = multer.diskStorage({
-  destination: "uploads/insurance",
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + "-" + file.originalname)
-  }
+// multer only stages the file; the controller hands it to fileStorage.ts, which
+// owns where uploads actually live. 10 MB matches the other document intakes.
+export const upload = multer({
+  dest: tempUploadDir(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: rejectBlockedUploads,
 });
-
-export const upload = multer({ storage });
 
 
 const router = express.Router();
