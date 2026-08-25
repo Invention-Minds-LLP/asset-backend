@@ -1,6 +1,7 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { getResponsibleDepartments, resolveDashboardDepartment } from "../../utilis/departmentScopeHelper";
 
 // Drill-down: the asset list behind a KPI / gap tile. Keyed by the same keys the
 // dashboard emits so a tile click maps directly to its rows.
@@ -19,8 +20,10 @@ const LIST_WHERE: Record<string, any> = {
 export const getHodDashboardList = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user as any;
-    const isAdmin = ["ADMIN", "CEO_COO", "OPERATIONS", "FINANCE", "CFO"].includes((user?.role || "").toUpperCase());
-    const deptId = isAdmin && req.query.departmentId ? Number(req.query.departmentId) : Number(user?.departmentId);
+    // An HOD running several departments may pick any of them; the resolver
+    // rejects a department they don't answer for.
+    const { departmentId: deptId, forbidden } = await resolveDashboardDepartment(user, req.query.departmentId);
+    if (forbidden) { res.status(403).json({ message: "Not your department" }); return; }
     const key = String(req.query.key || "total");
     if (!deptId) { res.status(400).json({ message: "No department" }); return; }
     const keyWhere = LIST_WHERE[key];
@@ -106,12 +109,15 @@ function bucketize(dates: (Date | null | undefined)[], buckets: { start: Date; e
 export const getHodDashboard = async (req: AuthenticatedRequest, res: Response) => {
   try {
     const user = req.user as any;
-    const isAdmin = ["ADMIN", "CEO_COO", "OPERATIONS", "FINANCE", "CFO"].includes((user?.role || "").toUpperCase());
-    const deptId = isAdmin && req.query.departmentId ? Number(req.query.departmentId) : Number(user?.departmentId);
+    const { departmentId: deptId, forbidden } = await resolveDashboardDepartment(user, req.query.departmentId);
+    if (forbidden) { res.status(403).json({ message: "Not your department" }); return; }
     if (!deptId) { res.status(400).json({ message: "No department to load a dashboard for" }); return; }
 
     const dept = await prisma.department.findUnique({ where: { id: deptId }, select: { id: true, name: true } });
     if (!dept) { res.status(404).json({ message: "Department not found" }); return; }
+
+    // Rendered as the department switcher when it holds more than one entry.
+    const responsibleDepartments = await getResponsibleDepartments(user);
 
     // Main assets only (exclude sub-assets), scoped to the HOD's department.
     const scope = { departmentId: deptId, parentAssetId: null } as const;
@@ -230,6 +236,7 @@ export const getHodDashboard = async (req: AuthenticatedRequest, res: Response) 
     res.json({
       departmentId: deptId,
       departmentName: dept.name,
+      departments: responsibleDepartments,
       profile: "HOD_ASSIGNMENT",
       data: {
         kpis: [

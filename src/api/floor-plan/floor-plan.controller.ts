@@ -1,23 +1,13 @@
 import { Request, Response } from "express";
-import fs from "fs";
-import path from "path";
 import multer from "multer";
 import prisma from "../../prismaClient";
+import { saveUpload, tempUploadDir } from "../../lib/fileStorage";
 import { asPolygon, pointInPolygon, polygonBounds, polygonCentroid } from "../../utilis/geometry";
 
-// ─── Image upload (stored under /uploads/floor-plans, served by static mw) ───
-const DEST = path.join(process.cwd(), "uploads", "floor-plans");
-fs.mkdirSync(DEST, { recursive: true });
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, DEST),
-  filename: (_req, file, cb) => {
-    const safe = file.originalname.replace(/[^a-zA-Z0-9.\-_]/g, "_");
-    cb(null, `${Date.now()}-${safe}`);
-  },
-});
+// ─── Image upload ────────────────────────────────────────────────────────────
+// multer only stages the file; src/lib/fileStorage.ts decides where it lands.
 export const floorPlanUpload = multer({
-  storage,
+  dest: tempUploadDir(),
   limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter: (_req, file, cb) => {
     if (/^image\/(png|jpe?g|webp|gif|svg\+xml)$/.test(file.mimetype)) return cb(null, true);
@@ -33,13 +23,15 @@ export const uploadFloorPlan = async (req: Request, res: Response): Promise<void
     if (!file) { res.status(400).json({ message: "Image file is required" }); return; }
     if (!branchId) { res.status(400).json({ message: "branchId is required" }); return; }
 
+    const imageUrl = await saveUpload(file.path, "floor-plans", file.originalname);
+
     const plan = await (prisma as any).floorPlan.create({
       data: {
         name: name?.trim() || file.originalname,
         branchId: Number(branchId),
         block: block || null,
         floor: floor || null,
-        imageUrl: `/uploads/floor-plans/${file.filename}`,
+        imageUrl,
         width: width ? Number(width) : null,
         height: height ? Number(height) : null,
         createdById: (req as any).user?.employeeDbId ?? null,

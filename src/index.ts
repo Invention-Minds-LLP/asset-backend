@@ -98,13 +98,13 @@ import electricityLogRoutes from "./api/electricity-log/electricity-log.routes";
 import materialInwardRegisterRoutes from "./api/material-inward-register/material-inward-register.routes";
 
 import cors from "cors";
-import path from "path";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { startScheduler } from "./scheduler";
 import trialRoutes from "./api/trial/trial.routes";
 import { trialGuard } from "./middleware/trialGuard";
 import { softAuth, accessLogger } from "./middleware/accessLog";
+import { UPLOADS_DIR } from "./lib/fileStorage";
 
 const app = express();
 // Honour X-Forwarded-Proto from the TLS-terminating reverse proxy so req.secure is
@@ -142,8 +142,11 @@ app.use(cookieParser());
 app.use(softAuth);
 app.use(accessLogger);
 
-// Serve uploaded files
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+// Serve uploaded files from the server's own disk. Everything written by
+// src/lib/fileStorage.ts lands under UPLOADS_DIR and is exposed at
+// /uploads/<folder>/<file>. In production nginx serves /uploads directly; this
+// route is the in-process fallback (and what's used without nginx).
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '1d' }));
 
 app.use(cors({
   origin: ["http://localhost:4200", "https://sademo.inventionminds.com", "http://192.168.14.36:4200", "https://smartassetsjmrh.imapps.in", 'http://localhost:8100', 'http://localhost',          // Capacitor Android
@@ -311,6 +314,15 @@ app.get("/", (req, res) => {
 // Error handler middleware (optional, but good practice)
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error(err.stack);
+
+  // A rejected upload is the caller's mistake, not a server fault, and the
+  // reason has to reach them — "Internal Server Error" leaves someone retrying
+  // the same .docx forever. Multer surfaces its own limits the same way.
+  if (err?.status === 400 || err?.code === "LIMIT_FILE_SIZE") {
+    res.status(400).json({ message: err.message, error: err.message });
+    return;
+  }
+
   res.status(500).json({ error: "Internal Server Error" });
 });
 
