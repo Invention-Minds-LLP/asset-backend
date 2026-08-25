@@ -1448,7 +1448,9 @@ export const uploadTicketImage = async (req: any, res: Response) => {
           data: { photoOfIssue: fileUrl },
         });
 
-        fs.unlinkSync(tempFilePath);
+        // saveLocal() already unlinked the staged file. Deleting it again threw
+        // ENOENT here — after the ticket row had been updated — so the photo
+        // saved but the user was told "Ticket image upload failed".
         res.json({ url: fileUrl });
         return;
       } catch (uploadErr) {

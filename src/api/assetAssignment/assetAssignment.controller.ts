@@ -370,8 +370,9 @@ export const acknowledgeAssignment = async (req: AuthenticatedRequest, res: Resp
     if (req.file?.path) {
       const original = req.file.originalname || `ack-${assignmentId}-${Date.now()}.jpg`;
       const remotePath = `assignment_photos/${Date.now()}-${original}`;
+      // saveLocal() unlinks the staged file once it is stored — deleting it
+      // again here threw ENOENT after every successful upload.
       photoUrl = await uploadToFTP(req.file.path, remotePath);
-      fs.unlinkSync(req.file.path);
     }
 
     // 1. update assignment

@@ -1418,8 +1418,8 @@ export const uploadAssetImage = async (req: Request, res: Response) => {
 
       console.log("Uploaded asset image URL:", fileUrl);
 
-      // Delete local temp file
-      fs.unlinkSync(tempFilePath);
+      // The temp file is gone already — saveLocal() moves it into storage and
+      // unlinks it. Deleting it again here threw ENOENT out of this callback.
 
       res.json({ url: fileUrl });
       return

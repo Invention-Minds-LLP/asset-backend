@@ -125,8 +125,9 @@ export const uploadMaintenanceReport = async (req: Request, res: Response) => {
 
       try {
         const remoteFilePath = `maintenance_reports/${uniqueFileName(originalFileName)}`;
+        // saveLocal() already unlinked the staged file; deleting it again threw
+        // ENOENT inside this try, turning a successful upload into a 500.
         fileUrl = await uploadToFTP(tempPath, remoteFilePath);
-        fs.unlinkSync(tempPath);
       } catch (e) {
         res.status(500).json({ error: "FTP upload failed." });
         return;

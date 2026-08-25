@@ -1006,8 +1006,9 @@ export const completeTransferredAssetReturn = async (
       const original =
         req.file.originalname || `transfer-return-${returnTransferId}-${Date.now()}.jpg`;
       const remotePath = `/public_html/smartassets/return_photos/${Date.now()}-${original}`;
+      // saveLocal() unlinks the staged file once it is stored — deleting it
+      // again here threw ENOENT after every successful upload.
       photoUrl = await uploadToFTP(req.file.path, remotePath);
-      fs.unlinkSync(req.file.path);
     }
 
     const currentLocation = await prisma.assetLocation.findFirst({

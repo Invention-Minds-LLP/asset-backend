@@ -420,8 +420,10 @@ export const uploadContractDocument = async (req: Request, res: Response) => {
 
     try {
       const remoteFilePath = `/public_html/smartassets/contract_docs/${safeName}`;
+      // No unlink here: saveLocal() already removed the staged file. Deleting
+      // it again threw ENOENT *inside this try*, so a contract document that
+      // uploaded perfectly was reported to the user as "FTP upload failed".
       const url = await uploadToFTP(tempPath, remoteFilePath);
-      fs.unlinkSync(tempPath);
       res.json({ url });
     } catch (e) {
       console.error(e);
