@@ -68,9 +68,17 @@ export function buildRoleFilter(user: any): any {
   return {}; // ADMIN and others see everything
 }
 
-/** Build a Prisma where clause for assets from query + role */
+/**
+ * Build a Prisma where clause for assets from query + role.
+ *
+ * Sub-assets are excluded. A component belongs to the asset it is fitted to, so
+ * counting it as a separate purchase inflates the register — one machine with
+ * two hundred parts read as two hundred and one acquisitions — and its cost is
+ * usually already inside the parent's. Callers that specifically want components
+ * override `parentAssetId` after spreading this (see getFinancialSummary).
+ */
 export function buildAssetWhere(query: any, user: any): any {
-  const where: any = { ...buildRoleFilter(user) };
+  const where: any = { ...buildRoleFilter(user), parentAssetId: null };
 
   if (query.departmentId) where.departmentId = Number(query.departmentId);
   if (query.branchId) where.currentBranchId = Number(query.branchId);
@@ -95,9 +103,13 @@ export function buildAssetWhere(query: any, user: any): any {
   return where;
 }
 
-/** Build SQL WHERE fragments for raw queries (returns [clause, params]) */
+/**
+ * Build SQL WHERE fragments for raw queries (returns [clause, params]).
+ * Main assets only, matching buildAssetWhere — the two must agree or the tree
+ * totals and the drill-down list behind them disagree.
+ */
 export function buildRawWhereClause(query: any, user: any): { clause: string; params: any[] } {
-  const conditions: string[] = ["a.purchaseDate IS NOT NULL"];
+  const conditions: string[] = ["a.purchaseDate IS NOT NULL", "a.parentAssetId IS NULL"];
   const params: any[] = [];
 
   // Role filter
