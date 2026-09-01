@@ -1104,6 +1104,12 @@ export const getFixedAssetsSchedule = async (req: AuthenticatedRequest, res: Res
     // Fetch all assets that could appear in this FY schedule
     const assets = await prisma.asset.findMany({
       where: {
+        // Top-level assets only. A sub-asset's cost is already contained in its
+        // parent's purchaseCost (e.g. "HP 280 G9 MT desktop ... with 21.5\"
+        // monitor" carries a separate "Monitor" child), so counting both would
+        // double-count gross block. Sub-assets also never carry a depreciation
+        // rate, so they would inflate gross while contributing zero depreciation.
+        parentAssetId: null,
         // Include purchased AND donated assets. Donations carry their date in
         // donationDate (and value in estimatedValue), so match on either date.
         OR: [
@@ -1854,6 +1860,9 @@ export const getCategoryAssetDetail = async (req: AuthenticatedRequest, res: Res
     const assets = await prisma.asset.findMany({
       where: {
         assetCategoryId: category.id,
+        // Top-level assets only — must match getFixedAssetsSchedule, or this
+        // drill-down will not tie back to the category subtotal.
+        parentAssetId: null,
         OR: [
           { purchaseDate: { lte: fyEnd } },
           { donationDate: { lte: fyEnd } },
