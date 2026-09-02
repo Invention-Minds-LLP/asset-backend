@@ -438,6 +438,10 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const assets = await prisma.asset.findMany({
           where: {
             ...(f.assetCategoryId ? { assetCategoryId: f.assetCategoryId } : {}),
+            // Top-level assets only — a sub-asset's cost is already contained in
+            // its parent's purchaseCost, so listing both double-counts the
+            // acquisition-cost totals. Matches getFixedAssetsSchedule.
+            parentAssetId: null,
             OR: [
               { purchaseDate: { lte: winEnd } },
               { donationDate: { lte: winEnd } },

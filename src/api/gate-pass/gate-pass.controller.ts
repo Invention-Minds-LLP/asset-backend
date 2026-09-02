@@ -76,6 +76,32 @@ const STAGE_OPS = "PENDING_OPS_APPROVAL";
 const CLEARED = "SECURITY_CLEARED";
 
 /**
+ * A walk-out has no vehicle and no courier, so "all three fields blank" would
+ * otherwise be indistinguishable from "nobody has asked yet". HAND_CARRIED makes
+ * a hand-carry a positive statement, which is what lets the label desk tell the
+ * two apart and block only the second.
+ */
+const HAND_CARRIED = "HAND_CARRIED";
+
+/**
+ * Is the parcel's exit route on the record? Whoever clears the pass at the desk
+ * — a security supervisor, or a department HOD standing in — often cannot know
+ * which vehicle or courier will actually turn up, so these stay blank at
+ * clearance and are filled in at the label desk instead.
+ */
+function hasTransport(gp: {
+  vehicleNo?: string | null;
+  vehicleType?: string | null;
+  courierDetails?: string | null;
+}): boolean {
+  return Boolean(
+    (gp.vehicleNo || "").trim() ||
+    (gp.courierDetails || "").trim() ||
+    (gp.vehicleType || "").trim().toUpperCase() === HAND_CARRIED
+  );
+}
+
+/**
  * Who signs off stage two. Operations by default, CEO_COO when the deployment
  * has no Operations user — a pass nobody can approve is worse than one approved
  * a rung higher. Admins are the last resort so nothing is ever stranded.
@@ -93,6 +119,78 @@ async function getOpsApprovers(excludeId?: number | null): Promise<number[]> {
   const ceo = without(await getEmployeeIdsByRole(["CEO_COO"]));
   if (ceo.length) return ceo;
   return without(await getAdminIds());
+}
+
+
+// ── Where is the asset? ─────────────────────────────────────────────────────
+//
+// Deliberately DERIVED rather than stored on Asset.status.
+//
+// Condition and whereabouts are two different facts and the standard practice
+// in asset management (Maximo STATUS vs LOCATION, SAP equipment status vs
+// functional location) is to keep them apart. Here the ticket module already
+// owns condition — it writes UNDER_OBSERVATION on raise, IN_MAINTENANCE on
+// progress, ACTIVE on close — and asset-scan owns on-site placement via
+// currentLocation. If the gate pass also wrote a status, an asset sent to a
+// vendor under a repair ticket would lose "under repair" at gate-out and then
+// lose "off-site" again when the ticket progressed, with the ticket module
+// winning last and marking it ACTIVE while it sat in the workshop.
+//
+// The open movement record is the honest source of truth, and it cannot be
+// clobbered by another module.
+
+/** Statuses in which a pass still has a claim on its assets. */
+const LIVE_PASS_STATUSES = [
+  "DRAFT", "PENDING_APPROVAL", "PENDING_OPS_APPROVAL",
+  "APPROVED", "SECURITY_CLEARED", "ISSUED",
+];
+
+/**
+ * Assets already committed to a live gate pass, mapped to the pass holding them.
+ * `exceptGatePassId` lets a draft be re-saved without colliding with itself.
+ */
+async function assetsOnLivePasses(exceptGatePassId?: number | null): Promise<Map<number, string>> {
+  const rows = await prisma.gatePassItem.findMany({
+    where: {
+      assetId: { not: null },
+      returnedAt: null,
+      gatePass: {
+        status: { in: LIVE_PASS_STATUSES },
+        ...(exceptGatePassId ? { id: { not: exceptGatePassId } } : {}),
+      },
+    },
+    select: { assetId: true, gatePass: { select: { gatePassNo: true } } },
+  });
+  const held = new Map<number, string>();
+  for (const r of rows) if (r.assetId != null && !held.has(r.assetId)) held.set(r.assetId, r.gatePass.gatePassNo);
+  return held;
+}
+
+/**
+ * One asset, one live pass. Without this the same item can be booked onto
+ * several passes at once — which had already happened three times over in
+ * production, because the picker filters on Asset.status and nothing ever
+ * changed it.
+ *
+ * Returns an error message, or null when the selection is clean.
+ */
+async function findDoubleBooking(
+  items: { assetId: number | null }[],
+  exceptGatePassId?: number | null
+): Promise<string | null> {
+  const wanted = items.map((i) => i.assetId).filter((x): x is number => x != null);
+  if (wanted.length === 0) return null;
+
+  const held = await assetsOnLivePasses(exceptGatePassId);
+  const clashes = wanted.filter((id) => held.has(id));
+  if (clashes.length === 0) return null;
+
+  const assets = await prisma.asset.findMany({
+    where: { id: { in: clashes } },
+    select: { id: true, assetId: true, assetName: true },
+  });
+  const described = assets.map((a) => `${a.assetId} (${a.assetName}) is on ${held.get(a.id)}`);
+  return `Already on another open gate pass — ${described.join("; ")}. Close or cancel that pass first, or remove the item.`;
 }
 
 // ── Ownership / permission helpers ──────────────────────────────────────────
@@ -257,6 +355,9 @@ export const createGatePass = async (req: AuthenticatedRequest, res: Response) =
       return;
     }
 
+    const clash = await findDoubleBooking(itemRows);
+    if (clash) { res.status(400).json({ message: clash }); return; }
+
     const gatePassNo = await generateGatePassNo();
 
     // Derive the printed carrier/department strings from the links before save.
@@ -411,6 +512,21 @@ export const getGatePassByNo = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Assets currently committed to a live gate pass, so the picker can leave them
+ * out instead of offering something that is already spoken for. Derived, not
+ * read from Asset.status — see the note above assetsOnLivePasses().
+ */
+export const getAssetsOnGatePasses = async (_req: Request, res: Response) => {
+  try {
+    const held = await assetsOnLivePasses();
+    res.json([...held.entries()].map(([assetId, gatePassNo]) => ({ assetId, gatePassNo })));
+  } catch (error) {
+    console.error("getAssetsOnGatePasses error:", error);
+    res.status(500).json({ message: "Failed to fetch committed assets" });
+  }
+};
+
 export const getGatePassesByAsset = async (req: Request, res: Response) => {
   try {
     const assetId = parseInt(req.params.assetId);
@@ -479,6 +595,13 @@ export const updateGatePass = async (req: AuthenticatedRequest, res: Response) =
     delete data.vehicleNo; delete data.vehicleType; delete data.courierDetails;
 
     if (Array.isArray(items)) {
+      // Its own items don't count against it — only other live passes do.
+      const clash = await findDoubleBooking(
+        items.map((it: any) => ({ assetId: it.assetId ? Number(it.assetId) : null })),
+        id
+      );
+      if (clash) { res.status(400).json({ message: clash }); return; }
+
       // Replace items wholesale
       await prisma.gatePassItem.deleteMany({ where: { gatePassId: id } });
       data.items = {
@@ -543,6 +666,9 @@ export const submitForApproval = async (req: AuthenticatedRequest, res: Response
         return;
       }
     }
+
+    const submitClash = await findDoubleBooking(gp.items, id);
+    if (submitClash) { res.status(400).json({ message: submitClash }); return; }
 
     const { primary, all } = await resolveApprovers(gp.items, gp.requestedById);
 
@@ -808,7 +934,11 @@ export const securityClearGatePass = async (req: AuthenticatedRequest, res: Resp
       notify({
         type: "OTHER",
         title: "Gate Pass — Label Required",
-        message: `${gp.gatePassNo} has been cleared by security. Print and fix the label before it leaves.`,
+        // Say which job is waiting. Whoever cleared this may not have known the
+        // vehicle, and the label won't print until someone records it.
+        message: hasTransport(updated)
+          ? `${gp.gatePassNo} has been cleared by security. Print and fix the label before it leaves.`
+          : `${gp.gatePassNo} has been cleared, but the vehicle/courier is not recorded. Add it on the label desk, then print the label.`,
         recipientIds: others,
         gatePassId: gp.id,
         createdById: userId(req) ?? undefined,
@@ -819,6 +949,59 @@ export const securityClearGatePass = async (req: AuthenticatedRequest, res: Resp
   } catch (error) {
     console.error("securityClearGatePass error:", error);
     res.status(500).json({ message: "Failed to record security clearance" });
+  }
+};
+
+// SECURITY EXECUTIVE — fill in the transport whoever cleared the pass could not.
+// A supervisor, or a department HOD standing in at the desk, has no way of
+// knowing which vehicle or courier will actually turn up, so those fields are
+// optional at clearance and land here instead: the label desk is the last pair
+// of hands before the parcel leaves, and the label itself carries the vehicle.
+//
+// Deliberately NOT behind requireSecuritySupervisor — the executive is precisely
+// who this is for. The status check does the constraining instead: before
+// clearance there is nothing to label, and after gate-out the parcel is gone and
+// the record is history.
+export const updateGatePassTransport = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { vehicleNo, vehicleType, courierDetails } = req.body ?? {};
+    const gp = await prisma.gatePass.findUnique({ where: { id } });
+    if (!gp) { res.status(404).json({ message: "Gate pass not found" }); return; }
+    if (gp.status !== CLEARED) {
+      res.status(400).json({ message: `Transport details can only be set on a security-cleared pass. This one is ${gp.status}.` });
+      return;
+    }
+
+    const trim = (v: any) => {
+      const t = String(v ?? "").trim();
+      return t ? t : null;
+    };
+
+    const next = {
+      vehicleNo: trim(vehicleNo),
+      vehicleType: trim(vehicleType),
+      courierDetails: trim(courierDetails),
+    };
+
+    // Saving all three blank would leave the pass exactly as stuck as it was, so
+    // reject it here rather than let the label block be the first thing anyone
+    // hears about it.
+    if (!hasTransport(next)) {
+      res.status(400).json({ message: "Record the vehicle number, the courier, or mark the parcel as hand carried." });
+      return;
+    }
+
+    const updated = await prisma.gatePass.update({
+      where: { id },
+      data: next,
+      include: FULL_INCLUDE,
+    });
+
+    res.json(updated);
+  } catch (error) {
+    console.error("updateGatePassTransport error:", error);
+    res.status(500).json({ message: "Failed to update transport details" });
   }
 };
 
@@ -1151,6 +1334,18 @@ export const downloadGatePassLabel = async (req: AuthenticatedRequest, res: Resp
     const id = parseInt(req.params.id);
     const gp = await prisma.gatePass.findUnique({ where: { id }, include: FULL_INCLUDE });
     if (!gp) { res.status(404).json({ message: "Gate pass not found" }); return; }
+
+    // A label with the vehicle box empty is the exact failure this queue exists
+    // to catch: the pass was cleared by someone who couldn't know the transport,
+    // and nobody filled it in afterwards. Refuse rather than print a blank one —
+    // the executive has the dialog to fix it in the same screen, and this route
+    // is only ever reached from there.
+    if (!hasTransport(gp)) {
+      res.status(400).json({
+        message: "Record the vehicle, courier, or hand-carry detail before printing this label.",
+      });
+      return;
+    }
 
     // Stamp before streaming: once doc.end() runs the response is committed, so
     // a write after that point can't report a failure to the caller. Recorded

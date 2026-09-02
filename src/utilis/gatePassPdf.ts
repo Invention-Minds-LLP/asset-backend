@@ -260,7 +260,13 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
   doc.fillColor("black");
   const CW = W - M * 2;              // content width
   const FOOTER_Y = H - 20;           // reserved footer strip
-  const BODY_BOTTOM = FOOTER_Y - 6;  // nothing may be drawn past this
+  // The exit time can never be printed here: this label is produced at the label
+  // desk while the pass is still SECURITY_CLEARED, and gatedOutAt is stamped
+  // afterwards by the supervisor who releases the parcel. So reserve a ruled
+  // strip for the gate to write it on — by then the label is on the parcel.
+  const GATEOUT_H = 22;
+  const GATEOUT_Y = FOOTER_Y - GATEOUT_H - 4;
+  const BODY_BOTTOM = GATEOUT_Y - 6; // nothing may be drawn past this
   let y = 228;
 
   // Each meta value is clamped to two lines and ellipsised, so a long address
@@ -316,6 +322,12 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
       .text(`+ ${gp.items.length - shown} more — scan QR for the full list`,
         M, y, { width: CW, height: OVERFLOW_H, ellipsis: true, lineBreak: false });
   }
+
+  // Write-on strip for the actual exit time, filled in by hand at the gate.
+  doc.font("Helvetica-Bold").fontSize(6.5).fillColor("#64748b")
+    .text("GATE OUT DATE & TIME", M, GATEOUT_Y, { width: CW, height: 9, lineBreak: false });
+  doc.strokeColor("#94a3b8").lineWidth(0.75)
+    .moveTo(M, GATEOUT_Y + GATEOUT_H - 4).lineTo(W - M, GATEOUT_Y + GATEOUT_H - 4).stroke();
 
   // Footer
   doc.fontSize(6.5).fillColor("#64748b").font("Helvetica")

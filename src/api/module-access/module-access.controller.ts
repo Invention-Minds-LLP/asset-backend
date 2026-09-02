@@ -111,6 +111,7 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
         items: [
           { name: "gate-pass",          label: "Gate Pass",            path: "/gate-pass",          icon: "pi pi-id-card",      sortOrder: 1 },
           { name: "gate-pass-security", label: "Gate Pass — Security", path: "/gate-pass/security", icon: "pi pi-shield",       sortOrder: 2 },
+          { name: "gate-pass-print-queue", label: "Gate Pass — Label Printing", path: "/gate-pass/print-queue", icon: "pi pi-print", sortOrder: 3 },
           { name: "material-inward-register", label: "Material Inward Register", path: "/material-inward-register", icon: "pi pi-arrow-down-left", sortOrder: 20 },
           { name: "rental-asset-register", label: "Rental Asset Register", path: "/rental-asset-register", icon: "pi pi-sync",     sortOrder: 21 },
           { name: "key-register",       label: "Key Register",         path: "/key-register",       icon: "pi pi-key",          sortOrder: 22 },

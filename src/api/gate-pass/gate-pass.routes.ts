@@ -15,6 +15,7 @@ import {
   approveGatePass,
   rejectGatePass,
   securityClearGatePass,
+  updateGatePassTransport,
   gateOutGatePass,
   gateInGatePass,
   downloadGatePassPdf,
@@ -22,6 +23,7 @@ import {
   getSecurityHistory,
   getLabelQueue,
   getGatePassByNo,
+  getAssetsOnGatePasses,
 } from "./gate-pass.controller";
 import { denySecurityApproval, requireSecuritySupervisor } from "./gate-pass.guards";
 
@@ -34,6 +36,8 @@ router.get("/pending-approval", authenticateToken, getPendingApproval);
 router.get("/security-queue", authenticateToken, requireSecuritySupervisor, getSecurityQueue);
 router.get("/security-history", authenticateToken, requireSecuritySupervisor, getSecurityHistory);
 router.get("/label-queue", authenticateToken, getLabelQueue);
+// Which assets are already committed to a live pass — drives the picker.
+router.get("/assets-on-pass", authenticateToken, getAssetsOnGatePasses);
 router.get("/asset/:assetId", authenticateToken, getGatePassesByAsset);
 // QR deep-link target + the scan screen's paste box. Open to any authenticated
 // user, including security executives — scanning is how they identify a parcel.
@@ -57,6 +61,10 @@ router.post("/:id/reject", authenticateToken, denySecurityApproval, rejectGatePa
 // Desk clearance first (items verified, transport recorded), then the parcel
 // is labelled, and only then does gate-out record the actual departure.
 router.post("/:id/security-clear", authenticateToken, requireSecuritySupervisor, securityClearGatePass);
+// Transport is optional at clearance — whoever stands at the desk may not know
+// the vehicle. The label desk fills it in, so this one is open to the security
+// executive and constrained by status instead of role.
+router.patch("/:id/transport", authenticateToken, updateGatePassTransport);
 router.post("/:id/gate-out", authenticateToken, requireSecuritySupervisor, gateOutGatePass);
 router.post("/:id/gate-in", authenticateToken, requireSecuritySupervisor, gateInGatePass);
 
