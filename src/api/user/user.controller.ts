@@ -340,7 +340,10 @@ export const resetPassword = async (req: Request, res: Response) => {
 
 export const getAllUsers = async (req: Request, res: Response) => {
   const users = await prisma.user.findMany({ include: { employee: true } });
-  res.json(users);
+  // Strip the bcrypt hash before it leaves the server. Returning it handed every
+  // signed-in employee the material to crack other people's passwords offline —
+  // hashing the password is pointless if the hash itself is an API response.
+  res.json(users.map(({ passwordHash, ...rest }) => rest));
 };
 
 export const createUser = async (req: Request, res: Response) => {

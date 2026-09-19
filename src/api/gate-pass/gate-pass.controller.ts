@@ -8,13 +8,33 @@ import { streamGatePassPdf, streamGatePassLabel } from "../../utilis/gatePassPdf
 // Helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+// FY-based running series: GP-FY2026-27-0001, matching the indent number format
+// (see generateIndentNumber in asset-indent.controller.ts).
+//
+// Previously this was date-based (GP-20260813-0007) and restarted at 0001 every
+// day, so the number said nothing about how many passes had been raised. It also
+// derived the sequence from count(), which hands out a duplicate as soon as any
+// pass is deleted — gatePassNo is unique, so that create would simply fail.
+// Taking the highest existing number instead is immune to deletions.
 async function generateGatePassNo(): Promise<string> {
-  const today = new Date();
-  const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
-  const count = await prisma.gatePass.count({
-    where: { gatePassNo: { startsWith: `GP-${dateStr}` } },
+  const now = new Date();
+  const fyStartYear = now.getMonth() >= 3 ? now.getFullYear() : now.getFullYear() - 1;
+  const fyEndYear = fyStartYear + 1;
+  const fyString = `FY${fyStartYear}-${(fyEndYear % 100).toString().padStart(2, "0")}`;
+
+  const latest = await prisma.gatePass.findFirst({
+    where: { gatePassNo: { startsWith: `GP-${fyString}` } },
+    orderBy: { id: "desc" },
+    select: { gatePassNo: true },
   });
-  return `GP-${dateStr}-${String(count + 1).padStart(4, "0")}`;
+
+  let seq = 1;
+  if (latest) {
+    const parts = latest.gatePassNo.split("-");
+    const last = parseInt(parts[parts.length - 1], 10);
+    if (!isNaN(last)) seq = last + 1;
+  }
+  return `GP-${fyString}-${seq.toString().padStart(4, "0")}`;
 }
 
 const FULL_INCLUDE = {

@@ -342,6 +342,9 @@ model Asset {
   warranties                   Warranty[]
   tickets                      Ticket[]
   serviceContracts             ServiceContract[]
+  coverRenewals                CoverRenewal[]
+  uptimeAssessments            UptimeAssessment[]
+  sanitisations                DataSanitisation[]
   serviceDocuments             Document[]
   qrScans                      QRScanLog[]
   gatePasses                   GatePass[]
@@ -429,6 +432,45 @@ model Asset {
   financialYearAdded String? // FY in which this individual record was digitized, e.g. "FY2023-24"
   assetPool          AssetPool? @relation(fields: [assetPoolId], references: [id])
 
+  // ── Funding source ──────────────────────────────────────────────────────
+  // Drives two unrelated rules from one field:
+  //   • charitable entities — cost claimed as application of income cannot
+  //     also be depreciated, so depreciation is suppressed
+  //   • grant-funded assets — conditions on use, disposal and reporting
+  fundingSource       AssetFundingSource?
+  // Set when the acquisition cost was claimed as application of income in the
+  // year of purchase. The flag the depreciation engine actually reads.
+  costClaimedAsApplication Boolean @default(false)
+  grantReference      String? // scheme / sanction number
+  grantAuthority      String? // who funded it
+  grantConditions     String? @db.Text // restrictions on use or disposal
+  fundingNotes        String? @db.Text
+
+  // ── Ownership ───────────────────────────────────────────────────────────
+  // Not everything standing in a department belongs to the institution. An
+  // analyser placed by a reagent supplier is on site, is serviced, breaks down
+  // and has to be found at audit — but it is not an asset of the institution,
+  // so it must never be depreciated, insured as owned, or written off.
+  // OWNED | PLACEMENT | RENTAL | LEASED | LOANED | DONATED_CONDITIONAL
+  ownershipType String @default("OWNED")
+
+  placementAgreementId Int?
+  placementAgreement   PlacementAgreement? @relation(fields: [placementAgreementId], references: [id])
+
+  // ── Capitalisation ──────────────────────────────────────────────────────
+  // Cost accumulates against the work in progress and transfers here when the
+  // asset is ready for use. The capitalisation date, not the invoice date, is
+  // what depreciation should run from.
+  cwipId         Int?
+  cwip           CapitalWorkInProgress? @relation("CwipAssets", fields: [cwipId], references: [id])
+  capitalisedAt  DateTime?
+  capitalisedCost Decimal? @db.Decimal(14, 2)
+
+  indentStoreIssues     IndentStoreIssue[]
+  commissioningSignoffs CommissioningSignoff[]
+  licences              AssetLicence[]         @relation("AssetLicences")
+  depreciationBooks     AssetDepreciationBook[] @relation("AssetDepBooks")
+
   @@index([status])
   @@index([assetCategoryId])
   @@index([departmentId])
@@ -467,6 +509,10 @@ model Warranty {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
+
+  // What happens when it runs out.
+  renewalDecisions  CoverRenewal[]    @relation("WarrantyRenewals")
+  followOnContracts ServiceContract[] @relation("WarrantyToContract")
 
   @@index([assetId])
   @@index([assetId, isActive])
@@ -773,11 +819,47 @@ model AssetCategory {
   assetSlaMatrices              AssetSlaMatrix[]
   assetIndents                  AssetIndent[]
   decisionEngineConfigs         DecisionEngineConfig[]         @relation("DecisionEngineCategory")
+  depreciationRules             CategoryDepreciationRule[]
+  assetDeptConfigs              AssetDepartmentConfig[]
+  indentLines                   AssetIndentLine[]              @relation("IndentLineCategory")
   glMapping                     AssetGLMapping?
   capexBudgets                  CapexBudget[]                  @relation("CapexBudgetCat")
   assetPools                    AssetPool[]
+  approvedVendors               ApprovedVendor[]               @relation("ApprovedVendorCategory")
+  rateContractLines             RateContractLine[]             @relation("RateContractCategory")
+  items                         AssetItem[]
 
   @@map("assetcategory")
+}
+
+// Item master — the approved list of things that can be captured as an asset or
+// requested on an indent ("Dell Latitude 5420", "Infusion Pump"). The asset form
+// and indent form pick from here instead of free-typing a name, which is what
+// caused the same item to exist as several spellings.
+//
+// Only ADMIN/FINANCE maintain it (see item-master.routes.ts). Asset.assetName and
+// AssetIndent.assetName stay plain strings — this master feeds them rather than
+// replacing them, so nothing downstream has to change.
+model AssetItem {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  // Mirror the asset form's own fields, so picking an item fills them in.
+  nature AssetNature @default(TANGIBLE)
+  type   String? // FIXED | MOVABLE — only meaningful for TANGIBLE items
+
+  assetCategoryId Int
+  assetCategory   AssetCategory @relation(fields: [assetCategoryId], references: [id])
+
+  isActive Boolean @default(true)
+
+  createdById Int?
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([assetCategoryId])
+  @@map("assetitem")
 }
 
 // Flat, global sub-type master (e.g. "Desktop Monitor", "Infusion Pump").
@@ -866,6 +948,9 @@ model Department {
   financeVouchers       FinanceVoucher[]        @relation("VoucherDept")
   voucherLines          FinanceVoucherLine[]    @relation("FVLineCostCentre")
   capexBudgets          CapexBudget[]           @relation("CapexBudgetDept")
+  assetDeptConfigs      AssetDepartmentConfig[] @relation("AssetDeptConfig")
+  placements            PlacementAgreement[]    @relation("DepartmentPlacements")
+  condemnationCommittees CondemnationCommittee[] @relation("CommitteeDepartment")
   assetPools            AssetPool[]             @relation("AssetPoolDepartment")
   subTypeSupportConfigs SubTypeSupportConfig[]  @relation("SubTypeSupportDept")
   assetSubTypes         AssetSubType[]          @relation("DeptSubTypes")
@@ -985,6 +1070,26 @@ model Employee {
   jeCreated                   JournalEntry[]        @relation("JECreatedBy")
 
   batchDepreciationRuns      BatchDepreciationRun[] @relation("BatchRunBy")
+  delegationsGiven           ApprovalDelegation[]   @relation("DelegationFrom")
+  delegationsReceived        ApprovalDelegation[]   @relation("DelegationTo")
+  tdsDeductionsCreated       TdsDeduction[]         @relation("TdsDeductionCreatedBy")
+  tdsChallansCreated         TdsChallan[]           @relation("TdsChallanCreatedBy")
+  coverRenewalsDecided       CoverRenewal[]         @relation("CoverRenewalDecidedBy")
+  uptimeAssessed             UptimeAssessment[]     @relation("UptimeAssessedBy")
+  uptimeWaived               UptimeAssessment[]     @relation("UptimeWaivedBy")
+  ldWaived                   LiquidatedDamage[]     @relation("LdWaivedBy")
+  gstDocumentsCreated        GstDocument[]          @relation("GstDocumentCreatedBy")
+  gstPeriodsPrepared         GstPeriodSummary[]     @relation("GstPeriodPreparedBy")
+  placementsCreated          PlacementAgreement[]   @relation("PlacementCreatedBy")
+  placementConsumptions      PlacementConsumption[] @relation("PlacementConsumptionBy")
+  committeeMemberships       CondemnationCommitteeMember[] @relation("CommitteeMemberships")
+  inspectionsConvened        CondemnationInspection[]     @relation("InspectionConvenedBy")
+  condemnationVotes          CondemnationVote[]           @relation("CondemnationVotes")
+  sanitisationsPerformed     DataSanitisation[]           @relation("SanitisationPerformedBy")
+  sanitisationsVerified      DataSanitisation[]           @relation("SanitisationVerifiedBy")
+  budgetMovementsRequested   BudgetMovement[]             @relation("MovementRequestedBy")
+  budgetMovementsApproved    BudgetMovement[]             @relation("MovementApprovedBy")
+  gstr2bImports              Gstr2bImport[]               @relation("Gstr2bImportedBy")
   batchDepreciationApprovals BatchDepreciationRun[] @relation("BatchApprovedBy")
 
   depreciationAuditsFinance DepreciationAudit[] @relation("DepAuditFinanceApprovedBy")
@@ -1052,11 +1157,164 @@ model Vendor {
   purchaseVouchers        PurchaseVoucher[]       @relation("VendorPurchaseVouchers")
   paymentVouchers         PaymentVoucher[]        @relation("VendorPaymentVouchers")
   serviceInvoices         ServiceInvoice[]        @relation("ServiceInvoiceVendor")
+  externalPurchaseOrders  ExternalPurchaseOrder[]
+  libraryItems            LibraryItem[]           @relation("LibraryVendor")
+  quotations              PurchaseQuotation[]     @relation("QuotationVendor")
 
   // Departments this vendor serves. Drives department-scoped vendor performance.
   departments Department[] @relation("VendorDepartments")
 
+  // ── Withholding tax profile ──────────────────────────────────────────────
+  // Rate depends on more than the section: no PAN means 20%, a lower-deduction
+  // certificate overrides downward, and a non-filer under 206AB pays higher.
+  panVerified          Boolean   @default(false)
+  deducteeStatus       String? // COMPANY | FIRM | INDIVIDUAL | HUF | AOP | TRUST | LLP
+  defaultTdsSectionId  Int?
+  defaultTdsSection    TdsSection? @relation("VendorDefaultSection", fields: [defaultTdsSectionId], references: [id])
+  ldcNumber            String? // lower deduction certificate u/s 197
+  ldcRate              Decimal?  @db.Decimal(6, 3)
+  ldcValidFrom         DateTime?
+  ldcValidTo           DateTime?
+  ldcThreshold         Decimal?  @db.Decimal(14, 2) // certificate is capped at an amount
+  isNonFiler206AB      Boolean   @default(false)
+  tdsExempt            Boolean   @default(false)
+  tdsExemptReason      String?   @db.Text
+  // 206C(1H): a seller who already collects TCS means the buyer must not also
+  // deduct under 194Q on the same transaction.
+  collectsTcs194Q      Boolean   @default(false)
+
+  tdsDeductions TdsDeduction[] @relation("VendorTdsDeductions")
+  gstDocuments  GstDocument[]  @relation("VendorGstDocuments")
+  placements    PlacementAgreement[] @relation("VendorPlacements")
+  goodsReturns  GoodsReturn[]
+  rateContracts RateContract[]
+  approvals     ApprovedVendor[]
+
   @@map("vendor")
+}
+
+// Withholding sections as the tenant configures them — rates change every
+// Finance Act, so they are data, not code.
+model TdsSection {
+  id          Int     @id @default(autoincrement())
+  code        String // 194C | 194J | 194I | 194Q | 206C(1H) ...
+  name        String
+  description String? @db.Text
+
+  /// TCS is collected from the customer, TDS deducted from the vendor. Same
+  /// machinery, opposite direction.
+  isTcs Boolean @default(false)
+
+  rate           Decimal @db.Decimal(6, 3)
+  rateWithoutPan Decimal @db.Decimal(6, 3) @default(20)
+
+  /// Deduct only on the excess over this, not on the whole amount (194Q).
+  deductOnExcessOverThreshold Boolean @default(false)
+
+  singleTxnThreshold  Decimal? @db.Decimal(14, 2)
+  annualThreshold     Decimal? @db.Decimal(14, 2)
+
+  /// Which asset categories or spend this section is normally used for.
+  appliesTo String? @db.Text
+
+  effectiveFrom DateTime
+  effectiveTo   DateTime?
+  isActive      Boolean   @default(true)
+
+  deductions     TdsDeduction[]
+  defaultVendors Vendor[]       @relation("VendorDefaultSection")
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([code, effectiveFrom])
+  @@map("tdssection")
+}
+
+// One deduction, tied to the payment that carried it.
+model TdsDeduction {
+  id String @id @default(uuid())
+
+  vendorId Int
+  vendor   Vendor @relation("VendorTdsDeductions", fields: [vendorId], references: [id])
+
+  sectionId Int
+  section   TdsSection @relation(fields: [sectionId], references: [id])
+
+  paymentVoucherId Int?
+  paymentVoucher   PaymentVoucher? @relation("PaymentTdsDeductions", fields: [paymentVoucherId], references: [id])
+
+  purchaseVoucherId Int?
+
+  /// Gross bill, the part actually exposed to the section, and what came off.
+  grossAmount   Decimal @db.Decimal(14, 2)
+  taxableAmount Decimal @db.Decimal(14, 2)
+  rateApplied   Decimal @db.Decimal(6, 3)
+  tdsAmount     Decimal @db.Decimal(14, 2)
+  netPaid       Decimal @db.Decimal(14, 2)
+
+  /// Why this rate and not the section's headline rate.
+  rateReason String? @db.Text
+
+  deductionDate DateTime
+  fiscalYear    Int
+  quarter       String // Q1 | Q2 | Q3 | Q4
+
+  status String @default("DEDUCTED") // DEDUCTED | DEPOSITED | RETURN_FILED | CERTIFICATE_ISSUED
+
+  challanId String?
+  challan   TdsChallan? @relation(fields: [challanId], references: [id])
+
+  certificateNo     String? // Form 16A
+  certificateIssued DateTime?
+
+  createdById Int?
+  createdBy   Employee? @relation("TdsDeductionCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@index([vendorId, fiscalYear])
+  @@index([fiscalYear, quarter])
+  @@map("tdsdeduction")
+}
+
+// The challan the deductions were remitted under. Until deductions carry one,
+// the money is deducted but not paid over — which is where the interest is.
+model TdsChallan {
+  id String @id @default(uuid())
+
+  challanNo   String
+  bsrCode     String?
+  depositDate DateTime
+  amount      Decimal  @db.Decimal(14, 2)
+
+  interest Decimal? @db.Decimal(14, 2)
+  fee      Decimal? @db.Decimal(14, 2) // 234E late filing fee
+
+  fiscalYear Int
+  quarter    String
+  sectionCode String?
+
+  bankName      String?
+  paymentMode   String? // ONLINE | CHEQUE
+  acknowledgeNo String?
+
+  returnFiled     Boolean   @default(false)
+  returnFiledDate DateTime?
+  returnAckNo     String?
+
+  notes String? @db.Text
+
+  deductions TdsDeduction[]
+
+  createdById Int?
+  createdBy   Employee? @relation("TdsChallanCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@index([fiscalYear, quarter])
+  @@map("tdschallan")
 }
 
 model TicketStatusHistory {
@@ -1114,6 +1372,10 @@ model DepreciationLog {
   assetId Int
   asset   Asset @relation(fields: [assetId], references: [id])
 
+  // Which set of books this entry belongs to. Existing rows are all tax-book
+  // entries, which is why it defaults that way.
+  book DepreciationBook @default(TAX)
+
   periodStart        DateTime
   periodEnd          DateTime
   depreciationAmount Decimal  @db.Decimal(12, 2)
@@ -1151,6 +1413,10 @@ model BatchDepreciationRun {
   status      String  @default("DRAFT") // DRAFT | APPROVED | REJECTED
   fiscalYear  Int // e.g. 2025 = FY 2025-26
   periodLabel String? // e.g. "FY 2025-26 Q1"
+
+  // Runs are per book — a company closes its Companies Act year and its tax
+  // year with different numbers, from separate runs.
+  book DepreciationBook @default(TAX)
 
   totalAssets       Int     @default(0)
   totalDepreciation Decimal @default(0) @db.Decimal(14, 2)
@@ -1582,6 +1848,33 @@ model ServiceContract {
   vendorResolutionValue Int? // e.g. 24
   vendorResolutionUnit  String? // HOURS | DAYS
 
+  // Uptime commitment. The SLA fields above cover how fast the vendor must
+  // respond; this covers how much of the year the machine must actually work.
+  uptimeCommitmentPercent Decimal? @db.Decimal(5, 2)
+  /// Money off per percentage point below the commitment. Some contracts
+  /// instead give free extension days — record whichever the contract says.
+  penaltyPerPercentPoint  Decimal? @db.Decimal(12, 2)
+  penaltyMaxPercent       Decimal? @db.Decimal(5, 2) // cap, as % of contract value
+  /// Hours the asset is expected to be available in a year. Drives the
+  /// denominator when uptime is worked out.
+  plannedHoursPerYear     Int?
+  /// Planned maintenance and calibration usually do not count against uptime.
+  excludePlannedDowntime  Boolean  @default(true)
+
+  // Renewal. A contract that lapses unnoticed is the commonest way an
+  // institution ends up paying list price for a breakdown.
+  autoRenew           Boolean  @default(false)
+  renewalNoticeDays   Int?     @default(60)
+  maxEscalationPercent Decimal? @db.Decimal(5, 2) // what the vendor may raise it by
+
+  /// Where this contract came from — the warranty it followed, or the contract
+  /// it renewed. Gives an asset one continuous cover history.
+  precededByWarrantyId Int?
+  precededByWarranty   Warranty? @relation("WarrantyToContract", fields: [precededByWarrantyId], references: [id])
+  renewsContractId     Int?
+  renewsContract       ServiceContract?  @relation("ContractRenewalChain", fields: [renewsContractId], references: [id])
+  renewedBy            ServiceContract[] @relation("ContractRenewalChain")
+
   createdBy String?
   reason    String?
 
@@ -1591,9 +1884,307 @@ model ServiceContract {
   maintenanceHistories MaintenanceHistory[]
   serviceVisits        ServiceVisit[]
   serviceInvoices      ServiceInvoice[]
+  uptimeAssessments    UptimeAssessment[]
+  renewalDecisions     CoverRenewal[]       @relation("RenewalFromContract")
 
   @@index([assetId, endDate])
   @@map("servicecontract")
+}
+
+/**
+ * The decision that has to be taken before cover runs out: renew, move to a
+ * different contract type, go on-call, or let it lapse deliberately.
+ *
+ * Raised automatically when a warranty or contract comes inside its notice
+ * period, so the choice is made on purpose rather than by default.
+ */
+model CoverRenewal {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  /// WARRANTY | CONTRACT — what is running out.
+  sourceType String
+  warrantyId Int?
+  warranty   Warranty? @relation("WarrantyRenewals", fields: [warrantyId], references: [id])
+  contractId Int?
+  contract   ServiceContract? @relation("RenewalFromContract", fields: [contractId], references: [id])
+
+  coverEndsOn DateTime
+  raisedOn    DateTime @default(now())
+
+  status String @default("PENDING") // PENDING | DECIDED | INDENTED | ORDERED | COVERED | LAPSED | CANCELLED
+
+  /// RENEW_AMC | RENEW_CMC | UPGRADE_TO_CMC | DOWNGRADE_TO_AMC | ON_CALL |
+  /// REPLACE_ASSET | LET_LAPSE
+  decision       String?
+  decisionReason String?   @db.Text
+  decidedById    Int?
+  decidedBy      Employee? @relation("CoverRenewalDecidedBy", fields: [decidedById], references: [id])
+  decidedAt      DateTime?
+
+  /// What the vendor is asking, and what it cost last time — the two numbers
+  /// the decision actually turns on.
+  quotedAmount   Decimal? @db.Decimal(14, 2)
+  previousAmount Decimal? @db.Decimal(14, 2)
+
+  /// Downstream linkage once the decision becomes procurement.
+  indentId        Int?
+  purchaseOrderId Int?
+  newContractId   Int?
+
+  /// Set when the asset went uncovered — the gap is what an auditor asks about.
+  lapsedAt       DateTime?
+  uncoveredDays  Int?
+
+  notes String? @db.Text
+
+  remindersSent Int      @default(0)
+  lastReminder  DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status, coverEndsOn])
+  @@index([assetId])
+  @@map("coverrenewal")
+}
+
+/**
+ * Whether the vendor actually kept the machine running, measured over a period
+ * of the contract, and what that is worth if they did not.
+ */
+model UptimeAssessment {
+  id Int @id @default(autoincrement())
+
+  contractId Int
+  contract   ServiceContract @relation(fields: [contractId], references: [id])
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  periodStart DateTime
+  periodEnd   DateTime
+  periodLabel String
+
+  committedPercent Decimal @db.Decimal(5, 2)
+  plannedHours     Decimal @db.Decimal(10, 2)
+  downtimeHours    Decimal @db.Decimal(10, 2)
+  /// Downtime that does not count — planned maintenance, calibration, and
+  /// anything the assessor excluded by hand.
+  excludedHours    Decimal @db.Decimal(10, 2) @default(0)
+  actualPercent    Decimal @db.Decimal(5, 2)
+  shortfallPercent Decimal @db.Decimal(5, 2) @default(0)
+
+  penaltyAmount Decimal @db.Decimal(14, 2) @default(0)
+  /// How the figure was arrived at, in words, for the vendor conversation.
+  workings      String? @db.Text
+
+  /// Breakdowns counted, so the assessment can be argued from the tickets.
+  incidentCount Int @default(0)
+
+  status String @default("DRAFT") // DRAFT | CONFIRMED | DISPUTED | RECOVERED | WAIVED
+
+  waivedReason String?   @db.Text
+  waivedById   Int?
+  waivedBy     Employee? @relation("UptimeWaivedBy", fields: [waivedById], references: [id])
+  waivedAt     DateTime?
+
+  /// Where the money came off.
+  serviceInvoiceId Int?
+  recoveredAt      DateTime?
+
+  assessedById Int?
+  assessedBy   Employee? @relation("UptimeAssessedBy", fields: [assessedById], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([contractId, periodStart, periodEnd])
+  @@index([assetId])
+  @@map("uptimeassessment")
+}
+
+/**
+ * Damages for late delivery. Computed from the goods receipt against the date
+ * the order promised, and held against the vendor's balance payment until it is
+ * either recovered or deliberately waived.
+ */
+model LiquidatedDamage {
+  id Int @id @default(autoincrement())
+
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  externalPoId    Int?
+  goodsReceiptId  Int?
+  goodsReceipt    GoodsReceipt?  @relation(fields: [goodsReceiptId], references: [id])
+
+  vendorId Int?
+
+  promisedDate DateTime
+  actualDate   DateTime
+  graceDays    Int @default(0)
+  delayDays    Int
+
+  /// The value the charge is worked out on, and the terms it came from.
+  basisAmount      Decimal @db.Decimal(14, 2)
+  basis            String  @default("DELAYED_VALUE")
+  percentPerWeek   Decimal @db.Decimal(5, 2)
+  maxPercent       Decimal @db.Decimal(5, 2)
+  cappedAt         Boolean @default(false)
+
+  computedAmount Decimal @db.Decimal(14, 2)
+  workings       String? @db.Text
+
+  status String @default("COMPUTED") // COMPUTED | CONFIRMED | DISPUTED | WAIVED | RECOVERED
+
+  /// A delay the vendor is not answerable for — a site not ready, a customs
+  /// hold, a change the institution asked for.
+  waivedReason String?   @db.Text
+  waivedById   Int?
+  waivedBy     Employee? @relation("LdWaivedBy", fields: [waivedById], references: [id])
+  waivedAt     DateTime?
+
+  recoveredInVoucherId Int?
+  recoveredAt          DateTime?
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([purchaseOrderId])
+  @@index([status])
+  @@map("liquidateddamage")
+}
+
+/**
+ * PLACEMENT AND REAGENT RENTAL
+ *
+ * The supplier puts an analyser on site for nothing, or for a token rent, and
+ * the institution commits to buying a minimum of reagents from them. The
+ * machine is used every day, is serviced, breaks down, and has to be produced
+ * at audit — but it is not owned, so it must never be depreciated or written
+ * off, and it never belonged in the capital budget.
+ *
+ * What actually costs money is the commitment. Miss it and the shortfall is
+ * billed, and the effective cost per test quietly overtakes what buying the
+ * machine outright would have cost. That comparison is the point of this.
+ */
+model PlacementAgreement {
+  id Int @id @default(autoincrement())
+
+  agreementNumber String  @unique
+  vendorId        Int
+  vendor          Vendor  @relation("VendorPlacements", fields: [vendorId], references: [id])
+
+  departmentId Int?
+  department   Department? @relation("DepartmentPlacements", fields: [departmentId], references: [id])
+
+  /// FREE_PLACEMENT — no rent, commitment only
+  /// RENTAL — a monthly rent as well
+  /// COST_PER_TEST — billed per reportable test, machine and reagent bundled
+  /// RENT_CUM_PURCHASE — rent counts towards a buyout
+  model String @default("FREE_PLACEMENT")
+
+  startDate DateTime
+  endDate   DateTime
+  minimumTenureMonths Int?
+
+  monthlyRent Decimal? @db.Decimal(12, 2)
+
+  // ── The commitment ─────────────────────────────────────────────────
+  /// VALUE — rupees of reagent a month. VOLUME — a number of tests a month.
+  commitmentType         String   @default("VALUE")
+  committedValuePerMonth Decimal? @db.Decimal(14, 2)
+  committedTestsPerMonth Int?
+  ratePerTest            Decimal? @db.Decimal(12, 2)
+
+  /// What happens when the commitment is missed — usually the shortfall is
+  /// billed at the reagent rate.
+  shortfallBasis  String?  @default("BILL_SHORTFALL") // BILL_SHORTFALL | CARRY_FORWARD | NONE
+  shortfallTerms  String?  @db.Text
+
+  /// The machine cannot be run on anyone else's reagents.
+  reagentExclusivity Boolean @default(true)
+
+  // ── The way out ────────────────────────────────────────────────────
+  buyoutOffered     Boolean  @default(false)
+  buyoutPrice       Decimal? @db.Decimal(14, 2)
+  buyoutAfterMonths Int?
+  exitPenalty       Decimal? @db.Decimal(14, 2)
+  exitNoticeDays    Int?     @default(90)
+
+  /// What the machine is worth, for insurance and custody — never for
+  /// depreciation, because the institution does not own it.
+  notionalValue Decimal? @db.Decimal(14, 2)
+
+  /// What the same machine would have cost to buy. Without it there is nothing
+  /// to compare the running cost against.
+  outrightPurchasePrice Decimal? @db.Decimal(14, 2)
+
+  status String @default("ACTIVE") // DRAFT | ACTIVE | EXPIRED | TERMINATED | BOUGHT_OUT | RETURNED
+
+  terminatedAt     DateTime?
+  terminationReason String?  @db.Text
+  returnedAt       DateTime?
+  boughtOutAt      DateTime?
+
+  documentUrl String?
+  terms       String? @db.Text
+  notes       String? @db.Text
+
+  assets       Asset[]
+  consumptions PlacementConsumption[]
+
+  createdById Int?
+  createdBy   Employee? @relation("PlacementCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@index([vendorId])
+  @@index([status, endDate])
+  @@map("placementagreement")
+}
+
+/// What was actually consumed in a month against what was promised.
+model PlacementConsumption {
+  id Int @id @default(autoincrement())
+
+  agreementId Int
+  agreement   PlacementAgreement @relation(fields: [agreementId], references: [id], onDelete: Cascade)
+
+  periodMonth Int // 1-12
+  periodYear  Int
+  periodLabel String
+
+  testsPerformed    Int?
+  reagentValue      Decimal @default(0) @db.Decimal(14, 2)
+  rentCharged       Decimal @default(0) @db.Decimal(14, 2)
+  serviceCharged    Decimal @default(0) @db.Decimal(14, 2)
+
+  committedValue Decimal? @db.Decimal(14, 2)
+  committedTests Int?
+
+  shortfallValue  Decimal @default(0) @db.Decimal(14, 2)
+  shortfallTests  Int     @default(0)
+  shortfallBilled Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Everything the month cost, and what that works out at per reportable test.
+  totalCost      Decimal @default(0) @db.Decimal(14, 2)
+  effectiveCostPerTest Decimal? @db.Decimal(12, 2)
+
+  invoiceRef String?
+  notes      String? @db.Text
+
+  recordedById Int?
+  recordedBy   Employee? @relation("PlacementConsumptionBy", fields: [recordedById], references: [id])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@unique([agreementId, periodYear, periodMonth])
+  @@index([agreementId])
+  @@map("placementconsumption")
 }
 
 /**
@@ -3216,9 +3807,200 @@ model AssetDisposal {
   updatedAt    DateTime      @default(now()) @updatedAt
   eWasteRecord EWasteRecord?
 
+  // ── Condemnation and clearance ──────────────────────────────────────────
+  // committeeMembers above is a free-text list kept for the existing records.
+  // These carry the actual proceedings: who inspected, who voted, and whether
+  // the data on the thing was destroyed before it left the building.
+  inspections   CondemnationInspection[]
+  sanitisations DataSanitisation[]
+
+  /// Value slab the write-off falls in, and how far it has been signed off.
+  approvalLevel    String? // HOD | MANAGEMENT | COO | CFO
+  levelApprovedUpto String?
+
   @@index([assetId])
   @@index([status])
   @@map("assetdisposal")
+}
+
+/**
+ * CONDEMNATION
+ *
+ * Writing an asset off is a decision with a value on it, and one person should
+ * not make it alone. A standing committee inspects, each member records their
+ * own view, and the recommendation carries their names — which is exactly what
+ * an auditor asks to see, and what a free-text list of names cannot provide.
+ */
+model CondemnationCommittee {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  /// What this committee covers — a value ceiling, a category, a department.
+  purpose      String? @db.Text
+  maxValue     Decimal? @db.Decimal(14, 2)
+  departmentId Int?
+  department   Department? @relation("CommitteeDepartment", fields: [departmentId], references: [id])
+
+  /// How many members have to record a view for the proceedings to stand.
+  quorum Int @default(3)
+
+  isActive Boolean @default(true)
+
+  members     CondemnationCommitteeMember[]
+  inspections CondemnationInspection[]
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@map("condemnationcommittee")
+}
+
+model CondemnationCommitteeMember {
+  id          Int                   @id @default(autoincrement())
+  committeeId Int
+  committee   CondemnationCommittee @relation(fields: [committeeId], references: [id], onDelete: Cascade)
+
+  employeeId Int
+  employee   Employee @relation("CommitteeMemberships", fields: [employeeId], references: [id])
+
+  /// CHAIR | TECHNICAL | FINANCE | USER_DEPARTMENT | SECRETARY | MEMBER
+  /// A technical member is what makes "beyond economic repair" mean anything.
+  role String @default("MEMBER")
+
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  @@unique([committeeId, employeeId])
+  @@map("condemnationcommitteemember")
+}
+
+/// One sitting of the committee on one asset.
+model CondemnationInspection {
+  id Int @id @default(autoincrement())
+
+  disposalId Int
+  disposal   AssetDisposal @relation(fields: [disposalId], references: [id], onDelete: Cascade)
+
+  committeeId Int
+  committee   CondemnationCommittee @relation(fields: [committeeId], references: [id])
+
+  inspectionDate DateTime @default(now())
+
+  /// What was found. "Beyond economic repair" is a conclusion, not a finding —
+  /// the finding is what is broken and what fixing it would cost.
+  physicalCondition String? @db.Text
+  faultDescription  String? @db.Text
+  isRepairable      Boolean @default(false)
+  repairEstimate    Decimal? @db.Decimal(14, 2)
+  /// Repair cost as a share of what a replacement costs. Past a threshold,
+  /// repair stops being the sensible answer and the committee can say why.
+  replacementCost   Decimal? @db.Decimal(14, 2)
+  residualLifeMonths Int?
+  sparesAvailable   Boolean?
+  vendorSupportEnded Boolean?
+
+  /// CONDEMN | REPAIR | RETAIN | REDEPLOY | REFER_BACK
+  recommendation       String?
+  recommendedDisposal  String? // AUCTION | SCRAP | DONATE | RETURN_TO_VENDOR | BUYBACK
+  estimatedRealisation Decimal? @db.Decimal(14, 2)
+
+  minutes String? @db.Text
+  status  String  @default("IN_PROGRESS") // IN_PROGRESS | CONCLUDED | ABANDONED
+
+  concludedAt DateTime?
+
+  votes CondemnationVote[]
+
+  convenedById Int?
+  convenedBy   Employee? @relation("InspectionConvenedBy", fields: [convenedById], references: [id])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([disposalId])
+  @@map("condemnationinspection")
+}
+
+/// One member's own view, recorded separately so a dissent survives.
+model CondemnationVote {
+  id           Int                    @id @default(autoincrement())
+  inspectionId Int
+  inspection   CondemnationInspection @relation(fields: [inspectionId], references: [id], onDelete: Cascade)
+
+  memberId Int
+  member   Employee @relation("CondemnationVotes", fields: [memberId], references: [id])
+
+  /// CONDEMN | REPAIR | RETAIN | REDEPLOY | ABSTAIN
+  decision String
+  remarks  String? @db.Text
+
+  signedAt DateTime @default(now())
+
+  @@unique([inspectionId, memberId])
+  @@map("condemnationvote")
+}
+
+/**
+ * DATA SANITISATION
+ *
+ * An analyser, a PACS workstation, a school laptop — all of them leave the
+ * building carrying patient or student records unless someone destroys them
+ * first. The certificate is the only evidence that happened, and under the
+ * DPDP Act the institution remains answerable for the data either way.
+ *
+ * Nothing holding personal data may complete disposal without this cleared.
+ */
+model DataSanitisation {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  disposalId Int?
+  disposal   AssetDisposal? @relation(fields: [disposalId], references: [id])
+
+  /// NONE | PATIENT | STUDENT | STAFF_PII | FINANCIAL | MIXED | UNKNOWN
+  /// UNKNOWN is treated as if it held data — the safe default.
+  dataClassification String @default("UNKNOWN")
+
+  /// HDD | SSD | FLASH | TAPE | OPTICAL | EMBEDDED | PAPER | NONE
+  mediaType     String?
+  mediaSerialNo String?
+  mediaRemoved  Boolean @default(false)
+
+  /// OVERWRITE_NIST | CRYPTO_ERASE | DEGAUSS | PHYSICAL_DESTRUCTION |
+  /// VENDOR_CERTIFIED | NOT_APPLICABLE
+  method       String?
+  methodDetail String? @db.Text
+  /// An SSD cannot be degaussed and overwriting it is unreliable — the method
+  /// has to suit the medium, and a mismatch is recorded rather than accepted.
+  methodWarning String? @db.Text
+
+  performedById   Int?
+  performedBy     Employee? @relation("SanitisationPerformedBy", fields: [performedById], references: [id])
+  performedAt     DateTime?
+  /// Whoever did it does not sign it off — a second person verifies.
+  verifiedById    Int?
+  verifiedBy      Employee? @relation("SanitisationVerifiedBy", fields: [verifiedById], references: [id])
+  verifiedAt      DateTime?
+
+  certificateRef String?
+  certificateUrl String?
+  /// Where a vendor did the destruction, who they were.
+  vendorName     String?
+
+  status String @default("PENDING") // PENDING | IN_PROGRESS | DONE | VERIFIED | NOT_REQUIRED | FAILED
+
+  notes String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([assetId])
+  @@index([status])
+  @@map("datasanitisation")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3449,6 +4231,11 @@ model AssetIndent {
   assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
 
   assetName       String // what asset is needed
+  // How many quotes this purchase needs. Buying a machine the institution has
+  // never owned deserves a comparison; adding another of something already in
+  // use does not, provided the reason is recorded.
+  // NEW_EQUIPMENT | ADDITIONAL | REPLACEMENT
+  procurementType String    @default("NEW_EQUIPMENT")
   quantity        Int       @default(1)
   justification   String    @db.Text // why it's needed
   urgency         String    @default("NORMAL") // NORMAL | URGENT | CRITICAL
@@ -3457,7 +4244,9 @@ model AssetIndent {
   specifications  String?   @db.Text
 
   // Approval chain
-  status String @default("DRAFT") // DRAFT | SUBMITTED | HOD_APPROVED | MANAGEMENT_APPROVED | PROCUREMENT | FULFILLED | REJECTED | CANCELLED
+  // DRAFT | SUBMITTED | HOD_APPROVED | MANAGEMENT_APPROVED | STORE_REVIEW |
+  // FULFILLED_FROM_STOCK | PROCUREMENT | DELIVERED | FULFILLED | CLOSED | REJECTED | CANCELLED
+  status String @default("DRAFT")
 
   hodApprovalStatus String? // PENDING | APPROVED | REJECTED
   hodApprovedById   Int?
@@ -3470,10 +4259,33 @@ model AssetIndent {
   managementApprovedAt     DateTime?
   managementRemarks        String?   @db.Text
 
+  // ── Asset department verification ──
+  // A technical review before money is discussed: is the specification right,
+  // and does the asset department already hold one?
+  assetDeptId         Int? // resolved from the line categories at submission
+  assetDeptStatus     String? // PENDING | VERIFIED | NEGOTIATING | ISSUED | REJECTED
+  assetDeptVerifiedById Int?
+  assetDeptVerifiedAt DateTime?
+  assetDeptRemarks    String?  @db.Text
+
+  // Store review — stores check their own stock before the indent reaches Purchase
+  storeReviewStatus String? // PENDING | ISSUED_FROM_STOCK | PARTIAL | NOT_AVAILABLE
+  storeReviewedById Int?
+  storeReviewedAt   DateTime?
+  storeRemarks      String?   @db.Text
+  qtyFromStock      Int       @default(0) // issued out of existing stock
+  qtyToProcure      Int? // balance forwarded to Purchase (null until reviewed)
+
   // Fulfillment
   fulfilledAt      DateTime?
   fulfilledAssetId Int?
   fulfilledAsset   Asset?    @relation("IndentFulfilledAsset", fields: [fulfilledAssetId], references: [id])
+
+  // Delivery / closure — the indent closes when the end user acknowledges,
+  // not when the goods receipt is accepted.
+  deliveredAt DateTime?
+  closedAt    DateTime?
+  closedById  Int?
 
   rejectionReason String? @db.Text
 
@@ -3482,6 +4294,13 @@ model AssetIndent {
 
   purchaseOrders     PurchaseOrder[]
   purchaseOrderLines PurchaseOrderLine[] @relation("POLineIndent")
+  storeIssues        IndentStoreIssue[]
+  externalPOs        ExternalPurchaseOrder[]
+  commissioningSignoffs CommissioningSignoff[]
+  lines              AssetIndentLine[]
+  negotiations       IndentSpecNegotiation[]
+  quotations         PurchaseQuotation[]
+  stockReservations  StockReservation[]
 
   @@index([departmentId, status])
   @@index([raisedById])
@@ -3623,12 +4442,979 @@ model TenantConfig {
   key   String  @unique
   value String
   label String?
-  group String? // PROCUREMENT | STORE | WORKORDER | ANALYTICS | RCA
+  group String? // PROCUREMENT | STORE | WORKORDER | ANALYTICS | RCA | ACCOUNTS
 
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
   @@map("tenantconfig")
+}
+
+// ═══════════════════════════════════════════════════════
+// INSTITUTION PROFILE — who this deployment belongs to
+// ═══════════════════════════════════════════════════════
+// Two axes drive behaviour across the whole product:
+//   sector       decides which registers and compliance rules exist
+//   entityType   decides the accounting — which depreciation books are
+//                produced, and whether the charitable double-deduction rule
+//                applies at all
+// Single row per deployment. Read constantly by the depreciation, tax and
+// compliance engines, so it is a typed model rather than key-value strings.
+
+enum InstitutionSector {
+  HEALTHCARE
+  EDUCATION
+  GENERIC
+}
+
+enum LegalEntityType {
+  TRUST // charitable trust or society — application-of-income rules apply
+  SOCIETY
+  SECTION_8 // not-for-profit company
+  PRIVATE_LIMITED
+  PUBLIC_LIMITED
+  LLP
+  PARTNERSHIP
+  PROPRIETORSHIP
+}
+
+model InstitutionProfile {
+  id Int @id @default(autoincrement())
+
+  institutionName String
+  sector          InstitutionSector @default(GENERIC)
+  entityType      LegalEntityType   @default(TRUST)
+
+  // Registration identifiers, all optional — a proprietorship may have none
+  panNumber       String?
+  gstNumber       String?
+  cinOrLlpin      String? // company / LLP identification number
+  registrationNo  String? // trust or society registration number
+  charityRegNo    String? // 12A / 80G style registration, for charitable entities
+
+  // Tax posture. Healthcare and school education are both largely exempt, so
+  // input credit is usually blocked and tax gets capitalised into asset cost.
+  isGstRegistered   Boolean @default(false)
+  hasTaxableIncome  Boolean @default(false) // pharmacy, canteen, hostel, coaching…
+  servicesAreExempt Boolean @default(true)
+
+  // ── Accounting posture ────────────────────────────────
+  // Companies file on useful life for the accounts AND written-down value for
+  // the return, so they need two books. LLPs and proprietorships need one.
+  maintainCompaniesActBook Boolean @default(false)
+  maintainTaxBook          Boolean @default(true)
+
+  // Charitable entities that claim an asset's cost as application of income
+  // cannot also depreciate it. Switching this on makes the depreciation engine
+  // read Asset.fundingSource and suppress depreciation where it applies.
+  applyIncomeApplicationRule Boolean @default(false)
+
+  fyStartMonth Int    @default(4) // 4 = April
+  currency     String @default("INR")
+
+  // Sector packs switched on for this deployment, comma separated:
+  // HEALTHCARE | EDUCATION | TRANSPORT | LIBRARY
+  enabledPacks String?
+
+  addressLine String? @db.Text
+  city        String?
+  state       String?
+  stateCode   String? // drives place-of-supply once GST lands
+  pincode     String?
+
+  updatedById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@map("institutionprofile")
+}
+
+/**
+ * GST ON AN INWARD SUPPLY
+ *
+ * The tax on a purchase is not one number. It splits by head, and — far more
+ * importantly — it splits between what can be claimed back and what becomes
+ * part of what the asset cost. For an exempt hospital or school that second
+ * figure is nearly all of it, and getting it wrong understates the asset and
+ * overstates the credit at the same time.
+ *
+ * One row per tax invoice, bill of entry, credit note or self-invoice.
+ */
+model GstDocument {
+  id Int @id @default(autoincrement())
+
+  /// TAX_INVOICE | BILL_OF_ENTRY | RCM_SELF_INVOICE | CREDIT_NOTE | DEBIT_NOTE
+  documentType String @default("TAX_INVOICE")
+
+  goodsReceiptId    Int?
+  goodsReceipt      GoodsReceipt?  @relation(fields: [goodsReceiptId], references: [id])
+  purchaseOrderId   Int?
+  purchaseVoucherId Int?
+  externalPoId      Int?
+
+  vendorId Int?
+  vendor   Vendor? @relation("VendorGstDocuments", fields: [vendorId], references: [id])
+
+  supplierGstin String?
+  supplierName  String?
+  invoiceNumber String
+  invoiceDate   DateTime
+
+  /// INTRA_STATE splits into CGST+SGST, INTER_STATE is IGST, IMPORT is IGST on
+  /// the bill of entry plus customs duty that is never creditable.
+  supplyType        String  @default("INTRA_STATE")
+  placeOfSupplyCode String?
+
+  taxableValue Decimal @db.Decimal(14, 2)
+  cgstRate     Decimal @default(0) @db.Decimal(5, 2)
+  cgstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  sgstRate     Decimal @default(0) @db.Decimal(5, 2)
+  sgstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  igstRate     Decimal @default(0) @db.Decimal(5, 2)
+  igstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  cessRate     Decimal @default(0) @db.Decimal(5, 2)
+  cessAmount   Decimal @default(0) @db.Decimal(14, 2)
+
+  /// Basic customs duty on an import. Never creditable — always part of cost.
+  customsDuty Decimal @default(0) @db.Decimal(14, 2)
+
+  totalTax     Decimal @db.Decimal(14, 2)
+  invoiceTotal Decimal @db.Decimal(14, 2)
+
+  /// Tax the institution pays itself rather than the supplier — goods
+  /// transport, legal services, an import of services.
+  isReverseCharge   Boolean   @default(false)
+  rcmPaidAt         DateTime?
+  rcmChallanRef     String?
+  selfInvoiceNumber String?
+
+  /// Capital goods get a longer credit life under Rule 43 and a different
+  /// reversal treatment from inputs.
+  isCapitalGoods Boolean @default(true)
+
+  // ── The determination ──────────────────────────────────────────────
+  /// FULL | BLOCKED_EXEMPT | BLOCKED_17_5 | PROPORTIONATE | NOT_REGISTERED
+  itcEligibility    String  @default("BLOCKED_EXEMPT")
+  /// Which limb of 17(5) blocks it, where that is the reason.
+  blockedReasonCode String?
+  eligibilityReason String? @db.Text
+
+  itcClaimable    Decimal @default(0) @db.Decimal(14, 2)
+  itcCapitalised  Decimal @default(0) @db.Decimal(14, 2)
+  /// Claiming credit on the tax bars depreciating it — s.16(3) read with s.43(1)
+  /// of the Income Tax Act. Set when the claim is made so depreciation knows.
+  depreciationBarred Boolean @default(false)
+
+  // ── Reconciliation against what the supplier actually filed ────────
+  /// NOT_CHECKED | MATCHED | MISSING_IN_2B | VALUE_MISMATCH | EXTRA_IN_2B
+  gstr2bStatus  String    @default("NOT_CHECKED")
+  gstr2bPeriod  String?
+  gstr2bValue   Decimal?  @db.Decimal(14, 2)
+  gstr2bMatchedAt DateTime?
+  gstr2bRemarks String?   @db.Text
+
+  // ── Rule 37: pay the supplier within 180 days or give the credit back ──
+  paymentDueBy   DateTime?
+  isPaidInFull   Boolean   @default(false)
+  paidInFullAt   DateTime?
+  reversalDue    Boolean   @default(false)
+  reversedAt     DateTime?
+  reversalAmount Decimal?  @db.Decimal(14, 2)
+  reclaimedAt    DateTime?
+
+  /// Rule 43 spreads capital-goods common credit over sixty months.
+  rule43MonthlyCredit Decimal? @db.Decimal(14, 2)
+  rule43MonthsElapsed Int      @default(0)
+
+  taxPeriod  String // MMYYYY, the period the credit belongs to
+  fiscalYear Int
+
+  status String @default("RECORDED") // RECORDED | CLAIMED | REVERSED | CANCELLED
+
+  notes String? @db.Text
+
+  lines GstDocumentLine[]
+
+  createdById Int?
+  createdBy   Employee? @relation("GstDocumentCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @default(now()) @updatedAt
+
+  @@index([fiscalYear, taxPeriod])
+  @@index([vendorId])
+  @@index([gstr2bStatus])
+  @@index([goodsReceiptId])
+  @@map("gstdocument")
+}
+
+/// HSN-wise breakup. Needed for the return summary, and for splitting tax
+/// across assets when one invoice carries several.
+model GstDocumentLine {
+  id Int @id @default(autoincrement())
+
+  gstDocumentId Int
+  gstDocument   GstDocument @relation(fields: [gstDocumentId], references: [id], onDelete: Cascade)
+
+  description String
+  hsnCode     String?
+  quantity    Decimal? @db.Decimal(12, 2)
+  unit        String?
+
+  taxableValue Decimal @db.Decimal(14, 2)
+  taxRate      Decimal @db.Decimal(5, 2)
+  cgstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  sgstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  igstAmount   Decimal @default(0) @db.Decimal(14, 2)
+  cessAmount   Decimal @default(0) @db.Decimal(14, 2)
+
+  assetId          Int?
+  goodsReceiptLineId Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([gstDocumentId])
+  @@map("gstdocumentline")
+}
+
+/**
+ * The monthly working for an institution with both exempt and taxable supply.
+ * The apportionment ratio comes from turnover, which lives outside this system,
+ * so finance enters it and everything downstream follows from it.
+ */
+model GstPeriodSummary {
+  id Int @id @default(autoincrement())
+
+  taxPeriod  String @unique // MMYYYY
+  fiscalYear Int
+
+  exemptTurnover  Decimal @default(0) @db.Decimal(16, 2)
+  taxableTurnover Decimal @default(0) @db.Decimal(16, 2)
+  totalTurnover   Decimal @default(0) @db.Decimal(16, 2)
+  /// Share of turnover that is exempt — the proportion of common credit that
+  /// has to be given back.
+  exemptRatio     Decimal @default(0) @db.Decimal(7, 4)
+
+  /// Rule 42 on inputs and services, Rule 43 on capital goods.
+  rule42Reversal Decimal @default(0) @db.Decimal(14, 2)
+  rule43Reversal Decimal @default(0) @db.Decimal(14, 2)
+
+  totalItcAvailed  Decimal @default(0) @db.Decimal(14, 2)
+  totalItcReversed Decimal @default(0) @db.Decimal(14, 2)
+  netItcClaimed    Decimal @default(0) @db.Decimal(14, 2)
+
+  rcmLiability Decimal @default(0) @db.Decimal(14, 2)
+  rcmPaid      Decimal @default(0) @db.Decimal(14, 2)
+
+  status String @default("OPEN") // OPEN | FINALISED
+  returnFiledAt DateTime?
+  returnRef     String?
+
+  notes String? @db.Text
+
+  preparedById Int?
+  preparedBy   Employee? @relation("GstPeriodPreparedBy", fields: [preparedById], references: [id])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([fiscalYear])
+  @@map("gstperiodsummary")
+}
+
+/**
+ * GSTR-2B RECONCILIATION
+ *
+ * The portal's own statement of what suppliers filed against this GSTIN.
+ * Credit that is not in it cannot be taken, whatever the invoice in the file
+ * says — so this is the document the books are checked against, not the other
+ * way round.
+ *
+ * One row per import, holding the parsed lines and what each matched to.
+ */
+model Gstr2bImport {
+  id Int @id @default(autoincrement())
+
+  taxPeriod  String // MMYYYY as stated in the file
+  fiscalYear Int
+
+  /// What the portal says the statement covers, kept as-is for evidence.
+  fileName      String?
+  portalGstin   String?
+  generatedOn   String?
+
+  rowCount        Int @default(0)
+  matchedCount    Int @default(0)
+  mismatchCount   Int @default(0)
+  missingInBooks  Int @default(0)
+  missingIn2b     Int @default(0)
+
+  totalTaxIn2b    Decimal @default(0) @db.Decimal(14, 2)
+  totalTaxInBooks Decimal @default(0) @db.Decimal(14, 2)
+  /// Credit the portal itself says is not available, whatever we concluded.
+  blockedByPortal Decimal @default(0) @db.Decimal(14, 2)
+
+  status String @default("PARSED") // PARSED | MATCHED | APPLIED | DISCARDED
+
+  appliedAt DateTime?
+  notes     String?   @db.Text
+
+  rows Gstr2bRow[]
+
+  importedById Int?
+  importedBy   Employee? @relation("Gstr2bImportedBy", fields: [importedById], references: [id])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([taxPeriod])
+  @@map("gstr2bimport")
+}
+
+/// One invoice line as the portal reported it, and what it matched to here.
+model Gstr2bRow {
+  id       Int          @id @default(autoincrement())
+  importId Int
+  import   Gstr2bImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  /// B2B | B2BA | CDNR | CDNRA | IMPG | IMPGSEZ
+  section String @default("B2B")
+
+  supplierGstin String?
+  supplierName  String?
+  invoiceNumber String
+  /// Punctuation and case stripped, so "INV/001" and "inv-001" meet.
+  normalisedNumber String
+  invoiceDate      DateTime?
+
+  invoiceValue Decimal @default(0) @db.Decimal(14, 2)
+  taxableValue Decimal @default(0) @db.Decimal(14, 2)
+  igst         Decimal @default(0) @db.Decimal(14, 2)
+  cgst         Decimal @default(0) @db.Decimal(14, 2)
+  sgst         Decimal @default(0) @db.Decimal(14, 2)
+  cess         Decimal @default(0) @db.Decimal(14, 2)
+  totalTax     Decimal @default(0) @db.Decimal(14, 2)
+
+  placeOfSupply String?
+  isReverseCharge Boolean @default(false)
+  /// The portal's own verdict. "N" beats anything we concluded here.
+  itcAvailable  Boolean @default(true)
+  itcReason     String?
+  supplierFiledOn String?
+  sourceType      String? // e-Invoice | e-Invoice(SEZ) | null
+
+  /// EXACT | NORMALISED | FUZZY | VALUE_MISMATCH | NOT_IN_BOOKS | AMBIGUOUS
+  matchType   String  @default("NOT_IN_BOOKS")
+  matchedDocumentId Int?
+  taxDifference Decimal? @db.Decimal(14, 2)
+  matchNote   String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([importId, matchType])
+  @@index([normalisedNumber])
+  @@map("gstr2brow")
+}
+
+// ═══════════════════════════════════════════════════════
+// ACCOUNTING PERIODS — closing the books
+// ═══════════════════════════════════════════════════════
+// Once finance closes a month, nothing may be backdated into it. Every auditor
+// assumes this and the system had no way to enforce it — a voucher dated last
+// March could be posted today and quietly change a signed-off year.
+model AccountingPeriod {
+  id Int @id @default(autoincrement())
+
+  fiscalYear  Int
+  periodMonth Int // calendar month, 1–12
+  periodLabel String // "Apr 2026"
+
+  // OPEN   — normal working month
+  // CLOSED — finance has closed it; a CFO can reopen with a reason
+  // LOCKED — signed off after audit; not reopenable
+  status String @default("OPEN")
+
+  closedById Int?
+  closedAt   DateTime?
+  closeNotes String?   @db.Text
+
+  reopenedById Int?
+  reopenedAt   DateTime?
+  reopenReason String?   @db.Text
+
+  lockedById Int?
+  lockedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([fiscalYear, periodMonth])
+  @@index([status])
+  @@map("accountingperiod")
+}
+
+// ═══════════════════════════════════════════════════════
+// APPROVAL DELEGATION — someone has to sign while you are away
+// ═══════════════════════════════════════════════════════
+// Without this, approvals stall or credentials get shared — and the second is
+// what actually happens. A delegation is time-boxed and on the record, so the
+// audit trail shows who really signed and on whose authority.
+model ApprovalDelegation {
+  id Int @id @default(autoincrement())
+
+  // Whose authority is being lent
+  delegatorId Int
+  delegator   Employee @relation("DelegationFrom", fields: [delegatorId], references: [id])
+
+  // Who may use it
+  delegateId Int
+  delegate   Employee @relation("DelegationTo", fields: [delegateId], references: [id])
+
+  fromDate DateTime
+  toDate   DateTime
+
+  // ALL | PROCUREMENT | ACCOUNTS | INDENT
+  scope String @default("ALL")
+
+  reason   String  @db.Text
+  isActive Boolean @default(true)
+
+  // Set when the delegator comes back early
+  revokedById Int?
+  revokedAt   DateTime?
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([delegateId, isActive])
+  @@index([delegatorId, isActive])
+  @@map("approvaldelegation")
+}
+
+// ═══════════════════════════════════════════════════════
+// CAPITAL WORK IN PROGRESS — cost between payment and asset
+// ═══════════════════════════════════════════════════════
+// An asset's cost is not the invoice value. It is the invoice, plus freight,
+// plus insurance in transit, plus customs where imported, plus installation
+// and any site work done specifically for it — less any discount. Every one of
+// those is capitalised and depreciated.
+//
+// Between the first payment and the day the machine is ready to use, that
+// spend has nowhere to live. Here it accumulates, and on commissioning it
+// transfers onto the asset as one built-up figure.
+model CapitalWorkInProgress {
+  id         Int    @id @default(autoincrement())
+  cwipNumber String @unique // CWIP-FY2026-001
+
+  description String
+
+  // What it is being built for. Any of these may be set.
+  purchaseOrderId Int?
+  externalPoId    Int?
+  indentId        Int?
+  goodsReceiptId  Int?
+
+  departmentId    Int?
+  assetCategoryId Int?
+
+  // OPEN — still accumulating
+  // READY — everything incurred, waiting to be capitalised
+  // CAPITALISED — transferred onto the assets, depreciation begins
+  // CANCELLED — abandoned; the spend is written off rather than capitalised
+  status String @default("OPEN")
+
+  // Cache of the component rows, kept in step so list screens do not aggregate
+  totalAmount Decimal @default(0) @db.Decimal(14, 2)
+
+  capitalisedAt   DateTime?
+  capitalisedById Int?
+  // The figure actually transferred, kept because components can still be
+  // added afterwards for a later correction.
+  capitalisedAmount Decimal? @db.Decimal(14, 2)
+
+  cancelReason String? @db.Text
+  notes        String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  components AcquisitionCostComponent[]
+  assets     Asset[]                    @relation("CwipAssets")
+
+  @@index([status])
+  @@index([purchaseOrderId])
+  @@map("capitalworkinprogress")
+}
+
+// One line of the build-up, each traceable to the document it came from.
+// Without the source reference this is just a pile of numbers an auditor
+// cannot follow back.
+model AcquisitionCostComponent {
+  id     Int                   @id @default(autoincrement())
+  cwipId Int
+  cwip   CapitalWorkInProgress @relation(fields: [cwipId], references: [id], onDelete: Cascade)
+
+  // BASIC | FREIGHT | INSURANCE | CUSTOMS_DUTY | CLEARING_CHARGES |
+  // INSTALLATION | SITE_PREPARATION | NON_CREDITABLE_TAX | TESTING |
+  // PROFESSIONAL_FEES | DISCOUNT | OTHER
+  componentType String
+  description   String?
+
+  // Negative for a discount, so the build-up simply sums
+  amount Decimal @db.Decimal(14, 2)
+
+  // INVOICE | GRN | WORK_ORDER | PAYMENT_VOUCHER | BILL_OF_ENTRY | MANUAL
+  sourceType String?
+  sourceRef  String?
+  incurredDate DateTime?
+
+  // Not everything spent around an asset belongs in its cost — training,
+  // consumables and running costs are expensed, not capitalised.
+  isCapitalisable Boolean @default(true)
+
+  notes String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  @@index([cwipId])
+  @@map("acquisitioncostcomponent")
+}
+
+// ═══════════════════════════════════════════════════════
+// QUOTATIONS — what was offered, and why one was chosen
+// ═══════════════════════════════════════════════════════
+// Before this, a purchase order simply named a vendor with nothing behind the
+// choice. Quotations record what each vendor offered, which one won, and the
+// reason — which is the first thing an auditor asks about.
+//
+// Clinical and laboratory equipment is judged on technical suitability FIRST
+// and price second, so a quotation carries a technical verdict of its own. A
+// straight price comparison across unqualified bids is not a comparison.
+model PurchaseQuotation {
+  id Int @id @default(autoincrement())
+
+  // The vendor's own reference on their quote
+  quotationNo   String
+  quotationDate DateTime @default(now())
+
+  indentId Int
+  indent   AssetIndent @relation(fields: [indentId], references: [id], onDelete: Cascade)
+
+  // Set where a quote covers one line of a multi-line indent rather than all of it
+  indentLineId Int?
+  indentLine   AssetIndentLine? @relation(fields: [indentLineId], references: [id])
+
+  vendorId Int
+  vendor   Vendor @relation("QuotationVendor", fields: [vendorId], references: [id])
+
+  quotedAmount     Decimal  @db.Decimal(14, 2)
+  // What was actually agreed after negotiation. Kept apart from the quote so
+  // the saving is visible rather than overwritten.
+  negotiatedAmount Decimal? @db.Decimal(14, 2)
+  currency         String   @default("INR")
+
+  promisedDeliveryDate DateTime?
+  deliveryDays         Int?
+  validUntil           DateTime?
+  paymentTerms         String?   @db.Text
+  warrantyMonths       Int?
+
+  attachmentUrl String?
+  notes         String? @db.Text
+
+  // ── Technical evaluation, before price is looked at ──
+  technicalStatus  String    @default("PENDING") // PENDING | QUALIFIED | DISQUALIFIED
+  technicalRemarks String?   @db.Text
+  technicalById    Int?
+  technicalAt      DateTime?
+
+  // ── Commercial selection ──
+  isSelected      Boolean   @default(false)
+  // LOWEST_PRICE | FASTEST_DELIVERY | ONLY_QUALIFIED | TECHNICAL_FIT |
+  // RATE_CONTRACT | EXISTING_VENDOR | SOLE_SOURCE
+  selectionBasis  String?
+  selectionReason String?   @db.Text
+  selectedById    Int?
+  selectedAt      DateTime?
+
+  purchaseOrderId Int? // set once the winning quote becomes an order
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  lines PurchaseQuotationLine[]
+
+  @@unique([indentId, vendorId, quotationNo])
+  @@index([indentId])
+  @@index([vendorId])
+  @@map("purchasequotation")
+}
+
+model PurchaseQuotationLine {
+  id          Int               @id @default(autoincrement())
+  quotationId Int
+  quotation   PurchaseQuotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+
+  lineNumber  Int
+  description String
+  makeModel   String? // what the vendor actually offered against the spec
+
+  quantity   Int
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  taxPercent Decimal? @db.Decimal(5, 2)
+  lineTotal  Decimal  @db.Decimal(14, 2)
+
+  specifications String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([quotationId])
+  @@map("purchasequotationline")
+}
+
+// ═══════════════════════════════════════════════════════
+// ASSET DEPARTMENT — who technically verifies what
+// ═══════════════════════════════════════════════════════
+// The department that vets an indent is not fixed: biomedical engineering
+// verifies medical equipment, IT verifies computers, estates verifies civil
+// work. Responsibility is mapped per category, with a fallback department for
+// anything unmapped so an indent never lands nowhere.
+model AssetDepartmentConfig {
+  id Int @id @default(autoincrement())
+
+  departmentId Int
+  department   Department @relation("AssetDeptConfig", fields: [departmentId], references: [id])
+
+  // Null means "everything not mapped to someone else" — the catch-all.
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation(fields: [assetCategoryId], references: [id])
+
+  // Exactly one row should carry this. Used when a category has no owner.
+  isDefault Boolean @default(false)
+  isActive  Boolean @default(true)
+
+  notes String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([departmentId, assetCategoryId])
+  @@index([assetCategoryId, isActive])
+  @@map("assetdepartmentconfig")
+}
+
+// ═══════════════════════════════════════════════════════
+// INDENT LINES — one request, several things
+// ═══════════════════════════════════════════════════════
+// The header keeps its original fields as a running summary, so every existing
+// screen, report and purchase-order path continues to read what it always did.
+// Lines carry the detail, and each one is verified, negotiated and fulfilled on
+// its own — a five-line indent can have one line issued from stock, one
+// renegotiated and three sent to purchase.
+model AssetIndentLine {
+  id       Int         @id @default(autoincrement())
+  indentId Int
+  indent   AssetIndent @relation(fields: [indentId], references: [id], onDelete: Cascade)
+
+  lineNumber Int
+  assetName  String
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation("IndentLineCategory", fields: [assetCategoryId], references: [id])
+
+  quantity          Int      @default(1)
+  estimatedUnitCost Decimal? @db.Decimal(12, 2)
+  estimatedBudget   Decimal? @db.Decimal(14, 2)
+
+  specifications String? @db.Text
+  justification  String? @db.Text
+
+  // ── Asset department verification, per line ──
+  // PENDING | VERIFIED | REVISED | ISSUED_FROM_STOCK | REJECTED
+  verificationStatus    String? @default("PENDING")
+  revisedSpecifications String? @db.Text
+  revisedQuantity       Int?
+  verifiedById          Int?
+  verifiedAt            DateTime?
+  verifyRemarks         String?   @db.Text
+
+  // ── Fulfilment, per line ──
+  qtyFromStock Int  @default(0)
+  qtyToProcure Int?
+
+  // PENDING | ISSUED_FROM_STOCK | PROCUREMENT | DELIVERED | CLOSED | REJECTED
+  status String @default("PENDING")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  negotiations IndentSpecNegotiation[]
+  quotations   PurchaseQuotation[]
+  specs        IndentLineSpec[]
+
+  @@unique([indentId, lineNumber])
+  @@index([indentId])
+  @@map("assetindentline")
+}
+
+// ═══════════════════════════════════════════════════════
+// SPEC NEGOTIATION — "you asked for 5 GB, we hold 2.5"
+// ═══════════════════════════════════════════════════════
+// Every round is kept, in both directions, so the specification that finally
+// gets bought carries the reason it changed.
+model IndentSpecNegotiation {
+  id       Int         @id @default(autoincrement())
+  indentId Int
+  indent   AssetIndent @relation(fields: [indentId], references: [id], onDelete: Cascade)
+
+  indentLineId Int?
+  indentLine   AssetIndentLine? @relation(fields: [indentLineId], references: [id], onDelete: Cascade)
+
+  round Int @default(1)
+
+  // ASSET_DEPT | REQUESTER — who is making this proposal
+  proposedBy     String
+  proposedById   Int?
+  proposedSpec   String  @db.Text
+  proposedQuantity Int?
+  reason         String  @db.Text
+
+  // PENDING | ACCEPTED | DECLINED | COUNTERED
+  responseStatus  String    @default("PENDING")
+  respondedById   Int?
+  respondedAt     DateTime?
+  responseRemarks String?   @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([indentId])
+  @@index([indentLineId])
+  @@map("indentspecnegotiation")
+}
+
+// ═══════════════════════════════════════════════════════
+// SECOND DEPRECIATION BOOK — Companies Act alongside Income Tax
+// ═══════════════════════════════════════════════════════
+// A company files on useful life for its financial statements AND on
+// written-down value for its tax return, so the same machine carries two
+// different values in the same year.
+//
+// AssetDepreciation remains the Income Tax book — it is live, it holds every
+// existing client's history, and its half-year and written-down-value logic is
+// tax logic. The Companies Act book lives here instead of reshaping a table
+// that trusts are depreciating against today.
+
+enum DepreciationBook {
+  TAX // Income Tax Act — written-down value, block of assets
+  COMPANIES_ACT // Schedule II — useful life, pro-rata from date of use
+}
+
+model AssetDepreciationBook {
+  id      Int   @id @default(autoincrement())
+  assetId Int
+  asset   Asset @relation("AssetDepBooks", fields: [assetId], references: [id])
+
+  book DepreciationBook @default(COMPANIES_ACT)
+
+  method          String // SLM | WDV
+  usefulLifeYears Int
+  // Schedule II caps the residual at 5% of original cost
+  residualPercent Decimal @default(5) @db.Decimal(5, 2)
+
+  // Frozen at enrolment. The tax book may carry a different cost — a trust
+  // capitalising blocked tax, for instance — so it is stored, not derived.
+  grossCost Decimal @db.Decimal(14, 2)
+
+  // Ready-for-use date, which is what Schedule II runs from — not the invoice
+  // date, and not necessarily the tax book's start.
+  depreciationStart DateTime
+  lastCalculatedAt  DateTime?
+
+  accumulatedDepreciation Decimal  @default(0) @db.Decimal(14, 2)
+  currentBookValue        Decimal? @db.Decimal(14, 2)
+
+  isActive Boolean @default(true)
+  notes    String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([assetId, book])
+  @@index([book, isActive])
+  @@map("assetdepreciationbook")
+}
+
+// Per-category defaults, so enrolling an asset does not mean typing a useful
+// life every time. Schedule II fixes lives by class of asset; the Income Tax
+// Act fixes rates by block.
+model CategoryDepreciationRule {
+  id              Int              @id @default(autoincrement())
+  assetCategoryId Int
+  assetCategory   AssetCategory    @relation(fields: [assetCategoryId], references: [id])
+  book            DepreciationBook
+
+  method String // SLM | WDV
+
+  // Companies Act
+  usefulLifeYears Int?
+  residualPercent Decimal? @db.Decimal(5, 2)
+
+  // Income Tax — the block this category falls in
+  ratePercent Decimal? @db.Decimal(5, 2)
+  blockName   String?
+
+  notes String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@unique([assetCategoryId, book])
+  @@map("categorydepreciationrule")
+}
+
+// ═══════════════════════════════════════════════════════
+// LICENCE & CERTIFICATE REGISTER — one model, many regimes
+// ═══════════════════════════════════════════════════════
+// Deliberately generic. The same shape covers a school bus fitness
+// certificate, a hospital radiation approval, an ultrasound registration, an
+// electrical safety test, a waste authorisation and an affiliation — all of
+// which are "a document, from an authority, that expires, and sometimes
+// belongs to a specific asset".
+//
+// Building one register instead of six is the difference between a week and a
+// quarter, and it means a new regime is a new type value rather than a new
+// module.
+model AssetLicence {
+  id Int @id @default(autoincrement())
+
+  // FITNESS | PERMIT | POLLUTION | ROAD_TAX | VEHICLE_INSURANCE | DRIVER_LICENCE
+  // RADIATION | ULTRASOUND_REGN | ELECTRICAL_SAFETY | CALIBRATION_CERT
+  // WASTE_AUTHORISATION | AFFILIATION | ACCREDITATION | FIRE_NOC | OTHER
+  licenceType   String
+  licenceNumber String
+  title         String? // free label where the type alone is not enough
+
+  issuingAuthority String?
+  issueDate        DateTime?
+  expiryDate       DateTime?
+
+  // ACTIVE | EXPIRING | EXPIRED | SURRENDERED | SUSPENDED
+  status String @default("ACTIVE")
+
+  // Asset-specific (a bus, a scanner) or institution-wide (an affiliation).
+  assetId Int?
+  asset   Asset? @relation("AssetLicences", fields: [assetId], references: [id])
+
+  // For licences that belong to a person rather than a machine — drivers,
+  // radiation safety officers, registered sonographers.
+  holderName     String?
+  holderEmployeeId Int?
+
+  departmentId Int?
+  branchId     Int?
+
+  documentUrl String?
+  cost        Decimal? @db.Decimal(12, 2)
+
+  // Days before expiry to start warning. Null falls back to the tenant default.
+  reminderDays Int?
+
+  // Some regimes forbid moving or disposing of the asset while the licence is
+  // live — an ultrasound machine cannot simply be sold on.
+  blocksTransfer Boolean @default(false)
+  blocksDisposal Boolean @default(false)
+
+  remarks String? @db.Text
+
+  renewedFromId Int? // chain of renewals, newest points at its predecessor
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([licenceType, status])
+  @@index([expiryDate])
+  @@index([assetId])
+  @@map("assetlicence")
+}
+
+// ═══════════════════════════════════════════════════════
+// LIBRARY ACCESSION REGISTER — education pack
+// ═══════════════════════════════════════════════════════
+// High count, low value per item — closer to inventory than to the fixed asset
+// register, so it lives in its own table rather than clogging Asset. An
+// institution with 40,000 books should not have 40,000 rows in the asset
+// register, each carrying depreciation and assignment machinery it never uses.
+model LibraryItem {
+  id Int @id @default(autoincrement())
+
+  accessionNo String  @unique // the running number that defines the register
+  title       String
+  author      String?
+  publisher   String?
+  edition     String?
+  isbn        String?
+
+  // BOOK | JOURNAL | PERIODICAL | THESIS | REPORT | CD_DVD | EBOOK | MAP | OTHER
+  itemType String  @default("BOOK")
+  subject  String?
+  language String?
+
+  // PURCHASE | DONATION | GRANT | EXCHANGE
+  source      String?  @default("PURCHASE")
+  cost        Decimal? @db.Decimal(10, 2)
+  vendorId    Int?
+  vendor      Vendor?  @relation("LibraryVendor", fields: [vendorId], references: [id])
+  billNo      String?
+  purchaseDate DateTime?
+
+  // Where it physically sits
+  location String? // rack / shelf / section
+  callNo   String?
+
+  departmentId Int?
+  branchId     Int?
+
+  // AVAILABLE | ISSUED | IN_BINDING | LOST | DAMAGED | WITHDRAWN
+  status String @default("AVAILABLE")
+
+  // Withdrawal — the library equivalent of condemnation. Lost, obsolete or
+  // beyond repair items leave the register but stay on the record.
+  withdrawnAt     DateTime?
+  withdrawnReason String?   @db.Text
+  withdrawnById   Int?
+
+  // Stock verification — the annual walk
+  lastVerifiedAt DateTime?
+  lastVerifiedById Int?
+
+  remarks String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([itemType])
+  @@index([title])
+  @@map("libraryitem")
+}
+
+// How an asset was paid for. Needed in two places at once:
+//   • charitable entities — an asset funded from income already claimed as
+//     application cannot be depreciated again
+//   • education — grant-funded assets carry conditions on use and disposal
+enum AssetFundingSource {
+  OWN_INCOME // revenue of the year, may have been claimed as application
+  CORPUS // corpus or capital fund
+  GRANT // government or agency grant, usually with conditions
+  DONATION // donated in kind or cash-specific
+  LOAN // borrowed funds
+  INTERNAL_ACCRUAL
 }
 
 // ═══════════════════════════════════════════════════════
@@ -3663,6 +5449,8 @@ model Store {
   goodsReceiptLines  GoodsReceiptLine[]   @relation("GRALineStore")
   purchaseOrderLines PurchaseOrderLine[]  @relation("POLineStore")
   stagedAssets       Asset[]              @relation("AssetCurrentStore")
+  indentIssues       IndentStoreIssue[]
+  stockReservations  StockReservation[]
 
   @@map("store")
 }
@@ -3786,6 +5574,15 @@ model PurchaseOrder {
   isAmended      Boolean  @default(false)
   originalAmount Decimal? @db.Decimal(14, 2)
 
+  // Advance payment terms — accounts raise the advance voucher from these
+  // once the PO is dispatched to the vendor.
+  advancePercent Decimal?  @db.Decimal(5, 2)
+  advanceAmount  Decimal?  @db.Decimal(14, 2)
+  advancePaidAt  DateTime?
+  // When the advance was set off against the payable in the ledger. Guards the
+  // adjustment entry so it is posted once, not on every later payment.
+  advanceAdjustedAt DateTime?
+
   // TAT milestone: when the PO was dispatched to the vendor
   sentToVendorAt DateTime?
 
@@ -3794,15 +5591,28 @@ model PurchaseOrder {
   shippingAddress String?   @db.Text
   notes           String?   @db.Text
 
+  // Liquidated damages. Agreed on the order; charged from the goods receipt.
+  // Nil rates mean the order carries no delay clause.
+  ldPercentPerWeek Decimal? @db.Decimal(5, 2)
+  ldMaxPercent     Decimal? @db.Decimal(5, 2)
+  /// DELAYED_VALUE charges only the late portion; ORDER_VALUE charges the whole
+  /// order however little arrived late.
+  ldBasis          String?  @default("DELAYED_VALUE")
+  /// Days the vendor gets before the clock starts.
+  ldGraceDays      Int?     @default(0)
+
   createdById Int?
   updatedById Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
 
-  lines         PurchaseOrderLine[]
-  goodsReceipts GoodsReceipt[]
-  assets        Asset[]                  @relation("POAssets")
-  amendments    PurchaseOrderAmendment[]
+  lines             PurchaseOrderLine[]
+  goodsReceipts     GoodsReceipt[]
+  assets            Asset[]                  @relation("POAssets")
+  amendments        PurchaseOrderAmendment[]
+  matches           ProcurementMatch[]
+  paymentVouchers   PaymentVoucher[]         @relation("POPaymentVouchers")
+  liquidatedDamages LiquidatedDamage[]
 
   @@index([vendorId])
   @@index([status])
@@ -3824,15 +5634,39 @@ model PurchaseOrderAmendment {
   // Snapshot of what changed
   changesJson Json? // { linesAdded: [], linesModified: [], linesRemoved: [] }
 
-  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED
+  // An amendment is raised by the Purchase team but walks the SAME amount-slab
+  // approval chain as a PO, re-derived from `newAmount`. A ₹80k PO amended to
+  // ₹6L therefore needs COO sign-off, not just Finance.
+  // PENDING | HOD_APPROVED | MGMT_APPROVED | COO_APPROVED | APPROVED | REJECTED
+  status        String  @default("PENDING")
+  approvalLevel String? // HOD | MANAGEMENT | COO | CFO — highest level needed for newAmount
+
+  hodApprovedById  Int?
+  hodApprovedAt    DateTime?
+  hodRemarks       String?   @db.Text
+  mgmtApprovedById Int?
+  mgmtApprovedAt   DateTime?
+  mgmtRemarks      String?   @db.Text
+  cooApprovedById  Int?
+  cooApprovedAt    DateTime?
+  cooRemarks       String?   @db.Text
+  cfoApprovedById  Int?
+  cfoApprovedAt    DateTime?
+  cfoRemarks       String?   @db.Text
+
+  // Final decision (set when the last required level signs, or on rejection)
   approvedById Int?
   approvedAt   DateTime?
   remarks      String?   @db.Text
+
+  rejectedById Int?
+  rejectedAt   DateTime?
 
   createdById Int?
   createdAt   DateTime @default(now())
 
   @@index([purchaseOrderId])
+  @@index([status])
   @@map("purchaseorderamendment")
 }
 
@@ -3865,6 +5699,15 @@ model PurchaseOrderLine {
   receivedQty Int  @default(0)
   pendingQty  Int?
 
+  // Partial cancellation — a line no longer needed is dropped here rather than
+  // forcing an amendment of the whole order. The commitment is released for
+  // the cancelled value only.
+  cancelledQty  Int       @default(0)
+  lineStatus    String    @default("ACTIVE") // ACTIVE | PART_CANCELLED | CANCELLED
+  cancelReason  String?   @db.Text
+  cancelledById Int?
+  cancelledAt   DateTime?
+
   hsnCode        String?
   specifications String? @db.Text
 
@@ -3887,6 +5730,12 @@ model GoodsReceipt {
 
   purchaseOrderId Int?
   purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+
+  // Clients without the PO module (e.g. JMRH) receive against a PO raised
+  // outside the system — the approved value on that reference is the baseline
+  // the tax invoice is matched against.
+  externalPoId Int?
+  externalPo   ExternalPurchaseOrder? @relation(fields: [externalPoId], references: [id])
 
   vendorId Int?
   vendor   Vendor? @relation(fields: [vendorId], references: [id])
@@ -3919,8 +5768,14 @@ model GoodsReceipt {
   lines            GoodsReceiptLine[]
   assets           Asset[]            @relation("GRAAssets")
   purchaseVouchers PurchaseVoucher[]  @relation("GRAPurchaseVouchers")
+  match            ProcurementMatch?
+  returns          GoodsReturn[]
+  commissioningSignoffs CommissioningSignoff[]
+  liquidatedDamages     LiquidatedDamage[]
+  gstDocuments          GstDocument[]
 
   @@index([purchaseOrderId])
+  @@index([externalPoId])
   @@index([status])
   @@map("goodsreceipt")
 }
@@ -3956,9 +5811,182 @@ model GoodsReceiptLine {
 
   createdAt DateTime @default(now())
 
+  returnLines GoodsReturnLine[]
+
   @@index([goodsReceiptId])
   @@index([poLineId])
   @@map("goodsreceiptline")
+}
+
+// ═══════════════════════════════════════════════════════
+// EXTERNAL PURCHASE ORDER — PO raised outside Smart Assets
+// ═══════════════════════════════════════════════════════
+// For tenants without the PO module (e.g. JMRH). The team records the PO
+// number and the value it was approved for; that value is the baseline every
+// tax invoice is matched against, so the payment gate works identically to
+// the in-system flow.
+model ExternalPurchaseOrder {
+  id       Int      @id @default(autoincrement())
+  poNumber String   @unique
+  poDate   DateTime @default(now())
+
+  vendorId Int
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  // The approved value. Mandatory — without it there is nothing to match
+  // an invoice against and the variance control silently disappears.
+  approvedAmount Decimal @db.Decimal(14, 2)
+  currency       String  @default("INR")
+
+  approvedBy    String? // name/designation from the signed paper PO
+  attachmentUrl String? // scan of the signed PO
+
+  indentId Int?
+  indent   AssetIndent? @relation(fields: [indentId], references: [id])
+
+  departmentId Int?
+  branchId     Int?
+
+  status String  @default("ACTIVE") // ACTIVE | CLOSED | CANCELLED
+  notes  String? @db.Text
+
+  enteredById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  goodsReceipts   GoodsReceipt[]
+  matches         ProcurementMatch[]
+  paymentVouchers PaymentVoucher[]
+
+  @@index([vendorId])
+  @@index([status])
+  @@index([indentId])
+  @@map("externalpurchaseorder")
+}
+
+// ═══════════════════════════════════════════════════════
+// PROCUREMENT MATCH — three-way match (PO vs receipt vs invoice)
+// ═══════════════════════════════════════════════════════
+// Computed automatically when a goods receipt is saved. When the invoice
+// exceeds the approved value beyond tolerance the match holds ALL payment on
+// the order until the CFO explicitly accepts the variance.
+model ProcurementMatch {
+  id Int @id @default(autoincrement())
+
+  goodsReceiptId Int          @unique
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  externalPoId    Int?
+  externalPo      ExternalPurchaseOrder? @relation(fields: [externalPoId], references: [id])
+
+  approvedAmount Decimal @db.Decimal(14, 2) // PO total at its latest approved amendment
+  receivedAmount Decimal @db.Decimal(14, 2) // accepted qty x PO rate
+  invoiceAmount  Decimal @db.Decimal(14, 2) // this receipt's tax invoice value
+
+  // Every invoice raised against the order so far, this one included. Variance
+  // is measured on THIS, not on the single invoice — otherwise a vendor can
+  // split an over-billed amount across two receipts and clear both.
+  cumulativeInvoiced Decimal @default(0) @db.Decimal(14, 2)
+
+  varianceAmount  Decimal @db.Decimal(14, 2) // cumulativeInvoiced - approved (negative = favourable)
+  variancePercent Decimal @db.Decimal(8, 2)
+
+  // THREE_WAY — approved vs received vs invoiced, the full check.
+  // TWO_WAY   — approved vs invoiced only, because no receipt on this order
+  //             carries line detail (a client whose own system booked the
+  //             goods). Recorded so a two-way pass is never read as a three-way
+  //             one: nothing here proves the goods arrived.
+  matchType String @default("THREE_WAY")
+
+  // MATCHED | WITHIN_TOLERANCE | FAVOURABLE | QTY_VARIANCE | VARIANCE_HOLD |
+  // CFO_APPROVED | REJECTED
+  status String @default("MATCHED")
+
+  paymentBlocked Boolean @default(false)
+  blockReason    String? @db.Text
+
+  cfoApprovedById Int?
+  cfoApprovedAt   DateTime?
+  cfoRemarks      String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@index([purchaseOrderId])
+  @@index([externalPoId])
+  @@map("procurementmatch")
+}
+
+// ═══════════════════════════════════════════════════════
+// COMMISSIONING SIGN-OFF — physical gate before final payment
+// ═══════════════════════════════════════════════════════
+// The finance/technical verifier confirms the asset is installed and working
+// before the balance payment to the vendor can be released.
+model CommissioningSignoff {
+  id Int @id @default(autoincrement())
+
+  assetId Int
+  asset   Asset @relation(fields: [assetId], references: [id])
+
+  goodsReceiptId Int?
+  goodsReceipt   GoodsReceipt? @relation(fields: [goodsReceiptId], references: [id])
+  indentId       Int?
+  indent         AssetIndent?  @relation(fields: [indentId], references: [id])
+
+  installedAt      DateTime?
+  workingCondition String? // WORKING | PARTIAL | FAULTY
+  status           String  @default("PENDING") // PENDING | VERIFIED | DEFECT_REPORTED
+
+  verifiedById Int?
+  verifiedAt   DateTime?
+  remarks      String?   @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([assetId])
+  @@index([status])
+  @@index([goodsReceiptId])
+  @@map("commissioningsignoff")
+}
+
+// ═══════════════════════════════════════════════════════
+// INDENT STORE ISSUE — stock issued against an indent
+// ═══════════════════════════════════════════════════════
+// Records what Stores handed over from existing stock, so an indent closed
+// without a purchase order still has a traceable fulfilment line.
+model IndentStoreIssue {
+  id Int @id @default(autoincrement())
+
+  indentId Int
+  indent   AssetIndent @relation(fields: [indentId], references: [id])
+
+  assetId Int?
+  asset   Asset? @relation(fields: [assetId], references: [id])
+
+  storeId Int?
+  store   Store? @relation(fields: [storeId], references: [id])
+
+  itemType     String @default("ASSET") // ASSET | SPARE_PART | CONSUMABLE
+  sparePartId  Int?
+  consumableId Int?
+  description  String?
+
+  quantity Int @default(1)
+
+  issuedById Int?
+  issuedAt   DateTime @default(now())
+  remarks    String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([indentId])
+  @@index([assetId])
+  @@map("indentstoreissue")
 }
 
 // ═══════════════════════════════════════════════════════
@@ -4018,9 +6046,10 @@ model WorkOrder {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
 
-  materialIssues MaterialIssue[]
-  wcc            WorkCompletionCertificate?
-  rcas           RootCauseAnalysis[]
+  materialIssues  MaterialIssue[]
+  wcc             WorkCompletionCertificate?
+  rcas            RootCauseAnalysis[]
+  paymentVouchers PaymentVoucher[]           @relation("WOPaymentVouchers")
 
   @@index([assetId])
   @@index([ticketId])
@@ -4501,8 +6530,36 @@ model PaymentVoucher {
   purchaseVoucherId Int?
   purchaseVoucher   PurchaseVoucher? @relation(fields: [purchaseVoucherId], references: [id])
 
+  // Procurement linkage — an advance is paid against the order itself, long
+  // before any purchase voucher exists.
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder? @relation("POPaymentVouchers", fields: [purchaseOrderId], references: [id])
+  workOrderId     Int?
+  workOrder       WorkOrder?     @relation("WOPaymentVouchers", fields: [workOrderId], references: [id])
+  externalPoId    Int?
+  externalPo      ExternalPurchaseOrder? @relation(fields: [externalPoId], references: [id])
+
+  paymentType String @default("FULL") // ADVANCE | BALANCE | FULL | RETENTION
+
+  // Payment gate — set by the three-way match or a missing commissioning
+  // sign-off. A blocked voucher cannot be approved or posted.
+  isBlocked   Boolean @default(false)
+  blockReason String? @db.Text
+
   vendorId Int?
   vendor   Vendor? @relation("VendorPaymentVouchers", fields: [vendorId], references: [id])
+
+  // Withholding. `amount` stays the gross liability being settled; the vendor
+  // receives netAmount and the difference is owed to the department.
+  tdsAmount     Decimal? @db.Decimal(14, 2)
+  netAmount     Decimal? @db.Decimal(14, 2)
+  /// The instructions the deduction was worked out under, not just its result.
+  /// Posting recomputes from scratch, so without these a section chosen by hand
+  /// or a deliberate waiver would be silently lost between draft and post.
+  tdsSectionCode String?
+  tdsWaived      Boolean @default(false)
+  tdsWaiverReason String? @db.Text
+  tdsDeductions TdsDeduction[] @relation("PaymentTdsDeductions")
 
   // Approval
   approvedById    Int?
@@ -4519,6 +6576,8 @@ model PaymentVoucher {
 
   @@index([status])
   @@index([voucherDate])
+  @@index([purchaseOrderId])
+  @@index([externalPoId])
   @@map("paymentvoucher")
 }
 
@@ -4761,16 +6820,152 @@ model CapexBudget {
   department   Department?    @relation("CapexBudgetDept", fields: [departmentId], references: [id])
   categoryId   Int?
   category     AssetCategory? @relation("CapexBudgetCat", fields: [categoryId], references: [id])
+
+  // Capital spend and running spend are budgeted separately and answer to
+  // different people, so one table with a type beats two near-identical ones.
+  budgetType String @default("CAPEX") // CAPEX | OPEX
+
   budgetAmount Decimal        @db.Decimal(14, 2)
   actualAmount Decimal        @default(0) @db.Decimal(14, 2) // auto-updated from asset purchases
+
+  // Money spoken for but not yet spent. An approved order commits budget the
+  // moment it exists — without this, a department can approve its way past its
+  // allocation several times over while every screen still says it is fine.
+  committedAmount Decimal @default(0) @db.Decimal(14, 2)
+
   notes        String?        @db.Text
   createdById  Int?
   createdBy    Employee?      @relation("CapexBudgetCreatedBy", fields: [createdById], references: [id])
   createdAt    DateTime       @default(now())
   updatedAt    DateTime       @default(now()) @updatedAt
 
-  @@unique([fiscalYear, departmentId, categoryId])
+  commitments BudgetCommitment[]
+
+  // Money moved in or out of this head after it was sanctioned. The original
+  // allocation stays in budgetAmount so the two figures can be told apart —
+  // "what was sanctioned" and "what we are working to" are different questions.
+  originalAmount   Decimal? @db.Decimal(14, 2)
+  transfersIn      Decimal  @default(0) @db.Decimal(14, 2)
+  transfersOut     Decimal  @default(0) @db.Decimal(14, 2)
+  supplementary    Decimal  @default(0) @db.Decimal(14, 2)
+  surrendered      Decimal  @default(0) @db.Decimal(14, 2)
+
+  /// Some heads are ring-fenced by whoever sanctioned them — grant money, a
+  /// board-approved project — and cannot be raided for something else.
+  isLocked     Boolean @default(false)
+  lockedReason String? @db.Text
+
+  movementsFrom BudgetMovement[] @relation("MovementFrom")
+  movementsTo   BudgetMovement[] @relation("MovementTo")
+
+  @@unique([fiscalYear, departmentId, categoryId, budgetType])
   @@map("capexbudget")
+}
+
+/**
+ * RE-APPROPRIATION
+ *
+ * A budget head that will not be spent and another that has run out. Moving
+ * money between them is routine, and doing it by editing two numbers destroys
+ * the only record of what was originally sanctioned.
+ *
+ * Every movement is a row: transfer between heads, a supplementary grant, or
+ * an unused balance handed back. The sanctioned figure never changes.
+ */
+model BudgetMovement {
+  id            Int    @id @default(autoincrement())
+  movementNumber String @unique // BM-FY2026-001
+
+  /// TRANSFER — between two heads. SUPPLEMENTARY — new money in.
+  /// SURRENDER — unused money handed back.
+  movementType String @default("TRANSFER")
+
+  fromBudgetId Int?
+  fromBudget   CapexBudget? @relation("MovementFrom", fields: [fromBudgetId], references: [id])
+  toBudgetId   Int?
+  toBudget     CapexBudget? @relation("MovementTo", fields: [toBudgetId], references: [id])
+
+  fiscalYear Int
+  amount     Decimal @db.Decimal(14, 2)
+
+  reason      String  @db.Text
+  /// Why the source head will not need it — the half of the case people skip.
+  sourceJustification String? @db.Text
+
+  status String @default("PENDING") // PENDING | APPROVED | REJECTED | APPLIED | CANCELLED
+
+  /// Slab the movement falls in, on the amount being moved.
+  approvalLevel String?
+
+  requestedById Int?
+  requestedBy   Employee? @relation("MovementRequestedBy", fields: [requestedById], references: [id])
+  requestedAt   DateTime  @default(now())
+
+  approvedById  Int?
+  approvedBy    Employee? @relation("MovementApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  approvalRemarks String? @db.Text
+
+  rejectedAt      DateTime?
+  rejectionReason String?   @db.Text
+
+  appliedAt DateTime?
+
+  /// What the two heads looked like before it moved, so the effect is legible
+  /// afterwards without replaying every movement.
+  fromBalanceBefore Decimal? @db.Decimal(14, 2)
+  toBalanceBefore   Decimal? @db.Decimal(14, 2)
+
+  notes String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([fiscalYear, status])
+  @@index([fromBudgetId])
+  @@index([toBudgetId])
+  @@map("budgetmovement")
+}
+
+// ═══════════════════════════════════════════════════════
+// BUDGET COMMITMENT LEDGER
+// ═══════════════════════════════════════════════════════
+// Every reservation and release is a row, not just a number moving. A bare
+// counter drifts the first time something is cancelled twice or a release is
+// missed, and it cannot be reconciled afterwards.
+model BudgetCommitment {
+  id Int @id @default(autoincrement())
+
+  capexBudgetId Int
+  budget        CapexBudget @relation(fields: [capexBudgetId], references: [id], onDelete: Cascade)
+
+  fiscalYear Int
+
+  // What reserved it. A commitment always traces back to a document.
+  purchaseOrderId Int?
+  externalPoId    Int?
+  indentId        Int?
+
+  amount Decimal @db.Decimal(14, 2)
+
+  // COMMITTED — reserved, not yet spent
+  // RELEASED  — the order was cancelled or rejected, money handed back
+  // CONSUMED  — goods arrived and the spend became actual
+  status String @default("COMMITTED")
+
+  releasedAt     DateTime?
+  releaseReason  String?   @db.Text
+  consumedAt     DateTime?
+
+  notes String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([capexBudgetId, status])
+  @@index([purchaseOrderId])
+  @@map("budgetcommitment")
 }
 
 /// Manual Ledger Entry for adjustments / narration-only entries (no automatic GL effect)
@@ -5063,4 +7258,246 @@ model ApiAccessLog {
   @@index([suspicious])
   @@index([userId])
   @@map("apiaccesslog")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GOODS RETURN — rejected quantity going back to the vendor.
+//
+// Rejection is recorded on the receipt, but the return itself is a separate
+// commercial event: the vendor either replaces the goods or issues a credit
+// note, and until one of those lands the money is not settled.
+// ─────────────────────────────────────────────────────────────────────────────
+model GoodsReturn {
+  id           Int      @id @default(autoincrement())
+  returnNumber String   @unique
+  returnDate   DateTime @default(now())
+
+  goodsReceiptId Int
+  goodsReceipt   GoodsReceipt @relation(fields: [goodsReceiptId], references: [id])
+
+  vendorId Int?
+  vendor   Vendor? @relation(fields: [vendorId], references: [id])
+
+  reason String @db.Text
+
+  // What settles this: a replacement delivery, or money back.
+  settlementMode String @default("REPLACEMENT") // REPLACEMENT | CREDIT_NOTE | REFUND
+
+  // DRAFT | SENT | ACKNOWLEDGED | REPLACED | CREDIT_NOTE_RECEIVED | CLOSED | CANCELLED
+  status String @default("DRAFT")
+
+  totalValue Decimal @default(0) @db.Decimal(14, 2)
+
+  // Set when the vendor settles with money rather than goods. The credit note
+  // reduces what is payable on the order.
+  creditNoteNumber String?
+  creditNoteDate   DateTime?
+  creditNoteValue  Decimal?  @db.Decimal(14, 2)
+
+  // Set when the vendor settles with a replacement delivery.
+  replacementGrnId Int?
+
+  dispatchedAt   DateTime?
+  dispatchedVia  String?
+  docketNumber   String?
+  acknowledgedAt DateTime?
+
+  raisedById  Int?
+  closedById  Int?
+  closedAt    DateTime?
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  lines GoodsReturnLine[]
+
+  @@index([goodsReceiptId])
+  @@index([vendorId])
+  @@index([status])
+  @@map("goodsreturn")
+}
+
+model GoodsReturnLine {
+  id            Int         @id @default(autoincrement())
+  goodsReturnId Int
+  goodsReturn   GoodsReturn @relation(fields: [goodsReturnId], references: [id], onDelete: Cascade)
+
+  goodsReceiptLineId Int
+  goodsReceiptLine   GoodsReceiptLine @relation(fields: [goodsReceiptLineId], references: [id])
+
+  description String
+  quantity    Int
+  unitPrice   Decimal? @db.Decimal(12, 2)
+  lineTotal   Decimal? @db.Decimal(14, 2)
+  remarks     String?  @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([goodsReturnId])
+  @@index([goodsReceiptLineId])
+  @@map("goodsreturnline")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STOCK RESERVATION — holds store stock against an indent.
+//
+// StoreStockPosition.reservedQty is a bare counter; it cannot say who holds a
+// reservation, so nothing can release one selectively or let it lapse. This
+// ledger does, and keeps that counter in step.
+// ─────────────────────────────────────────────────────────────────────────────
+model StockReservation {
+  id      Int   @id @default(autoincrement())
+  storeId Int
+  store   Store @relation(fields: [storeId], references: [id])
+
+  itemType     String // SPARE_PART | CONSUMABLE
+  sparePartId  Int?
+  consumableId Int?
+
+  quantity Decimal @db.Decimal(12, 2)
+
+  indentId Int?
+  indent   AssetIndent? @relation(fields: [indentId], references: [id])
+
+  indentLineId Int?
+
+  // ACTIVE   — stock is held
+  // CONSUMED — issued out against the indent
+  // RELEASED — given up deliberately
+  // EXPIRED  — lapsed unclaimed, swept back
+  status String @default("ACTIVE")
+
+  // A reservation nobody claims must not hold stock forever.
+  expiresAt DateTime?
+
+  reservedById  Int?
+  releasedById  Int?
+  releasedAt    DateTime?
+  releaseReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([storeId, status])
+  @@index([indentId])
+  @@index([status, expiresAt])
+  @@map("stockreservation")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APPROVED VENDOR — who may be asked to quote, per category.
+// ─────────────────────────────────────────────────────────────────────────────
+model ApprovedVendor {
+  id       Int    @id @default(autoincrement())
+  vendorId Int
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation("ApprovedVendorCategory", fields: [assetCategoryId], references: [id])
+
+  itemType String? // ASSET | SPARE_PART | CONSUMABLE | SERVICE — null = all
+
+  status String @default("APPROVED") // APPROVED | SUSPENDED | BLACKLISTED
+
+  approvedById Int?
+  approvedAt   DateTime  @default(now())
+  validTo      DateTime?
+  remarks      String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@unique([vendorId, assetCategoryId, itemType])
+  @@index([status])
+  @@map("approvedvendor")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RATE CONTRACT — a price negotiated once and honoured for a period, so an
+// annual rate does not have to be re-entered on every indent.
+// ─────────────────────────────────────────────────────────────────────────────
+model RateContract {
+  id             Int    @id @default(autoincrement())
+  contractNumber String @unique
+  title          String
+
+  vendorId Int
+  vendor   Vendor @relation(fields: [vendorId], references: [id])
+
+  validFrom DateTime
+  validTo   DateTime
+
+  status String @default("ACTIVE") // DRAFT | ACTIVE | EXPIRED | TERMINATED
+
+  documentUrl String?
+  notes       String? @db.Text
+
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  lines RateContractLine[]
+
+  @@index([vendorId])
+  @@index([status])
+  @@map("ratecontract")
+}
+
+model RateContractLine {
+  id             Int          @id @default(autoincrement())
+  rateContractId Int
+  rateContract   RateContract @relation(fields: [rateContractId], references: [id], onDelete: Cascade)
+
+  itemType    String // ASSET | SPARE_PART | CONSUMABLE | SERVICE
+  description String
+
+  assetCategoryId Int?
+  assetCategory   AssetCategory? @relation("RateContractCategory", fields: [assetCategoryId], references: [id])
+
+  sparePartId  Int?
+  consumableId Int?
+
+  unitPrice  Decimal  @db.Decimal(12, 2)
+  taxPercent Decimal? @db.Decimal(5, 2)
+  uom        String?
+
+  minQty       Int?
+  maxQty       Int?
+  leadTimeDays Int?
+
+  createdAt DateTime @default(now())
+
+  @@index([rateContractId])
+  @@index([assetCategoryId])
+  @@map("ratecontractline")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INDENT LINE SPEC — specifications as attributes rather than prose, so what
+// the asset department changed can be compared mechanically instead of read.
+// ─────────────────────────────────────────────────────────────────────────────
+model IndentLineSpec {
+  id           Int             @id @default(autoincrement())
+  indentLineId Int
+  indentLine   AssetIndentLine @relation(fields: [indentLineId], references: [id], onDelete: Cascade)
+
+  attribute String // "Detector type", "Channels", "Warranty"
+  value     String // what the requesting department asked for
+
+  // Set when the asset department proposes something different. Null means
+  // the attribute was accepted as asked.
+  revisedValue String?
+
+  isMandatory Boolean @default(false)
+
+  // UNCHANGED | CHANGED | ADDED | REMOVED — derived, stored for querying.
+  changeStatus String @default("UNCHANGED")
+
+  sortOrder Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([indentLineId])
+  @@map("indentlinespec")
 }

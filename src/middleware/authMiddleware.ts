@@ -116,3 +116,27 @@ export const requireAuth: RequestHandler = (req, res, next) => {
   }
   next();
 };
+
+/**
+ * Restrict a route to a named set of User.role values. Must be mounted AFTER
+ * authenticateToken — that is what populates req.user.
+ *
+ * 403, never 401: the caller IS authenticated, they simply lack the privilege.
+ * The frontend interceptor ends the session on 401 only, and being logged out
+ * for opening a screen you aren't allowed to use is the wrong behaviour.
+ */
+export const requireRole = (...roles: string[]): RequestHandler => {
+  const allowed = roles.map((r) => r.toUpperCase());
+  return (req, res, next) => {
+    const role = String((req as any).user?.role || "").toUpperCase();
+    if (!role) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    if (!allowed.includes(role)) {
+      res.status(403).json({ message: "You do not have permission to perform this action." });
+      return;
+    }
+    next();
+  };
+};
