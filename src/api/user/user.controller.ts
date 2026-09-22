@@ -166,6 +166,12 @@ export const loginUser = async (req: Request, res: Response) => {
     return;
   }
 
+  console.log("User found:", !!user);
+console.log("Entered password length:", password?.length);
+console.log("Stored hash exists:", !!user?.passwordHash);
+console.log("Stored hash length:", user?.passwordHash?.length);
+console.log("Stored hash prefix:", user?.passwordHash?.slice(0, 4));
+
   const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
 
   // Log the login attempt BEFORE responding:
