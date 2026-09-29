@@ -37,14 +37,15 @@ const dayRevenue = (l: any): number =>
 
 /**
  * Revenue per operating hour implied by a rate card, or null when it can't be derived.
- * PER_HOUR/PER_DAY rates are already hourly-based (matches estimatedRevenue in upsertDailyLog);
+ * PER_HOUR is already hourly; a PER_DAY rate is spread over planned hours;
  * per-use rates need maxUsesPerDay to convert.
  */
 const hourlyRate = (rc: any): number | null => {
   if (!rc) return null;
   const rate = toNum(rc.avgRevenuePerUnit);
-  if (rc.revenueUnit === "PER_HOUR" || rc.revenueUnit === "PER_DAY") return rate;
+  if (rc.revenueUnit === "PER_HOUR") return rate;
   const planned = toNum(rc.plannedHoursPerDay);
+  if (rc.revenueUnit === "PER_DAY") return planned > 0 ? rate / planned : null;
   if (rc.maxUsesPerDay && planned > 0) return (Number(rc.maxUsesPerDay) / planned) * rate;
   return null;
 };
@@ -61,6 +62,9 @@ const applicableAssetIds = async (scope?: number[]): Promise<number[]> => {
 };
 
 const VERIFIER_ROLES = ["HOD", "SUPERVISOR", "OPERATIONS", "ADMIN"];
+
+// Units the estimate in upsertDailyLog knows how to price
+const REVENUE_UNITS = ["PER_HOUR", "PER_USE", "PER_PROCEDURE", "PER_TEST", "PER_DAY"];
 
 // ─── Downtime classification ────────────────────────────────────────────────
 // Planned stops come out of planned production time and do not hurt OEE availability.
@@ -152,6 +156,11 @@ export const upsertRateCard = async (req: AuthenticatedRequest, res: Response) =
       targetUtilizationPct, targetOeeScore, qualityPassRatePct, standardStartupMinutes,
     } = req.body;
 
+    if (revenueUnit != null && !REVENUE_UNITS.includes(revenueUnit)) {
+      res.status(400).json({ message: `Invalid revenue unit: ${revenueUnit}` });
+      return;
+    }
+
     if (maxHoursPerDay != null && (toNum(maxHoursPerDay) <= 0 || toNum(maxHoursPerDay) > 24)) {
       res.status(400).json({ message: "Max hours per day must be between 0 and 24" });
       return;
@@ -159,7 +168,7 @@ export const upsertRateCard = async (req: AuthenticatedRequest, res: Response) =
 
     const data: any = {};
     if (revenuePerUnit !== undefined) data.avgRevenuePerUnit = new Prisma.Decimal(revenuePerUnit);
-    if (revenueUnit !== undefined) data.revenueUnit = revenueUnit;
+    if (revenueUnit != null) data.revenueUnit = revenueUnit;
     if (currency !== undefined) data.currency = currency;
     if (maxHoursPerDay !== undefined) data.maxHoursPerDay = new Prisma.Decimal(maxHoursPerDay);
     if (maxUsesPerDay !== undefined) data.maxUsesPerDay = maxUsesPerDay != null ? Number(maxUsesPerDay) : null;
@@ -317,8 +326,11 @@ export const upsertDailyLog = async (req: AuthenticatedRequest, res: Response) =
     if (rateCard) {
       const rate = toNum(rateCard.avgRevenuePerUnit);
       const unit = rateCard.revenueUnit;
-      if (unit === "PER_HOUR" || unit === "PER_DAY") {
+      if (unit === "PER_HOUR") {
         estimatedRevenue = hoursUsedNum * rate;
+      } else if (unit === "PER_DAY") {
+        // Day rate is charged once for any day the asset was used
+        estimatedRevenue = hoursUsedNum > 0 ? rate : 0;
       } else if (
         (unit === "PER_USE" || unit === "PER_PROCEDURE" || unit === "PER_TEST") &&
         procedureCountNum != null
