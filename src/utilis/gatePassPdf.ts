@@ -23,6 +23,8 @@
 import PDFDocument from "pdfkit";
 import QRCode from "qrcode";
 import { Response } from "express";
+import { resolve as resolvePath } from "node:path";
+import { existsSync } from "node:fs";
 
 type GatePassForPdf = {
   id: number;
@@ -106,17 +108,60 @@ export async function streamGatePassPdf(gp: GatePassForPdf, res: Response, baseU
   const qrDataUrl = await QRCode.toDataURL(scanUrl(baseUrl, gp.gatePassNo), { width: 120, margin: 0 });
   const qrBuffer = Buffer.from(qrDataUrl.split(",")[1], "base64");
 
-  const doc = new PDFDocument({ size: "A4", margin: 40 });
+  // const doc = new PDFDocument({ size: "A4", margin: 40 });
+
+const letterHeadPath = resolvePath(
+  process.cwd(),
+  "assets",
+  "JMRH-letterhead.png"
+);
+
+const useLetterhead = existsSync(letterHeadPath);
+
+console.log("Letterhead path:", letterHeadPath);
+console.log("Letterhead found:", useLetterhead);
+
+const doc = new PDFDocument({
+  size: "A4",
+  margins: {
+    top: useLetterhead ? 170 : 40,
+    bottom: useLetterhead ? 85 : 40,
+    left: 40,
+    right: 40
+  }
+});
+
+// Draw the letterhead on the current page
+const drawLetterhead = (): void => {
+  if (!useLetterhead) return;
+
+  doc.save();
+
+  doc.image(letterHeadPath, 0, 0, {
+    width: doc.page.width,
+    height: doc.page.height
+  });
+
+  doc.restore();
+};
+
+// Add letterhead to subsequent pages
+if (useLetterhead) {
+  doc.on("pageAdded", drawLetterhead);
+
+  // Add letterhead to the first page
+  drawLetterhead();
+}
 
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${gp.gatePassNo}.pdf"`);
   doc.pipe(res);
 
   // Header band
-  doc.rect(40, 40, 515, 60).fill("#1e3a8a");
-  doc.fillColor("white").fontSize(16).font("Helvetica-Bold").text(orgName, 55, 55);
-  doc.fontSize(11).font("Helvetica").text("GATE PASS", 55, 78);
-  doc.fontSize(10).font("Helvetica-Bold").text(gp.gatePassNo, 55, 92);
+  // doc.rect(40, 40, 515, 60).fill("#1e3a8a");
+  // doc.fillColor("white").fontSize(16).font("Helvetica-Bold").text(orgName, 55, 55);
+  // doc.fontSize(11).font("Helvetica").text("GATE PASS", 55, 78);
+  // doc.fontSize(10).font("Helvetica-Bold").text(gp.gatePassNo, 55, 92);
 
   // QR top-right
   doc.image(qrBuffer, 470, 45, { width: 70, height: 70 });
@@ -231,6 +276,39 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
   // placed manually against M instead, and every block below is height-bounded.
   const doc = new PDFDocument({ size: [W, H], margin: 0 });
 
+  const letterHeadPath = resolvePath(
+  process.cwd(),
+  "assets",
+  "JMRH-letterhead.png"
+);
+
+const useLetterhead = existsSync(letterHeadPath);
+
+console.log("Letterhead path:", letterHeadPath);
+console.log("Letterhead found:", useLetterhead);
+
+// Draw the letterhead on the current page
+const drawLetterhead = (): void => {
+  if (!useLetterhead) return;
+
+  doc.save();
+
+  doc.image(letterHeadPath, 0, 0, {
+    width: doc.page.width,
+    height: doc.page.height
+  });
+
+  doc.restore();
+};
+
+// Add letterhead to subsequent pages
+if (useLetterhead) {
+  doc.on("pageAdded", drawLetterhead);
+
+  // Add letterhead to the first page
+  drawLetterhead();
+}
+
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `inline; filename="${gp.gatePassNo}-label.pdf"`);
   doc.pipe(res);
@@ -239,23 +317,25 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
   doc.rect(4, 4, W - 8, H - 8).lineWidth(1).strokeColor("#0f172a").stroke();
 
   // Header
-  doc.rect(4, 4, W - 8, 34).fill("#1e3a8a");
-  doc.fillColor("white").font("Helvetica-Bold").fontSize(11).text(orgName, M, 12, { width: W - M * 2 });
-  doc.font("Helvetica").fontSize(8).text("GATE PASS — ITEM LABEL", M, 25, { width: W - M * 2 });
+  // doc.rect(4, 4, W - 8, 34).fill("#1e3a8a");
+  // doc.fillColor("white").font("Helvetica-Bold").fontSize(11).text(orgName, M, 12, { width: W - M * 2 });
+  // doc.font("Helvetica").fontSize(8).text("GATE PASS — ITEM LABEL", M, 25, { width: W - M * 2 });
+
+  const TOP_SPACE = 12;
 
   // Pass number, the thing anyone reads first
   doc.fillColor("black").font("Helvetica-Bold").fontSize(17)
-    .text(gp.gatePassNo, M, 48, { width: W - M * 2, align: "center" });
+    .text(gp.gatePassNo, M, 48 + TOP_SPACE, { width: W - M * 2, align: "center" });
 
   // Type strip — RETURNABLE vs NON-RETURNABLE decides whether the gate expects
   // it back, so it gets a full-width colour band rather than a line of text.
   const returnable = gp.type === "RETURNABLE";
-  doc.rect(M, 72, W - M * 2, 20).fill(returnable ? "#0369a1" : "#b45309");
+  doc.rect(M, 72 + TOP_SPACE, W - M * 2, 20).fill(returnable ? "#0369a1" : "#b45309");
   doc.fillColor("white").font("Helvetica-Bold").fontSize(10)
-    .text(returnable ? "RETURNABLE" : "NON-RETURNABLE", M, 78, { width: W - M * 2, align: "center" });
+    .text(returnable ? "RETURNABLE" : "NON-RETURNABLE", M, 78 + TOP_SPACE, { width: W - M * 2, align: "center" });
 
   // QR, centred and large enough to scan off a parcel
-  doc.image(qrBuffer, (W - 118) / 2, 100, { width: 118, height: 118 });
+  doc.image(qrBuffer, (W - 118) / 2, 100 + TOP_SPACE, { width: 118, height: 118 });
 
   doc.fillColor("black");
   const CW = W - M * 2;              // content width
@@ -265,28 +345,105 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
   // afterwards by the supervisor who releases the parcel. So reserve a ruled
   // strip for the gate to write it on — by then the label is on the parcel.
   const GATEOUT_H = 22;
-  const GATEOUT_Y = FOOTER_Y - GATEOUT_H - 4;
+  // const GATEOUT_Y = FOOTER_Y - GATEOUT_H - 4;
+  // Move the Gate Out section above the hospital footer.
+const GATEOUT_Y = useLetterhead
+  ? H - 65
+  : FOOTER_Y - GATEOUT_H - 4;
+
+  // Position the disclaimer above the hospital footer.
+const DISCLAIMER_Y = useLetterhead
+  ? H - 40
+  : FOOTER_Y;
   const BODY_BOTTOM = GATEOUT_Y - 6; // nothing may be drawn past this
-  let y = 228;
+  let y = 228 + TOP_SPACE;
 
   // Each meta value is clamped to two lines and ellipsised, so a long address
   // can't push the item list off the sticker.
-  const line = (label: string, value: string) => {
-    const text = value || "—";
-    const maxH = 24;
-    if (y + 9 + 12 > BODY_BOTTOM) return;
-    doc.font("Helvetica-Bold").fontSize(7).fillColor("#64748b").text(label.toUpperCase(), M, y, { width: CW });
-    doc.font("Helvetica").fontSize(9.5).fillColor("black")
-      .text(text, M, y + 9, { width: CW, height: maxH, ellipsis: true });
-    y = y + 9 + Math.min(maxH, Math.max(12, doc.heightOfString(text, { width: CW }))) + 4;
-  };
+  // const line = (label: string, value: string) => {
+  //   const text = value || "—";
+  //   const maxH = 24;
+  //   if (y + 9 + 12 > BODY_BOTTOM) return;
+  //   doc.font("Helvetica-Bold").fontSize(7).fillColor("#64748b").text(label.toUpperCase(), M, y, { width: CW });
+  //   doc.font("Helvetica").fontSize(9.5).fillColor("black")
+  //     .text(text, M, y + 9, { width: CW, height: maxH, ellipsis: true });
+  //   y = y + 9 + Math.min(maxH, Math.max(12, doc.heightOfString(text, { width: CW }))) + 4;
+  // };
 
-  line("Issued To", gp.issuedTo);
-  if (gp.toAddress) line("Destination", gp.toAddress);
-  if (returnable && gp.expectedReturnDate) {
-    line("Expected Return", new Date(gp.expectedReturnDate).toLocaleDateString("en-IN", { dateStyle: "medium" }));
+  
+const COL_GAP = 10;
+const COL_W = (CW - COL_GAP) / 2;
+const ROW_H = 34;
+
+// Reserve space for the Items section.
+const ITEMS_MIN_H = 25;
+
+const metaFields = [
+  { label: "Issued To", value: gp.issuedTo },
+
+  ...(gp.toAddress
+    ? [{ label: "Destination", value: gp.toAddress }]
+    : []),
+
+  ...(returnable && gp.expectedReturnDate
+    ? [{
+        label: "Expected Return",
+        value: new Date(gp.expectedReturnDate)
+          .toLocaleDateString("en-IN", {
+            dateStyle: "medium"
+          })
+      }]
+    : []),
+
+  ...(gp.carriedBy
+    ? [{ label: "Carried By", value: gp.carriedBy }]
+    : [])
+];
+
+// Display two fields per row.
+for (let i = 0; i < metaFields.length; i += 2) {
+
+  if (y + ROW_H + ITEMS_MIN_H > BODY_BOTTOM) {
+    break;
   }
-  if (gp.carriedBy) line("Carried By", gp.carriedBy);
+
+  const row = metaFields.slice(i, i + 2);
+
+  row.forEach((field, index) => {
+
+    const x = M + index * (COL_W + COL_GAP);
+
+    // Label
+    doc.font("Helvetica-Bold")
+      .fontSize(7)
+      .fillColor("#64748b")
+      .text(field.label.toUpperCase(), x, y, {
+        width: COL_W,
+        height: 9,
+        lineBreak: false
+      });
+
+    // Value
+    doc.font("Helvetica")
+      .fontSize(8.5)
+      .fillColor("black")
+      .text(String(field.value || "—"), x, y + 10, {
+        width: COL_W,
+        height: 20,
+        ellipsis: true
+      });
+
+  });
+
+  y += ROW_H;
+}
+
+  // line("Issued To", gp.issuedTo);
+  // if (gp.toAddress) line("Destination", gp.toAddress);
+  // if (returnable && gp.expectedReturnDate) {
+  //   line("Expected Return", new Date(gp.expectedReturnDate).toLocaleDateString("en-IN", { dateStyle: "medium" }));
+  // }
+  // if (gp.carriedBy) line("Carried By", gp.carriedBy);
 
   // Items
   doc.strokeColor("#cbd5e1").lineWidth(0.5).moveTo(M, y).lineTo(W - M, y).stroke();
@@ -332,7 +489,7 @@ export async function streamGatePassLabel(gp: GatePassForPdf, res: Response, bas
   // Footer
   doc.fontSize(6.5).fillColor("#64748b").font("Helvetica")
     .text("Do not remove this label. Present the gate pass at the security desk.",
-      M, FOOTER_Y, { width: CW, align: "center", height: 10, ellipsis: true, lineBreak: false });
+      M, DISCLAIMER_Y, { width: CW, align: "center", height: 10, ellipsis: true, lineBreak: false });
 
   doc.end();
 }
@@ -379,7 +536,7 @@ function drawItemsTable(doc: PDFKit.PDFDocument, items: GatePassForPdf["items"])
   drawHeader();
 
   // Leave room for the footer strip so a long table never collides with it.
-  const bottomLimit = doc.page.height - doc.page.margins.bottom - 26;
+  const bottomLimit = doc.page.height - doc.page.margins.bottom - 28;
 
   items.forEach((it, idx) => {
     // Non-asset items (spares / surgical equipment) fall back to their free-text
