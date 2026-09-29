@@ -31,6 +31,96 @@ const todayMidnight = (): Date => {
   return d;
 };
 
+/** A day's revenue: actual when the user entered one, otherwise the system estimate (never both). */
+const dayRevenue = (l: any): number =>
+  l.revenueGenerated != null ? toNum(l.revenueGenerated) : toNum(l.estimatedRevenue);
+
+/**
+ * Revenue per operating hour implied by a rate card, or null when it can't be derived.
+ * PER_HOUR/PER_DAY rates are already hourly-based (matches estimatedRevenue in upsertDailyLog);
+ * per-use rates need maxUsesPerDay to convert.
+ */
+const hourlyRate = (rc: any): number | null => {
+  if (!rc) return null;
+  const rate = toNum(rc.avgRevenuePerUnit);
+  if (rc.revenueUnit === "PER_HOUR" || rc.revenueUnit === "PER_DAY") return rate;
+  const planned = toNum(rc.plannedHoursPerDay);
+  if (rc.maxUsesPerDay && planned > 0) return (Number(rc.maxUsesPerDay) / planned) * rate;
+  return null;
+};
+
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/** Asset ids the revenue log is expected to cover, optionally limited to a set. */
+const applicableAssetIds = async (scope?: number[]): Promise<number[]> => {
+  const assets = await prisma.asset.findMany({
+    where: { isRevenueLogApplicable: true, ...(scope ? { id: { in: scope } } : {}) },
+    select: { id: true },
+  });
+  return assets.map((a) => a.id);
+};
+
+const VERIFIER_ROLES = ["HOD", "SUPERVISOR", "OPERATIONS", "ADMIN"];
+
+// ─── Downtime classification ────────────────────────────────────────────────
+// Planned stops come out of planned production time and do not hurt OEE availability.
+// STARTUP is planned up to the rate card's standardStartupMinutes, unplanned beyond it.
+const PLANNED_DOWNTIME_TYPES = ["PLANNED", "CALIBRATION", "MAINTENANCE", "NO_DEMAND"];
+const DOWNTIME_TYPES = [...PLANNED_DOWNTIME_TYPES, "STARTUP", "UNPLANNED", "POWER_OUTAGE", "STAFF_UNAVAILABLE"];
+
+type DowntimeEntryInput = { type: string; minutes: number; isPlanned: boolean; remarks: string | null };
+
+/**
+ * Normalise the request's downtime into entries. Accepts `downtimeEntries: [{type, minutes, remarks}]`,
+ * or the legacy single `downtimeHours` + `downtimeType` pair. Throws a 400-worthy message on bad input.
+ */
+const buildDowntimeEntries = (body: any, standardStartupMinutes: number): DowntimeEntryInput[] => {
+  const raw: { type: string; minutes: number; remarks: string | null }[] = [];
+
+  if (Array.isArray(body.downtimeEntries)) {
+    for (const e of body.downtimeEntries) {
+      const minutes = Math.round(Number(e?.minutes));
+      if (!e?.type && !minutes) continue; // blank row
+      if (!DOWNTIME_TYPES.includes(e?.type)) throw new Error(`Invalid downtime type: ${e?.type}`);
+      if (!Number.isFinite(minutes) || minutes <= 0) throw new Error(`Downtime minutes must be positive for ${e.type}`);
+      raw.push({ type: e.type, minutes, remarks: e.remarks || null });
+    }
+  } else if (toNum(body.downtimeHours) > 0) {
+    const type = DOWNTIME_TYPES.includes(body.downtimeType) ? body.downtimeType : "UNPLANNED";
+    raw.push({ type, minutes: Math.round(toNum(body.downtimeHours) * 60), remarks: body.downtimeRemarks || null });
+  }
+
+  const entries: DowntimeEntryInput[] = [];
+  for (const e of raw) {
+    if (e.type === "STARTUP") {
+      // Each STARTUP entry is one start-up event; the standard allowance applies per event.
+      const planned = Math.min(e.minutes, Math.max(standardStartupMinutes, 0));
+      if (planned > 0) entries.push({ ...e, minutes: planned, isPlanned: true });
+      if (e.minutes > planned) entries.push({ ...e, minutes: e.minutes - planned, isPlanned: false });
+    } else {
+      entries.push({ ...e, isPlanned: PLANNED_DOWNTIME_TYPES.includes(e.type) });
+    }
+  }
+  return entries;
+};
+
+/** Downtime entries for a log, synthesising one from the legacy single-type fields for older rows. */
+const entriesOf = (l: any): { type: string; hours: number; isPlanned: boolean }[] => {
+  if (l.downtimeEntries?.length) {
+    return l.downtimeEntries.map((e: any) => ({ type: e.type, hours: e.minutes / 60, isPlanned: e.isPlanned }));
+  }
+  const hours = toNum(l.downtimeHours);
+  if (hours <= 0) return [];
+  const type = l.downtimeType ?? "UNSPECIFIED";
+  return [{ type, hours, isPlanned: PLANNED_DOWNTIME_TYPES.includes(type) }];
+};
+
+/** Average of a numeric column, skipping nulls (days that were entirely planned downtime have no OEE). */
+const avgOf = (logs: any[], key: string): number => {
+  const vals = logs.filter((l) => l[key] != null).map((l) => toNum(l[key]));
+  return vals.length > 0 ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+};
+
 // ─── 1. GET /rate-card/:assetId ─────────────────────────────────────────────
 
 export const getRateCard = async (req: AuthenticatedRequest, res: Response) => {
@@ -59,8 +149,13 @@ export const upsertRateCard = async (req: AuthenticatedRequest, res: Response) =
       revenuePerUnit, revenueUnit, currency,
       maxHoursPerDay, maxUsesPerDay, plannedHoursPerDay,
       operatingDaysPerWeek, shiftsPerDay, shiftDurationHours,
-      targetUtilizationPct, targetOeeScore, qualityPassRatePct,
+      targetUtilizationPct, targetOeeScore, qualityPassRatePct, standardStartupMinutes,
     } = req.body;
+
+    if (maxHoursPerDay != null && (toNum(maxHoursPerDay) <= 0 || toNum(maxHoursPerDay) > 24)) {
+      res.status(400).json({ message: "Max hours per day must be between 0 and 24" });
+      return;
+    }
 
     const data: any = {};
     if (revenuePerUnit !== undefined) data.avgRevenuePerUnit = new Prisma.Decimal(revenuePerUnit);
@@ -75,6 +170,20 @@ export const upsertRateCard = async (req: AuthenticatedRequest, res: Response) =
     if (targetUtilizationPct !== undefined) data.targetUtilizationPct = new Prisma.Decimal(targetUtilizationPct);
     if (targetOeeScore !== undefined) data.targetOeeScore = new Prisma.Decimal(targetOeeScore);
     if (qualityPassRatePct !== undefined) data.qualityPassRatePct = new Prisma.Decimal(qualityPassRatePct);
+    if (standardStartupMinutes !== undefined) data.standardStartupMinutes = Math.max(0, Math.round(toNum(standardStartupMinutes)));
+
+    // Planned hours = shifts × shift duration, capped at the asset's max hours per day
+    const existing: any = await db.assetRateCard.findUnique({ where: { assetId } });
+    const shifts = shiftsPerDay !== undefined ? toNum(shiftsPerDay) : existing ? existing.shiftsPerDay : null;
+    const shiftLen = shiftDurationHours !== undefined ? toNum(shiftDurationHours) : existing ? toNum(existing.shiftDurationHours) : null;
+    const maxH = maxHoursPerDay !== undefined ? toNum(maxHoursPerDay) : existing ? toNum(existing.maxHoursPerDay) : 24;
+    if (shiftsPerDay !== undefined || shiftDurationHours !== undefined || maxHoursPerDay !== undefined) {
+      if (shifts && shiftLen) {
+        data.plannedHoursPerDay = new Prisma.Decimal(round2(Math.min(shifts * shiftLen, maxH)));
+      } else if (plannedHoursPerDay !== undefined && toNum(plannedHoursPerDay) > maxH) {
+        data.plannedHoursPerDay = new Prisma.Decimal(maxH);
+      }
+    }
 
     const rateCard = await db.assetRateCard.upsert({
       where: { assetId },
@@ -124,6 +233,7 @@ export const getDailyLogs = async (req: AuthenticatedRequest, res: Response) => 
         take: limit,
         include: {
           loggedBy: { select: { id: true, name: true, employeeID: true } },
+          downtimeEntries: { orderBy: { id: "asc" } },
         },
       }),
       db.assetDailyUsageLog.count({ where }),
@@ -146,7 +256,7 @@ export const upsertDailyLog = async (req: AuthenticatedRequest, res: Response) =
     const {
       logDate, hoursUsed, procedureCount, patientsServed,
       shift1Hours, shift2Hours, shift3Hours,
-      revenueGenerated, downtimeHours, downtimeType, downtimeRemarks,
+      revenueGenerated, downtimeRemarks,
       conditionAfterUse, remarks,
     } = req.body;
 
@@ -157,24 +267,50 @@ export const upsertDailyLog = async (req: AuthenticatedRequest, res: Response) =
 
     const parsedDate = toDateOnly(logDate);
     const hoursUsedNum = toNum(hoursUsed);
-    const downtimeNum = toNum(downtimeHours);
     const procedureCountNum = procedureCount != null ? Number(procedureCount) : null;
 
     // Fetch rate card for auto-calculations
     const rateCard: any = await db.assetRateCard.findUnique({ where: { assetId } });
 
     const plannedHours = rateCard ? toNum(rateCard.plannedHoursPerDay) : 8;
+    const maxHours = rateCard ? toNum(rateCard.maxHoursPerDay) : 24;
     const qualityPctVal = rateCard ? toNum(rateCard.qualityPassRatePct) : 98;
 
-    // Auto-calculate OEE components
-    const availableHours = Math.max(plannedHours - downtimeNum, 0);
-    const availabilityPct = plannedHours > 0
-      ? Math.min((availableHours / plannedHours) * 100, 100)
-      : 0;
-    const performancePct = availableHours > 0
-      ? Math.min((hoursUsedNum / availableHours) * 100, 100)
-      : 0;
-    const oeeScore = (availabilityPct * performancePct * qualityPctVal) / 10000;
+    let entries: DowntimeEntryInput[];
+    try {
+      entries = buildDowntimeEntries(req.body, rateCard ? rateCard.standardStartupMinutes ?? 0 : 0);
+    } catch (e: any) {
+      res.status(400).json({ message: e.message });
+      return;
+    }
+    const plannedDownHours = entries.filter((e) => e.isPlanned).reduce((s, e) => s + e.minutes, 0) / 60;
+    const unplannedDownHours = entries.filter((e) => !e.isPlanned).reduce((s, e) => s + e.minutes, 0) / 60;
+    const downtimeNum = plannedDownHours + unplannedDownHours;
+
+    // A day can't hold more operating + downtime hours than the asset's physical capacity.
+    if (hoursUsedNum + downtimeNum > maxHours + 0.001) {
+      res.status(400).json({
+        message: `Hours used (${round2(hoursUsedNum)}) + downtime (${round2(downtimeNum)}) exceeds this asset's maximum of ${maxHours} hours per day`,
+      });
+      return;
+    }
+
+    // Auto-calculate OEE components. Planned downtime shrinks planned production time;
+    // only unplanned downtime counts against availability.
+    const plannedProductionHours = Math.max(plannedHours - plannedDownHours, 0);
+    const availableHours = Math.max(plannedProductionHours - unplannedDownHours, 0);
+    // Whole day was planned downtime (e.g. an all-day calibration) → no OEE for the day.
+    const hasOee = plannedProductionHours > 0;
+    const availabilityPct = hasOee ? Math.min((availableHours / plannedProductionHours) * 100, 100) : null;
+    const performancePct = hasOee
+      ? (availableHours > 0 ? Math.min((hoursUsedNum / availableHours) * 100, 100) : 0)
+      : null;
+    const oeeScore = hasOee ? (availabilityPct! * performancePct! * qualityPctVal) / 10000 : null;
+
+    // Legacy single-type field: the type with the most minutes
+    const byType = new Map<string, number>();
+    entries.forEach((e) => byType.set(e.type, (byType.get(e.type) ?? 0) + e.minutes));
+    const dominantType = Array.from(byType.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 
     // Auto-calculate estimated revenue
     let estimatedRevenue: number | null = null;
@@ -202,22 +338,35 @@ export const upsertDailyLog = async (req: AuthenticatedRequest, res: Response) =
       shift3Hours: shift3Hours != null ? new Prisma.Decimal(shift3Hours) : null,
       revenueGenerated: revenueGenerated != null ? new Prisma.Decimal(revenueGenerated) : null,
       estimatedRevenue: estimatedRevenue != null ? new Prisma.Decimal(estimatedRevenue) : null,
-      downtimeHours: new Prisma.Decimal(downtimeNum),
-      downtimeType: downtimeType ?? null,
-      downtimeRemarks: downtimeRemarks ?? null,
-      availabilityPct: new Prisma.Decimal(Math.round(availabilityPct * 100) / 100),
-      performancePct: new Prisma.Decimal(Math.round(performancePct * 100) / 100),
+      downtimeHours: new Prisma.Decimal(round2(downtimeNum)),
+      plannedDowntimeHours: new Prisma.Decimal(round2(plannedDownHours)),
+      unplannedDowntimeHours: new Prisma.Decimal(round2(unplannedDownHours)),
+      downtimeType: dominantType,
+      downtimeRemarks: downtimeRemarks || entries.map((e) => e.remarks).filter(Boolean).join("; ") || null,
+      availabilityPct: availabilityPct != null ? new Prisma.Decimal(round2(availabilityPct)) : null,
+      performancePct: performancePct != null ? new Prisma.Decimal(round2(performancePct)) : null,
       qualityPct: new Prisma.Decimal(qualityPctVal),
-      oeeScore: new Prisma.Decimal(Math.round(oeeScore * 100) / 100),
+      oeeScore: oeeScore != null ? new Prisma.Decimal(round2(oeeScore)) : null,
       conditionAfterUse: conditionAfterUse ?? null,
       remarks: remarks ?? null,
       loggedById,
     };
 
-    const log = await db.assetDailyUsageLog.upsert({
-      where: { assetId_logDate: { assetId, logDate: parsedDate } },
-      create: { assetId, logDate: parsedDate, ...logData },
-      update: { ...logData, status: "LOGGED", verifiedById: null, verifiedAt: null },
+    // Log + its downtime entries are replaced together
+    const log = await prisma.$transaction(async (tx) => {
+      const t = tx as any;
+      const saved = await t.assetDailyUsageLog.upsert({
+        where: { assetId_logDate: { assetId, logDate: parsedDate } },
+        create: { assetId, logDate: parsedDate, ...logData },
+        update: { ...logData, status: "LOGGED", verifiedById: null, verifiedAt: null },
+      });
+      await t.assetDowntimeEntry.deleteMany({ where: { logId: saved.id } });
+      if (entries.length > 0) {
+        await t.assetDowntimeEntry.createMany({
+          data: entries.map((e) => ({ logId: saved.id, ...e })),
+        });
+      }
+      return t.assetDailyUsageLog.findUnique({ where: { id: saved.id }, include: { downtimeEntries: true } });
     });
 
     res.json(log);
@@ -252,10 +401,22 @@ export const verifyDailyLog = async (req: AuthenticatedRequest, res: Response) =
     const logId = Number(req.params.logId);
     if (isNaN(logId)) { res.status(400).json({ message: "Invalid logId" }); return; }
 
+    // Role may sit on User.role or Employee.role (supervisors) — accept either.
+    const user = (req as any).user;
+    const roles = [user?.role, user?.employeeRole].map((r) => String(r || "").toUpperCase());
+    if (!roles.some((r) => VERIFIER_ROLES.includes(r))) {
+      res.status(403).json({ message: "You do not have permission to verify usage logs." });
+      return;
+    }
+
     const existing = await db.assetDailyUsageLog.findUnique({ where: { id: logId } });
     if (!existing) { res.status(404).json({ message: "Log entry not found" }); return; }
 
-    const verifiedById = (req as any).user?.employeeDbId ?? null;
+    const verifiedById = user?.employeeDbId ?? null;
+    if (verifiedById != null && existing.loggedById === verifiedById) {
+      res.status(403).json({ message: "You cannot verify a log you entered yourself." });
+      return;
+    }
 
     const log = await db.assetDailyUsageLog.update({
       where: { id: logId },
@@ -295,8 +456,8 @@ export const getUtilizationSummary = async (req: AuthenticatedRequest, res: Resp
       const daysLogged = logs.length;
       const totalHours = logs.reduce((s: number, l: any) => s + toNum(l.hoursUsed), 0);
       const totalProcedures = logs.reduce((s: number, l: any) => s + (l.procedureCount ?? 0), 0);
-      const totalRevenue = logs.reduce((s: number, l: any) => s + toNum(l.revenueGenerated) + toNum(l.estimatedRevenue), 0);
-      const avgOee = daysLogged > 0 ? logs.reduce((s: number, l: any) => s + toNum(l.oeeScore), 0) / daysLogged : 0;
+      const totalRevenue = logs.reduce((s: number, l: any) => s + dayRevenue(l), 0);
+      const avgOee = avgOf(logs, "oeeScore");
       const avgHoursPerDay = daysLogged > 0 ? totalHours / daysLogged : 0;
       const utilizationPct = plannedHours > 0 ? (avgHoursPerDay / plannedHours) * 100 : 0;
       // Expected operating days in the window
@@ -326,8 +487,8 @@ export const getUtilizationSummary = async (req: AuthenticatedRequest, res: Resp
     const prevDaysLogged = prevLogs.length;
     const prevTotalHours = prevLogs.reduce((s: number, l: any) => s + toNum(l.hoursUsed), 0);
     const prevAvgHours = prevDaysLogged > 0 ? prevTotalHours / prevDaysLogged : 0;
-    const prevTotalRevenue = prevLogs.reduce((s: number, l: any) => s + toNum(l.revenueGenerated) + toNum(l.estimatedRevenue), 0);
-    const prevAvgOee = prevDaysLogged > 0 ? prevLogs.reduce((s: number, l: any) => s + toNum(l.oeeScore), 0) / prevDaysLogged : 0;
+    const prevTotalRevenue = prevLogs.reduce((s: number, l: any) => s + dayRevenue(l), 0);
+    const prevAvgOee = avgOf(prevLogs, "oeeScore");
 
     const trend = {
       hoursChange: Math.round((w30.avgHoursPerDay - prevAvgHours) * 100) / 100,
@@ -360,11 +521,13 @@ export const getOeeDetail = async (req: AuthenticatedRequest, res: Response) => 
       },
     });
 
-    const count = logs.length;
-    const avgAvailability = count > 0 ? logs.reduce((s: number, l: any) => s + toNum(l.availabilityPct), 0) / count : 0;
-    const avgPerformance = count > 0 ? logs.reduce((s: number, l: any) => s + toNum(l.performancePct), 0) / count : 0;
-    const avgQuality = count > 0 ? logs.reduce((s: number, l: any) => s + toNum(l.qualityPct), 0) / count : 0;
-    const avgOee = count > 0 ? logs.reduce((s: number, l: any) => s + toNum(l.oeeScore), 0) / count : 0;
+    // Days that were entirely planned downtime have null OEE and are left out of the averages
+    const oeeLogs = logs.filter((l: any) => l.oeeScore != null);
+    const count = oeeLogs.length;
+    const avgAvailability = avgOf(oeeLogs, "availabilityPct");
+    const avgPerformance = avgOf(oeeLogs, "performancePct");
+    const avgQuality = avgOf(oeeLogs, "qualityPct");
+    const avgOee = avgOf(oeeLogs, "oeeScore");
 
     let classification: string;
     if (avgOee >= 85) classification = "WORLD_CLASS";
@@ -384,10 +547,10 @@ export const getOeeDetail = async (req: AuthenticatedRequest, res: Response) => 
     res.json({
       dailyOee: logs.map((l: any) => ({
         date: l.logDate,
-        availability: toNum(l.availabilityPct),
-        performance: toNum(l.performancePct),
+        availability: l.availabilityPct != null ? toNum(l.availabilityPct) : null,
+        performance: l.performancePct != null ? toNum(l.performancePct) : null,
         quality: toNum(l.qualityPct),
-        oee: toNum(l.oeeScore),
+        oee: l.oeeScore != null ? toNum(l.oeeScore) : null,
       })),
       averages: {
         availability: Math.round(avgAvailability * 100) / 100,
@@ -423,14 +586,14 @@ export const getRevenueSummary = async (req: AuthenticatedRequest, res: Response
     });
 
     const rateCard: any = await db.assetRateCard.findUnique({ where: { assetId } });
-    const ratePerUnit = rateCard ? toNum(rateCard.avgRevenuePerUnit) : 0;
+    const ratePerHour = hourlyRate(rateCard);
 
     // Daily revenue
     const dailyRevenue = logs.map((l: any) => ({
       date: l.logDate,
       actual: toNum(l.revenueGenerated),
       estimated: toNum(l.estimatedRevenue),
-      total: toNum(l.revenueGenerated) + toNum(l.estimatedRevenue),
+      total: dayRevenue(l),
     }));
 
     // Weekly aggregation
@@ -452,15 +615,16 @@ export const getRevenueSummary = async (req: AuthenticatedRequest, res: Response
     // Monthly totals
     const totalActual = logs.reduce((s: number, l: any) => s + toNum(l.revenueGenerated), 0);
     const totalEstimated = logs.reduce((s: number, l: any) => s + toNum(l.estimatedRevenue), 0);
+    const totalCombined = logs.reduce((s: number, l: any) => s + dayRevenue(l), 0);
     const totalHours = logs.reduce((s: number, l: any) => s + toNum(l.hoursUsed), 0);
     const totalDowntime = logs.reduce((s: number, l: any) => s + toNum(l.downtimeHours), 0);
 
-    const revenuePerHour = totalHours > 0 ? (totalActual + totalEstimated) / totalHours : 0;
-    const revenueLossFromDowntime = totalDowntime * ratePerUnit;
+    const revenuePerHour = totalHours > 0 ? totalCombined / totalHours : 0;
+    const revenueLossFromDowntime = ratePerHour != null ? totalDowntime * ratePerHour : null;
 
     // Projected monthly revenue (based on avg daily over last 30d)
     const daysLogged = logs.length;
-    const avgDailyRevenue = daysLogged > 0 ? (totalActual + totalEstimated) / daysLogged : 0;
+    const avgDailyRevenue = daysLogged > 0 ? totalCombined / daysLogged : 0;
     const projectedMonthlyRevenue = avgDailyRevenue * 30;
 
     res.json({
@@ -469,10 +633,10 @@ export const getRevenueSummary = async (req: AuthenticatedRequest, res: Response
       monthlyTotals: {
         actual: Math.round(totalActual * 100) / 100,
         estimated: Math.round(totalEstimated * 100) / 100,
-        combined: Math.round((totalActual + totalEstimated) * 100) / 100,
+        combined: Math.round(totalCombined * 100) / 100,
       },
       revenuePerHour: Math.round(revenuePerHour * 100) / 100,
-      revenueLossFromDowntime: Math.round(revenueLossFromDowntime * 100) / 100,
+      revenueLossFromDowntime: revenueLossFromDowntime != null ? round2(revenueLossFromDowntime) : null,
       totalDowntimeHours: Math.round(totalDowntime * 100) / 100,
       projectedMonthlyRevenue: Math.round(projectedMonthlyRevenue * 100) / 100,
       daysAnalyzed: daysLogged,
@@ -515,12 +679,12 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
       });
 
       // Group by assetId
-      const byAsset = new Map<number, { hours: number; revenue: number; oeeSum: number; count: number }>();
+      const byAsset = new Map<number, { hours: number; revenue: number; oeeSum: number; oeeCount: number; count: number }>();
       logs.forEach((l: any) => {
-        const entry = byAsset.get(l.assetId) || { hours: 0, revenue: 0, oeeSum: 0, count: 0 };
+        const entry = byAsset.get(l.assetId) || { hours: 0, revenue: 0, oeeSum: 0, oeeCount: 0, count: 0 };
         entry.hours += toNum(l.hoursUsed);
-        entry.revenue += toNum(l.revenueGenerated) + toNum(l.estimatedRevenue);
-        entry.oeeSum += toNum(l.oeeScore);
+        entry.revenue += dayRevenue(l);
+        if (l.oeeScore != null) { entry.oeeSum += toNum(l.oeeScore); entry.oeeCount += 1; }
         entry.count += 1;
         byAsset.set(l.assetId, entry);
       });
@@ -550,9 +714,10 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
       const plannedHours = rc ? toNum(rc.plannedHoursPerDay) : 8;
       const avgHours = agg.count > 0 ? agg.hours / agg.count : 0;
       const utilizationPct = plannedHours > 0 ? (avgHours / plannedHours) * 100 : 0;
-      const avgOee = agg.count > 0 ? agg.oeeSum / agg.count : 0;
-      const potentialRevenue = rc ? plannedHours * 30 * toNum(rc.avgRevenuePerUnit) : 0;
-      const revenueLoss = Math.max(potentialRevenue - agg.revenue, 0);
+      const avgOee = agg.oeeCount > 0 ? agg.oeeSum / agg.oeeCount : 0;
+      const perHour = hourlyRate(rc);
+      const potentialRevenue = perHour != null ? plannedHours * 30 * perHour : null;
+      const revenueLoss = potentialRevenue != null ? Math.max(potentialRevenue - agg.revenue, 0) : null;
 
       return {
         assetId: asset?.assetId ?? String(assetId),
@@ -565,8 +730,9 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
         totalRevenue: Math.round(agg.revenue * 100) / 100,
         utilizationPct: Math.round(utilizationPct * 100) / 100,
         avgOee: Math.round(avgOee * 100) / 100,
-        revenueLoss: Math.round(revenueLoss * 100) / 100,
+        revenueLoss: revenueLoss != null ? round2(revenueLoss) : null,
         daysLogged: agg.count,
+        oeeDays: agg.oeeCount,
       };
     });
 
@@ -581,7 +747,7 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
       .slice(0, 10);
 
     // Overall fleet OEE
-    const allOeeValues = ranked.filter((r) => r.daysLogged > 0);
+    const allOeeValues = ranked.filter((r) => r.oeeDays > 0);
     const fleetOee = allOeeValues.length > 0
       ? allOeeValues.reduce((s: number, r) => s + r.avgOee, 0) / allOeeValues.length
       : 0;
@@ -607,8 +773,7 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
       const entry = deptMap.get(dept) || { hours: 0, revenue: 0, oeeSum: 0, count: 0, assetCount: 0 };
       entry.hours += r.totalHours;
       entry.revenue += r.totalRevenue;
-      entry.oeeSum += r.avgOee;
-      entry.count++;
+      if (r.oeeDays > 0) { entry.oeeSum += r.avgOee; entry.count++; }
       entry.assetCount++;
       deptMap.set(dept, entry);
     });
@@ -622,16 +787,16 @@ export const getUtilizationDashboard = async (req: AuthenticatedRequest, res: Re
 
     // Assets with missing logs (no entry in last 3 days)
     const threeDaysAgo = daysAgo(3);
-    const assetsWithRateCards = rateCards.map((rc: any) => rc.assetId);
-    const recentLogs: any[] = assetsWithRateCards.length > 0
+    const trackedAssetIds = await applicableAssetIds(scopedAssetIds);
+    const recentLogs: any[] = trackedAssetIds.length > 0
       ? await db.assetDailyUsageLog.findMany({
-          where: { assetId: { in: assetsWithRateCards }, logDate: { gte: threeDaysAgo } },
+          where: { assetId: { in: trackedAssetIds }, logDate: { gte: threeDaysAgo } },
           select: { assetId: true },
           distinct: ["assetId"],
         })
       : [];
     const recentlyLoggedIds = new Set(recentLogs.map((l: any) => l.assetId));
-    const missingLogAssetIds = assetsWithRateCards.filter((id: number) => !recentlyLoggedIds.has(id));
+    const missingLogAssetIds = trackedAssetIds.filter((id: number) => !recentlyLoggedIds.has(id));
 
     const missingLogAssets: any[] = missingLogAssetIds.length > 0
       ? await prisma.asset.findMany({
@@ -691,13 +856,8 @@ export const getMissingLogs = async (req: AuthenticatedRequest, res: Response) =
       scopedAssetIds = deptAssets.map(a => a.id);
     }
 
-    // All assets that have a rate card (i.e., expected to be tracked)
-    const rateCards: any[] = await db.assetRateCard.findMany(
-      scopedAssetIds
-        ? { where: { assetId: { in: scopedAssetIds } }, select: { assetId: true } }
-        : { select: { assetId: true } }
-    );
-    const trackedAssetIds: number[] = rateCards.map((rc: any) => rc.assetId);
+    // All assets flagged as revenue-log applicable (i.e., expected to be tracked)
+    const trackedAssetIds = await applicableAssetIds(scopedAssetIds);
 
     if (trackedAssetIds.length === 0) {
       res.json({ data: [], total: 0 });
@@ -773,35 +933,44 @@ export const getDowntimeAnalysis = async (req: AuthenticatedRequest, res: Respon
     if (isNaN(assetId)) { res.status(400).json({ message: "Invalid assetId" }); return; }
 
     const rateCard: any = await db.assetRateCard.findUnique({ where: { assetId } });
-    const ratePerUnit = rateCard ? toNum(rateCard.avgRevenuePerUnit) : 0;
+    const ratePerHour = hourlyRate(rateCard);
 
     const from = daysAgo(30);
     const logs: any[] = await db.assetDailyUsageLog.findMany({
       where: { assetId, logDate: { gte: from }, downtimeHours: { gt: 0 } },
       orderBy: { logDate: "asc" },
-      select: { logDate: true, downtimeHours: true, downtimeType: true },
+      select: {
+        logDate: true, downtimeHours: true, downtimeType: true,
+        downtimeEntries: { select: { type: true, minutes: true, isPlanned: true } },
+      },
     });
 
-    // Group by downtime type
-    const byType = new Map<string, { totalHours: number; occurrences: number; dates: Date[] }>();
+    // Group by downtime type, split planned (excluded from OEE) vs unplanned
+    const byType = new Map<string, { totalHours: number; plannedHours: number; unplannedHours: number; occurrences: number }>();
+    let totalPlanned = 0, totalUnplanned = 0;
     logs.forEach((l: any) => {
-      const type = l.downtimeType ?? "UNSPECIFIED";
-      const entry = byType.get(type) || { totalHours: 0, occurrences: 0, dates: [] };
-      entry.totalHours += toNum(l.downtimeHours);
-      entry.occurrences += 1;
-      entry.dates.push(l.logDate);
-      byType.set(type, entry);
+      entriesOf(l).forEach((e) => {
+        const entry = byType.get(e.type) || { totalHours: 0, plannedHours: 0, unplannedHours: 0, occurrences: 0 };
+        entry.totalHours += e.hours;
+        if (e.isPlanned) { entry.plannedHours += e.hours; totalPlanned += e.hours; }
+        else { entry.unplannedHours += e.hours; totalUnplanned += e.hours; }
+        entry.occurrences += 1;
+        byType.set(e.type, entry);
+      });
     });
 
+    // Revenue impact counts all downtime: planned stops still cost capacity even though they don't hurt OEE
     const breakdown = Array.from(byType.entries()).map(([type, v]) => ({
       type,
-      totalHours: Math.round(v.totalHours * 100) / 100,
+      totalHours: round2(v.totalHours),
+      plannedHours: round2(v.plannedHours),
+      unplannedHours: round2(v.unplannedHours),
       occurrences: v.occurrences,
-      revenueImpact: Math.round(v.totalHours * ratePerUnit * 100) / 100,
+      revenueImpact: ratePerHour != null ? round2(v.totalHours * ratePerHour) : null,
     })).sort((a, b) => b.totalHours - a.totalHours);
 
     const totalDowntime = logs.reduce((s: number, l: any) => s + toNum(l.downtimeHours), 0);
-    const totalRevenueImpact = totalDowntime * ratePerUnit;
+    const totalRevenueImpact = ratePerHour != null ? totalDowntime * ratePerHour : null;
 
     // Trend: compare first 15 days vs last 15 days
     const midpoint = daysAgo(15);
@@ -818,7 +987,9 @@ export const getDowntimeAnalysis = async (req: AuthenticatedRequest, res: Respon
     res.json({
       breakdown,
       totalDowntimeHours: Math.round(totalDowntime * 100) / 100,
-      totalRevenueImpact: Math.round(totalRevenueImpact * 100) / 100,
+      plannedDowntimeHours: round2(totalPlanned),
+      unplannedDowntimeHours: round2(totalUnplanned),
+      totalRevenueImpact: totalRevenueImpact != null ? round2(totalRevenueImpact) : null,
       trend,
       trendDetail: {
         firstHalfHours: Math.round(firstHalfHours * 100) / 100,
@@ -848,21 +1019,21 @@ export const getLeaderboard = async (req: AuthenticatedRequest, res: Response) =
     const from = daysAgo(period);
     const today = todayMidnight();
 
-    // Fetch rate cards with asset info
-    const assetsWithCards: any[] = await db.assetRateCard.findMany({
-      include: {
-        asset: {
-          select: {
-            id: true, assetId: true, assetName: true, departmentId: true,
-            department: { select: { name: true } },
-            assetCategory: { select: { name: true } },
-          },
-        },
+    // Revenue-log applicable assets; rate card is optional (planned hours fall back to 8)
+    const trackedAssets: any[] = await prisma.asset.findMany({
+      where: { isRevenueLogApplicable: true, ...(departmentId ? { departmentId } : {}) },
+      select: {
+        id: true, assetId: true, assetName: true, departmentId: true,
+        department: { select: { name: true } },
+        assetCategory: { select: { name: true } },
       },
-      ...(departmentId ? { where: { asset: { departmentId } } } : {}),
     });
 
-    const assetIds: number[] = assetsWithCards.map((rc: any) => rc.assetId);
+    const assetIds: number[] = trackedAssets.map((a: any) => a.id);
+    const rateCards: any[] = assetIds.length > 0
+      ? await db.assetRateCard.findMany({ where: { assetId: { in: assetIds } } })
+      : [];
+    const rateCardMap = new Map<number, any>(rateCards.map((rc: any) => [rc.assetId, rc]));
 
     const logs: any[] = await db.assetDailyUsageLog.findMany({
       where: { assetId: { in: assetIds }, logDate: { gte: from, lte: today } },
@@ -873,29 +1044,30 @@ export const getLeaderboard = async (req: AuthenticatedRequest, res: Response) =
     });
 
     // Aggregate per asset
-    const aggMap = new Map<number, { hours: number; oeeSum: number; revenue: number; count: number }>();
+    const aggMap = new Map<number, { hours: number; oeeSum: number; oeeCount: number; revenue: number; count: number }>();
     logs.forEach((l: any) => {
-      const e = aggMap.get(l.assetId) || { hours: 0, oeeSum: 0, revenue: 0, count: 0 };
+      const e = aggMap.get(l.assetId) || { hours: 0, oeeSum: 0, oeeCount: 0, revenue: 0, count: 0 };
       e.hours += toNum(l.hoursUsed);
-      e.oeeSum += toNum(l.oeeScore);
-      e.revenue += toNum(l.revenueGenerated) + toNum(l.estimatedRevenue);
+      if (l.oeeScore != null) { e.oeeSum += toNum(l.oeeScore); e.oeeCount += 1; }
+      e.revenue += dayRevenue(l);
       e.count += 1;
       aggMap.set(l.assetId, e);
     });
 
-    const leaderboard = assetsWithCards.map((rc: any) => {
-      const agg = aggMap.get(rc.assetId);
-      const avgOee = agg && agg.count > 0 ? agg.oeeSum / agg.count : 0;
+    const leaderboard = trackedAssets.map((a: any) => {
+      const agg = aggMap.get(a.id);
+      const rc = rateCardMap.get(a.id);
+      const avgOee = agg && agg.oeeCount > 0 ? agg.oeeSum / agg.oeeCount : 0;
       const avgHours = agg && agg.count > 0 ? agg.hours / agg.count : 0;
-      const plannedHours = toNum(rc.plannedHoursPerDay);
+      const plannedHours = rc ? toNum(rc.plannedHoursPerDay) : 8;
       const utilizationPct = plannedHours > 0 ? (avgHours / plannedHours) * 100 : 0;
 
       return {
-        assetDbId: rc.assetId,
-        assetId: rc.asset.assetId,
-        assetName: rc.asset.assetName,
-        category: rc.asset.assetCategory?.name ?? null,
-        department: rc.asset.department?.name ?? null,
+        assetDbId: a.id,
+        assetId: a.assetId,
+        assetName: a.assetName,
+        category: a.assetCategory?.name ?? null,
+        department: a.department?.name ?? null,
         avgOee: Math.round(avgOee * 100) / 100,
         utilizationPct: Math.round(utilizationPct * 100) / 100,
         totalRevenue: Math.round((agg?.revenue ?? 0) * 100) / 100,
@@ -939,7 +1111,7 @@ export const getShiftAnalysis = async (req: AuthenticatedRequest, res: Response)
       totalShift2 += toNum(l.shift2Hours);
       totalShift3 += toNum(l.shift3Hours);
       totalHours += toNum(l.hoursUsed);
-      totalRevenue += toNum(l.revenueGenerated) + toNum(l.estimatedRevenue);
+      totalRevenue += dayRevenue(l);
     });
 
     const shiftTotalCombined = totalShift1 + totalShift2 + totalShift3;
@@ -979,6 +1151,56 @@ export const getShiftAnalysis = async (req: AuthenticatedRequest, res: Response)
     });
   } catch (err: any) {
     console.error("getShiftAnalysis error:", err);
+    res.status(500).json({ message: "Internal server error", error: err.message });
+  }
+};
+
+// ─── 15. GET /calibration-info/:assetId?from=<ISO>&to=<ISO> ─────────────────
+// Typical calibration + start-up duration for the asset, and any calibrations
+// recorded in [from, to) so the daily log can pre-fill its downtime entries.
+// from/to are instants (the client's local day), since calibratedAt is stored
+// from a local-midnight datepicker value.
+
+export const getCalibrationInfo = async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const assetId = Number(req.params.assetId);
+    if (isNaN(assetId)) { res.status(400).json({ message: "Invalid assetId" }); return; }
+
+    const schedule: any = await db.calibrationSchedule.findFirst({
+      where: { assetId, isActive: true },
+      orderBy: { nextDueAt: "asc" },
+      select: { estimatedDurationMinutes: true },
+    });
+
+    const recorded: any[] = await db.calibrationHistory.findMany({
+      where: { assetId, OR: [{ actualDurationMinutes: { not: null } }, { startupMinutes: { not: null } }] },
+      select: { actualDurationMinutes: true, startupMinutes: true },
+    });
+    const avg = (key: string) => {
+      const vals = recorded.filter((r) => r[key] != null).map((r) => Number(r[key]));
+      return vals.length > 0 ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : null;
+    };
+
+    let onDate: any[] = [];
+    const dayStart = req.query.from ? new Date(req.query.from as string) : null;
+    const dayEnd = req.query.to ? new Date(req.query.to as string) : null;
+    if (dayStart && dayEnd && !isNaN(dayStart.getTime()) && !isNaN(dayEnd.getTime())) {
+      onDate = await db.calibrationHistory.findMany({
+        where: { assetId, calibratedAt: { gte: dayStart, lt: dayEnd } },
+        select: { id: true, calibratedAt: true, actualDurationMinutes: true, startupMinutes: true, result: true },
+        orderBy: { calibratedAt: "asc" },
+      });
+    }
+
+    res.json({
+      estimatedDurationMinutes: schedule?.estimatedDurationMinutes ?? null,
+      avgActualDurationMinutes: avg("actualDurationMinutes"),
+      avgStartupMinutes: avg("startupMinutes"),
+      sampleSize: recorded.length,
+      onDate,
+    });
+  } catch (err: any) {
+    console.error("getCalibrationInfo error:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 };

@@ -1,5 +1,82 @@
 import { Request, Response } from "express";
 import prisma from "../../prismaClient";
+import { BOOKED_LOG_WHERE } from "../../utilis/depreciationEngine";
+import { getLockedYears, isLocked, lockMessageFor, fiscalYearOf, fyLabelOf, acquisitionDateOf } from "../../utilis/fyLock";
+
+/**
+ * Financial-year lock for asset edits. Returns a message if the edit must be
+ * refused, else null.
+ *
+ * A finalized year's figures are frozen in its snapshot, so an edit can't
+ * change them any more — but it would still break continuity (the open year's
+ * opening block would no longer equal the closed year's closing) or, for the
+ * category, bypass the CFO-approved reclassification. So for an asset acquired
+ * in a locked year, its cost, acquisition date, procurement mode and category
+ * are fixed; and no non-legacy asset may be moved INTO a locked year.
+ */
+async function assetEditLockMessage(id: number, data: any): Promise<string | null> {
+  const locked = await getLockedYears();
+  if (!locked.size) return null;
+
+  const existing = await prisma.asset.findUnique({
+    where: { id },
+    select: {
+      purchaseDate: true, donationDate: true, purchaseCost: true, estimatedValue: true,
+      assetCategoryId: true, modeOfProcurement: true, isLegacyAsset: true, parentAssetId: true,
+    },
+  });
+  // Sub-assets are outside the FA Schedule (their cost sits in the parent's).
+  if (!existing || existing.parentAssetId != null) return null;
+
+  // What the row will hold after this PUT — mirrors how updateAsset writes:
+  // purchase fields only in PURCHASE mode, donation fields only in DONATION.
+  const mode = data.modeOfProcurement ?? existing.modeOfProcurement;
+  const next = {
+    purchaseDate: mode === "PURCHASE" ? (data.purchaseDate ? new Date(data.purchaseDate) : null) : existing.purchaseDate,
+    purchaseCost: mode === "PURCHASE" ? (data.purchaseCost ? Number(data.purchaseCost) : null) : (existing.purchaseCost != null ? Number(existing.purchaseCost) : null),
+    donationDate: mode === "DONATION" ? (data.donationDate ? new Date(data.donationDate) : null) : existing.donationDate,
+    estimatedValue: mode === "DONATION" ? (data.estimatedValue ? Number(data.estimatedValue) : null) : (existing.estimatedValue != null ? Number(existing.estimatedValue) : null),
+    assetCategoryId: data.assetCategoryId ? Number(data.assetCategoryId) : existing.assetCategoryId,
+  };
+
+  // A date only counts as changed if it moved more than 36h (a browser's
+  // date-only value and the stored midnight can differ by a timezone offset)
+  // or landed in a different financial year.
+  const dateChanged = (a: any, b: any) => {
+    if (!a && !b) return false;
+    if (!a || !b) return true;
+    const x = new Date(a), y = new Date(b);
+    return Math.abs(x.getTime() - y.getTime()) > 36 * 3600_000 || fiscalYearOf(x) !== fiscalYearOf(y);
+  };
+  const numChanged = (a: any, b: any) =>
+    (a == null) !== (b == null) || (a != null && b != null && Math.abs(Number(a) - Number(b)) > 0.005);
+
+  const changed: string[] = [];
+  if (dateChanged(existing.purchaseDate, next.purchaseDate)) changed.push("purchase date");
+  if (numChanged(existing.purchaseCost, next.purchaseCost)) changed.push("purchase cost");
+  if (dateChanged(existing.donationDate, next.donationDate)) changed.push("donation date");
+  if (numChanged(existing.estimatedValue, next.estimatedValue)) changed.push("estimated value");
+  if ((existing.modeOfProcurement ?? null) !== (mode ?? null)) changed.push("mode of procurement");
+  const categoryChanged = (existing.assetCategoryId ?? null) !== (next.assetCategoryId ?? null);
+  if (categoryChanged) changed.push("category");
+
+  const existingAcq = acquisitionDateOf(existing);
+  if (existingAcq && isLocked(locked, existingAcq) && changed.length) {
+    const fy = fyLabelOf(fiscalYearOf(existingAcq));
+    const state = locked.get(fiscalYearOf(existingAcq)) === "FINALIZED" ? "finalized" : "awaiting CFO finalization";
+    return `This asset was acquired in ${fy}, which is ${state}, so its ${changed.join(", ")} can't be changed here.` +
+      (categoryChanged ? " A category correction must go through Reclassify, which needs CFO approval." : "");
+  }
+
+  // Moving a non-legacy asset's acquisition into a locked year would add it to
+  // closed books. (Legacy assets enter open years as opening balances.)
+  const nextAcq = acquisitionDateOf(next);
+  if (!existing.isLegacyAsset && nextAcq && isLocked(locked, nextAcq) &&
+      (!existingAcq || !isLocked(locked, existingAcq))) {
+    return lockMessageFor(locked, "acquisition date", nextAcq);
+  }
+  return null;
+}
 import formidable from "formidable";
 import fs from "fs";
 import path from "path";
@@ -90,6 +167,7 @@ export const getAllAssets = async (req: Request, res: Response) => {
         hodApprovalStatus: true,
         manufacturer: true,
         modelNumber: true,
+        isRevenueLogApplicable: true, // Revenue Log asset picker filters on this
         assetCategory: { select: { name: true } },
         department: { select: { name: true } },
         allottedTo: { select: { name: true } },
@@ -493,6 +571,22 @@ export const createAsset = async (req: AuthenticatedRequest, res: Response) => {
           "(MANUAL_ASSET_WITHOUT_PROCUREMENT in Configuration controls this.)",
       });
       return;
+    }
+
+    // ── Financial-year lock ──────────────────────────────────────────────────
+    // A new (non-legacy) asset can't be dated into a finalized year, or one
+    // awaiting CFO finalization — that would add to closed books. Legacy assets
+    // pre-date the system and enter the open year as opening balances, so
+    // they're exempt (see utilis/fyLock.ts). Sub-assets sit outside the FA
+    // Schedule, their cost being part of the parent's.
+    if (!isLegacyForProvenance && !data.parentAssetId) {
+      const locked = await getLockedYears();
+      const msg = lockMessageFor(locked, "acquisition date",
+        acquisitionDateOf({ purchaseDate: data.purchaseDate, donationDate: data.donationDate }));
+      if (msg) {
+        res.status(409).json({ message: msg, code: "FY_LOCKED" });
+        return;
+      }
     }
 
     // ── 7-year lifetime guard ────────────────────────────────────────────────
@@ -932,6 +1026,13 @@ export const updateAsset = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
     const data = req.body;
+
+    // ── Financial-year lock ──────────────────────────────────────────────────
+    const lockMsg = await assetEditLockMessage(id, data);
+    if (lockMsg) {
+      res.status(409).json({ message: lockMsg, code: "FY_LOCKED" });
+      return;
+    }
 
     // ── Serial-number requirement (driven by category.serialRequired) ────────
     // Resolve the effective category: payload value if provided, otherwise the asset's existing category.
@@ -1967,7 +2068,9 @@ export const getAssetScanDetails = async (req: Request, res: Response) => {
             createdAt: "desc"
           }
         },
+        // Booked depreciation only — not drafts awaiting approval or rejected runs.
         depreciationLogs: {
+          where: { ...BOOKED_LOG_WHERE },
           include: {
             doneBy: true
           },

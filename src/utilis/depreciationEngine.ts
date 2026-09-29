@@ -47,7 +47,7 @@ export interface FYDepreciationResult {
   periodStart: Date;
   periodEnd: Date;
   openingWdv: number;
-  openingWdvSource: "PRIOR_LOG" | "PURCHASE_COST" | "MIGRATION";
+  openingWdvSource: "FINALIZED_YEAR" | "PRIOR_LOG" | "PURCHASE_COST" | "MIGRATION";
   additionsAmount: number;          // gross addition recognized in this FY (per asset = its cost in Y1)
   isFirstFY: boolean;               // is this the asset's very first FY of dep?
   halfYearApplied: boolean;
@@ -61,6 +61,23 @@ export interface FYDepreciationResult {
   // Diagnostics
   preMigrationSkipped: boolean;
 }
+
+/* ── Log status ──────────────────────────────────────────────────────────── */
+
+/**
+ * The one definition of "booked depreciation". A DepreciationLog row is either
+ * a DRAFT (in an unapproved batch run), APPROVED (booked), or REJECTED.
+ *
+ * Every read that means "what depreciation has been charged" — reports,
+ * exports, the audit preview, and the opening-WDV lookup below — must spread
+ * this into its `where`. Reading without it counts drafts and rejected runs as
+ * if they were in the books, which is how past-year figures used to move
+ * without anyone approving anything.
+ */
+export const BOOKED_LOG_WHERE = { status: "APPROVED" } as const;
+
+/** Rows that still hold a claim on an (asset, FY): pending or booked. */
+export const LIVE_LOG_STATUSES = ["DRAFT", "APPROVED"] as const;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
@@ -97,6 +114,11 @@ export function effectiveResidualValue(cost: number, storedSalvage: number | nul
 /**
  * Resolve the opening WDV for the given FY.
  *  Priority:
+ *   0. FINALIZED_YEAR — the previous year is finalized: its frozen closing net
+ *                       block for this asset. Takes priority over logs because
+ *                       the closed books may carry an estimated figure (no
+ *                       booked log that year), and an open year must build on
+ *                       what was actually closed, not on older history.
  *   1. PRIOR_LOG     — bookValueAfter from the most recent log whose periodEnd ≤ fyStart
  *   2. MIGRATION     — openingWdvAtMigration (if asset is legacy and we're in/after migration FY)
  *   3. PURCHASE_COST — fallback for the asset's first FY of dep
@@ -105,10 +127,37 @@ export async function resolveOpeningWdv(
   asset: AssetForDep,
   cost: number,
   fy: FYContext
-): Promise<{ openingWdv: number; source: "PRIOR_LOG" | "PURCHASE_COST" | "MIGRATION"; accDepBefore: number }> {
-  // 1. Try prior log — find the most recent log whose periodEnd is on/before this FY's start
+): Promise<{ openingWdv: number; source: "FINALIZED_YEAR" | "PRIOR_LOG" | "PURCHASE_COST" | "MIGRATION"; accDepBefore: number }> {
+  // 0. Previous year finalized → its frozen closing is this year's opening.
+  const prevFiscalYear = fy.fyStart.getFullYear() - 1;
+  const frozen = await prisma.fyAssetSnapshot.findFirst({
+    where: {
+      assetId: asset.id,
+      fiscalYear: prevFiscalYear,
+      lineType: "ASSET",
+      financialYearClose: { status: "FINALIZED" },
+    },
+    select: { openingGross: true, additions: true, deletions: true, closingAccDep: true },
+  });
+  if (frozen) {
+    const closingGross = Number(frozen.openingGross) + Number(frozen.additions) - Number(frozen.deletions);
+    const accDep = Number(frozen.closingAccDep);
+    // A line with no closing gross was disposed in the closed year — nothing
+    // carries forward, so fall through to the normal rules.
+    if (closingGross > 0) {
+      return {
+        openingWdv: Math.max(0, Number((closingGross - accDep).toFixed(2))),
+        source: "FINALIZED_YEAR",
+        accDepBefore: Math.max(0, Number(accDep.toFixed(2))),
+      };
+    }
+  }
+
+  // 1. Try prior log — find the most recent BOOKED log whose periodEnd is
+  //    on/before this FY's start. A draft or rejected row is not a closing
+  //    balance; using one would open this year on figures nobody approved.
   const priorLog = await prisma.depreciationLog.findFirst({
-    where: { assetId: asset.id, periodEnd: { lte: fy.fyStart } },
+    where: { assetId: asset.id, periodEnd: { lte: fy.fyStart }, ...BOOKED_LOG_WHERE },
     orderBy: { periodEnd: "desc" },
     select: { bookValueAfter: true, periodEnd: true },
   });
@@ -272,6 +321,11 @@ function emptyResult(fy: FYContext, openingWdv: number, accDep: number, skipped:
 
 /* ── Persistence helper ──────────────────────────────────────────────────── */
 
+/**
+ * Writes a log row AND commits it to the asset's running totals in one step,
+ * so it is booked immediately — status APPROVED. Draft batch rows are written
+ * by the batch-run code directly and never pass through here.
+ */
 export async function persistDepreciationResult(params: {
   assetId: number;
   depRecordId: number;
@@ -282,6 +336,9 @@ export async function persistDepreciationResult(params: {
 }) {
   const { assetId, depRecordId, result, doneById, reason, batchRunId } = params;
   return prisma.$transaction(async (tx) => {
+    // Snapshot the category this period is charged under (see schema comment).
+    const cat = await tx.asset.findUnique({ where: { id: assetId }, select: { assetCategoryId: true } });
+
     const log = await tx.depreciationLog.create({
       data: {
         assetId,
@@ -301,6 +358,8 @@ export async function persistDepreciationResult(params: {
         doneById: doneById ?? null,
         reason,
         batchRunId: batchRunId ?? null,
+        status: "APPROVED",
+        assetCategoryId: cat?.assetCategoryId ?? null,
       } as any,
     });
 
@@ -339,8 +398,11 @@ export async function backfillHistoricalDepreciation(
   cfg: DepreciationConfig,
   doneById: number | null = null,
 ): Promise<{ created: number; skipped: number; latestFy: string | null }> {
-  // Skip if any logs already exist
-  const existingLogCount = await prisma.depreciationLog.count({ where: { assetId } });
+  // Skip if any logs already exist. Rejected rows don't count — they were never
+  // booked, so an asset with only rejected history still needs its backfill.
+  const existingLogCount = await prisma.depreciationLog.count({
+    where: { assetId, status: { not: "REJECTED" } },
+  });
   if (existingLogCount > 0) {
     return { created: 0, skipped: existingLogCount, latestFy: null };
   }
@@ -380,8 +442,23 @@ export async function backfillHistoricalDepreciation(
   let created = 0;
   let latestFy: string | null = null;
 
+  // Locked years (finalized, or awaiting CFO) are never written into. A
+  // finalized year's figures live in its frozen snapshot, and the next open
+  // year opens from that (resolveOpeningWdv), so skipping keeps the chain
+  // intact. Queried here rather than via utilis/fyLock, which imports this file.
+  const lockedYears = new Set(
+    (await prisma.financialYearClose.findMany({
+      where: { status: { in: ["PENDING_CFO", "FINALIZED"] } },
+      select: { fiscalYear: true },
+    })).map((r) => r.fiscalYear)
+  );
+
   // Loop through each completed FY up to (but not including) the current FY
   while (fy.fyEnd < today) {
+    if (lockedYears.has(fy.fyStart.getFullYear())) {
+      fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
+      continue;
+    }
     const result = await calculateAssetFYDepreciation(asset, cfg, fy);
 
     if (!result.preMigrationSkipped && result.depreciationAmount >= 0) {

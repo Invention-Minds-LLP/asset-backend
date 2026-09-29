@@ -356,6 +356,7 @@ model Asset {
   employee                     Employee?                      @relation(fields: [employeeId], references: [id])
   employeeId                   Int?
   depreciationLogs             DepreciationLog[]
+  reclassLines                 AssetReclassLine[]
   insuranceClaims              InsuranceClaim[]
   maintenanceSchedules         MaintenanceSchedule[]
   sparePartUsages              SparePartUsage[]
@@ -828,6 +829,7 @@ model AssetCategory {
   approvedVendors               ApprovedVendor[]               @relation("ApprovedVendorCategory")
   rateContractLines             RateContractLine[]             @relation("RateContractCategory")
   items                         AssetItem[]
+  reclassRequestsTo             AssetReclassRequest[]          @relation("ReclassToCategory")
 
   @@map("assetcategory")
 }
@@ -1094,6 +1096,13 @@ model Employee {
 
   depreciationAuditsFinance DepreciationAudit[] @relation("DepAuditFinanceApprovedBy")
   depreciationAuditsCfo     DepreciationAudit[] @relation("DepAuditCfoApprovedBy")
+  fyClosesSubmitted         FinancialYearClose[] @relation("FyCloseSubmittedBy")
+  fyClosesApproved          FinancialYearClose[] @relation("FyCloseApprovedBy")
+  fyClosesRejected          FinancialYearClose[] @relation("FyCloseRejectedBy")
+  fyClosesUndone            FinancialYearClose[] @relation("FyCloseUndoneBy")
+  reclassRequested          AssetReclassRequest[] @relation("ReclassRequestedBy")
+  reclassApproved           AssetReclassRequest[] @relation("ReclassApprovedBy")
+  reclassRejected           AssetReclassRequest[] @relation("ReclassRejectedBy")
 
   // Finance Engine relations
   financeConfigUpdates    FinanceConfig[]                 @relation("FinanceConfigUpdatedBy")
@@ -1399,9 +1408,25 @@ model DepreciationLog {
   batchRunId Int?
   batchRun   BatchDepreciationRun? @relation(fields: [batchRunId], references: [id])
 
+  // DRAFT | APPROVED | REJECTED. Only APPROVED rows are booked depreciation:
+  // every report, export and the engine's opening-WDV lookup must filter on it
+  // (use BOOKED_LOG_WHERE in utilis/depreciationEngine.ts). Before this column,
+  // draft and rejected batch rows were indistinguishable from booked ones
+  // except by the free-text `reason`, and reports counted all of them.
+  // Defaults to APPROVED because every pre-existing row that was not part of a
+  // batch run was written by an immediate (already-booked) path.
+  status String @default("APPROVED")
+
+  // The asset's category WHEN this period was depreciated — a snapshot, not a
+  // relation, so a later reclassification can't move past years into the new
+  // category. Null only on rows written before this column existed that could
+  // not be backfilled.
+  assetCategoryId Int?
+
   createdAt DateTime @default(now())
 
   @@index([assetId, periodEnd])
+  @@index([status, periodEnd])
   @@map("depreciationlog")
 }
 
@@ -1481,6 +1506,212 @@ model DepreciationAudit {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@map("depreciationaudit")
+}
+
+// ── Financial-year finalization (books closed) ──────────────────────────────
+// Deliberately separate from DepreciationAudit (CFO + external CA sign-off of
+// the depreciation figures). This is the books-closed lock.
+//
+// Flow: FINANCE submits → PENDING_CFO → CFO approves → FINALIZED, or rejects →
+// REJECTED (Finance may fix and resubmit). For 24 hours after approving, the
+// CFO may undo the finalization (→ REJECTED, back to Finance); after that the
+// year cannot be unlocked from the application.
+//
+// While PENDING_CFO the year is already locked, so what the CFO approves is
+// exactly what gets frozen. FINALIZED freezes every asset's figures for the year
+// into FyAssetSnapshot; the Fixed Assets Schedule serves that year from the
+// snapshot only, so nothing done afterwards (reclassification, rate changes,
+// corrected costs) can move it. See utilis/fyLock.ts for the write guard.
+model FinancialYearClose {
+  id         Int      @id @default(autoincrement())
+  fiscalYear Int      @unique // FY start year: 2023 = FY2023-24 (same convention as DepreciationAudit)
+  fyLabel    String // "FY2023-24"
+  fyStart    DateTime
+  fyEnd      DateTime
+  status     String   @default("OPEN") // OPEN | PENDING_CFO | REJECTED | FINALIZED
+
+  submittedById Int?
+  submittedBy   Employee? @relation("FyCloseSubmittedBy", fields: [submittedById], references: [id])
+  submittedAt   DateTime?
+  submitNotes   String?   @db.Text
+
+  approvedById  Int?
+  approvedBy    Employee? @relation("FyCloseApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  approvalNotes String?   @db.Text
+
+  rejectedById    Int?
+  rejectedBy      Employee? @relation("FyCloseRejectedBy", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?   @db.Text
+
+  // CFO undo — allowed only within 24 hours of approvedAt (see fy-close
+  // controller UNDO_WINDOW_HOURS). Undoing sends the year back to Finance
+  // (status REJECTED) and drops its snapshot; these fields keep the record of
+  // it, since a finalization that was undone is exactly what an auditor asks about.
+  undoneById Int?
+  undoneBy   Employee? @relation("FyCloseUndoneBy", fields: [undoneById], references: [id])
+  undoneAt   DateTime?
+  undoReason String?   @db.Text
+
+  // Frozen totals at finalization (grand total of the Fixed Assets Schedule).
+  totalLines        Int?
+  grossBlockOpening Decimal? @db.Decimal(16, 2)
+  grossBlockClosing Decimal? @db.Decimal(16, 2)
+  depForYear        Decimal? @db.Decimal(16, 2)
+  accDepClosing     Decimal? @db.Decimal(16, 2)
+  netBlockClosing   Decimal? @db.Decimal(16, 2)
+
+  snapshotLines FyAssetSnapshot[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@map("financialyearclose")
+}
+
+// One frozen Fixed-Assets-Schedule line per asset (or undigitized pool balance)
+// for a finalized year. Written once, at CFO approval, from the same line
+// builder the live schedule uses (utilis/fixedAssetsSchedule.ts), and never
+// updated. Names/category are copied in so a later rename or reclassification
+// can't reach back into a closed year. Figures are kept at 6 dp so re-aggregating
+// them reproduces the live schedule's category totals exactly.
+model FyAssetSnapshot {
+  id                   Int                @id @default(autoincrement())
+  financialYearCloseId Int
+  financialYearClose   FinancialYearClose @relation(fields: [financialYearCloseId], references: [id])
+  fiscalYear           Int
+
+  lineType String // ASSET | POOL
+
+  assetId           Int? // Asset.id at the time (no FK — the snapshot must outlive the asset)
+  assetCode         String?
+  assetName         String
+  serialNumber      String?
+  modeOfProcurement String?
+  acquisitionDate   DateTime?
+  disposalDate      DateTime?
+  poolCode          String?
+
+  assetCategoryId Int?
+  categoryName    String
+  departmentId    Int?
+  branchId        Int?
+
+  rate         Decimal @db.Decimal(8, 2)
+  countsInRate Boolean @default(false) // contributes to the category's average rate
+  depSource    String // LOG | COMPUTED | NONE | POOL — where depreciation came from
+
+  openingGross   Decimal @db.Decimal(18, 6)
+  additions      Decimal @db.Decimal(18, 6)
+  additions1H    Decimal @db.Decimal(18, 6)
+  additions2H    Decimal @db.Decimal(18, 6)
+  deletions      Decimal @db.Decimal(18, 6)
+  deletions1H    Decimal @db.Decimal(18, 6)
+  deletions2H    Decimal @db.Decimal(18, 6)
+  depOnOpening   Decimal @db.Decimal(18, 6)
+  depOnAdditions Decimal @db.Decimal(18, 6)
+  closingAccDep  Decimal @db.Decimal(18, 6)
+
+  // Pool lines carry the pool schedule's own closing/net figures, which the
+  // combined export prints as-is. Null on asset lines.
+  poolClosingGross    Decimal? @db.Decimal(18, 6)
+  poolOpeningNetBlock Decimal? @db.Decimal(18, 6)
+  poolClosingNetBlock Decimal? @db.Decimal(18, 6)
+
+  createdAt DateTime @default(now())
+
+  @@index([fiscalYear, categoryName])
+  @@index([fiscalYear, assetId])
+  @@map("fyassetsnapshot")
+}
+
+// ── Asset reclassification (category correction, prospective) ────────────────
+// Moves assets to another category from 1 April of the CURRENT financial year.
+// Past years are untouched: the previous year must already be finalized, so its
+// figures live in FyAssetSnapshot, and the current year opens from that frozen
+// closing value at the new category's rate.
+//
+// FINANCE or CFO raises it → CFO approves (not the requester) → applied.
+// One request can carry many assets (bulk: "these 40 computers were entered
+// under Building"); each line records what the asset was, for the history.
+model AssetReclassRequest {
+  id            Int      @id @default(autoincrement())
+  requestNo     String   @unique // RCL-FY2026-27-0001
+  status        String   @default("PENDING_CFO") // PENDING_CFO | APPROVED | REJECTED | CANCELLED
+  fiscalYear    Int // effective FY start year (2026 = FY2026-27)
+  effectiveFrom DateTime // 1 April of that year
+
+  toCategoryId Int
+  toCategory   AssetCategory @relation("ReclassToCategory", fields: [toCategoryId], references: [id])
+
+  // Depreciation settings applied to every asset in the request. Null = keep
+  // each asset's own value for that field.
+  newMethod    String? // SL | DB
+  newRate      Decimal? @db.Decimal(12, 2)
+  newLifeYears Int?
+
+  reason String @db.Text
+
+  requestedById Int
+  requestedBy   Employee @relation("ReclassRequestedBy", fields: [requestedById], references: [id])
+  requestedAt   DateTime @default(now())
+
+  approvedById  Int?
+  approvedBy    Employee? @relation("ReclassApprovedBy", fields: [approvedById], references: [id])
+  approvedAt    DateTime?
+  approvalNotes String?   @db.Text
+
+  rejectedById    Int?
+  rejectedBy      Employee? @relation("ReclassRejectedBy", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?   @db.Text
+
+  cancelledAt DateTime?
+
+  totalAssets Int     @default(0)
+  totalGross  Decimal @default(0) @db.Decimal(16, 2)
+  totalAccDep Decimal @default(0) @db.Decimal(16, 2)
+
+  // What happened to the GL reclass entry on approval:
+  // POSTED | NO_GL_MAPPING | AUTO_VOUCHER_OFF | NOTHING_TO_MOVE
+  glStatus String?
+  glNote   String? @db.Text
+
+  lines AssetReclassLine[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([status])
+  @@map("assetreclassrequest")
+}
+
+model AssetReclassLine {
+  id        Int                 @id @default(autoincrement())
+  requestId Int
+  request   AssetReclassRequest @relation(fields: [requestId], references: [id])
+  assetId   Int
+  asset     Asset               @relation(fields: [assetId], references: [id])
+
+  // What the asset was before (copied, so the history survives renames).
+  fromCategoryId   Int?
+  fromCategoryName String
+  oldMethod        String?
+  oldRate          Decimal? @db.Decimal(12, 2)
+  oldLifeYears     Int?
+
+  // Its position on the effective date — what the GL entry moves between the
+  // two categories' accounts, and what the current year opens from.
+  grossBlock            Decimal @db.Decimal(16, 2)
+  accDepAtEffective     Decimal @db.Decimal(16, 2)
+  openingWdvAtEffective Decimal @db.Decimal(16, 2)
+  openingSource         String? // FINALIZED_YEAR | PRIOR_LOG | MIGRATION | PURCHASE_COST
+
+  @@index([requestId])
+  @@index([assetId])
+  @@map("assetreclassline")
 }
 
 model AssetInsurance {
@@ -3217,6 +3448,8 @@ model CalibrationSchedule {
   reminderDays Int?    @default(7) // remind before due date
   notes        String?
 
+  estimatedDurationMinutes Int? // expected time the asset is down for calibration
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
@@ -3248,6 +3481,9 @@ model CalibrationHistory {
   certificateNo  String?
   certificateUrl String?
   remarks        String? @db.Text
+
+  actualDurationMinutes Int? // time the asset was down for this calibration
+  startupMinutes        Int? // warm-up time to bring the asset back into service afterwards
 
   createdById Int?
   createdBy   Employee? @relation("EmployeeCreatedCalibrationHistory", fields: [createdById], references: [id])
@@ -6255,6 +6491,9 @@ model AssetRateCard {
   // Quality metric (for OEE)
   qualityPassRatePct Decimal @default(98) @db.Decimal(5, 2) // % of output that meets quality standards
 
+  // Warm-up after any stop; start-up time within this is planned, beyond it is unplanned loss
+  standardStartupMinutes Int @default(0)
+
   createdById Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @default(now()) @updatedAt
@@ -6309,6 +6548,12 @@ model AssetDailyUsageLog {
 
   remarks String? @db.Text
 
+  // Downtime split (downtimeHours above = planned + unplanned). Planned stops
+  // (calibration, PM, no demand, standard start-up) are excluded from OEE availability.
+  plannedDowntimeHours   Decimal? @db.Decimal(5, 2)
+  unplannedDowntimeHours Decimal? @db.Decimal(5, 2)
+  downtimeEntries        AssetDowntimeEntry[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @default(now()) @updatedAt
 
@@ -6316,6 +6561,23 @@ model AssetDailyUsageLog {
   @@index([assetId, logDate])
   @@index([loggedById])
   @@map("assetdailyusagelog")
+}
+
+// One downtime event within a daily usage log (a day can have several).
+model AssetDowntimeEntry {
+  id    Int                @id @default(autoincrement())
+  logId Int
+  log   AssetDailyUsageLog @relation(fields: [logId], references: [id], onDelete: Cascade)
+
+  type      String // PLANNED | UNPLANNED | MAINTENANCE | CALIBRATION | STARTUP | NO_DEMAND | POWER_OUTAGE | STAFF_UNAVAILABLE
+  minutes   Int
+  isPlanned Boolean // excluded from OEE availability when true
+  remarks   String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([logId])
+  @@map("assetdowntimeentry")
 }
 
 model MaterialRequest {
@@ -6642,6 +6904,7 @@ enum VoucherSourceType {
   MAINTENANCE
   INSURANCE
   MANUAL
+  ASSET_RECLASSIFICATION
 }
 
 enum FinanceVoucherStatus {

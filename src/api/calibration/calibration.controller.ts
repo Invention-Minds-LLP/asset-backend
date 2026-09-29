@@ -3,6 +3,13 @@ import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { notify, getDepartmentHODs, getAdminIds } from "../../utilis/notificationHelper";
 
+/** Non-negative whole minutes, or null when blank/invalid. */
+const optionalMinutes = (v: any): number | null => {
+  if (v == null || v === "") return null;
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+};
+
 // ─── Calibration Schedules ─────────────────────────────────────────────────────
 
 export const createCalibrationSchedule = async (req: AuthenticatedRequest, res: Response) => {
@@ -16,6 +23,7 @@ export const createCalibrationSchedule = async (req: AuthenticatedRequest, res: 
       vendorId,
       reminderDays,
       notes,
+      estimatedDurationMinutes,
     } = req.body;
 
     if (!assetId || !frequencyValue || !frequencyUnit || !nextDueAt) {
@@ -33,6 +41,7 @@ export const createCalibrationSchedule = async (req: AuthenticatedRequest, res: 
         vendorId: vendorId ? Number(vendorId) : undefined,
         reminderDays: reminderDays ? Number(reminderDays) : 7,
         notes,
+        estimatedDurationMinutes: optionalMinutes(estimatedDurationMinutes),
       },
       include: {
         asset: { select: { assetId: true, assetName: true, departmentId: true } },
@@ -134,7 +143,7 @@ export const updateCalibrationSchedule = async (req: Request, res: Response) => 
       return;
     }
 
-    const { nextDueAt, frequencyValue, frequencyUnit, isActive, vendorId, reminderDays, notes, standardProcedure } = req.body;
+    const { nextDueAt, frequencyValue, frequencyUnit, isActive, vendorId, reminderDays, notes, standardProcedure, estimatedDurationMinutes } = req.body;
 
     const updated = await prisma.calibrationSchedule.update({
       where: { id },
@@ -147,6 +156,7 @@ export const updateCalibrationSchedule = async (req: Request, res: Response) => 
         reminderDays: reminderDays ? Number(reminderDays) : undefined,
         notes,
         standardProcedure,
+        estimatedDurationMinutes: estimatedDurationMinutes !== undefined ? optionalMinutes(estimatedDurationMinutes) : undefined,
       },
       include: { asset: { select: { assetId: true, assetName: true, departmentId: true } } },
     });
@@ -244,6 +254,8 @@ export const logCalibrationHistory = async (req: AuthenticatedRequest, res: Resp
       certificateNo,
       certificateUrl,
       remarks,
+      actualDurationMinutes,
+      startupMinutes,
     } = req.body;
 
     if (!assetId) {
@@ -264,6 +276,8 @@ export const logCalibrationHistory = async (req: AuthenticatedRequest, res: Resp
         certificateNo,
         certificateUrl,
         remarks,
+        actualDurationMinutes: optionalMinutes(actualDurationMinutes),
+        startupMinutes: optionalMinutes(startupMinutes),
         createdById: req.user?.employeeDbId,
       },
       include: {
