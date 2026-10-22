@@ -4,6 +4,7 @@ import XLSX from 'xlsx';
 import prisma from '../../prismaClient';
 import { generateAssetId, generateLegacyAssetId, generateSubAssetId } from '../../utilis/assetIdGenerator';
 import { backfillHistoricalDepreciation } from '../../utilis/depreciationEngine';
+import { getLockedYears, isLocked, lockMessageFor, fiscalYearOf, fyLabelOf, acquisitionDateOf } from '../../utilis/fyLock';
 import { syncCurrentBranch } from '../../lib/assetLocation';
 
 function parseDate(value: any): Date | null {
@@ -607,6 +608,9 @@ export async function importAssetsExcel(req: Request, res: Response) {
         // row (thousands of redundant round-trips on a remote DB).
         const branchIdCache = new Map<string, number>();
 
+        // Financial-year locks, fetched once for the whole upload.
+        const lockedYears = await getLockedYears();
+
         for (let i = 0; i < assetsRows.length; i++) {
             const row = assetsRows[i];
             const rowNum = i + 2; // +1 header, +1 because user-facing rows are 1-indexed
@@ -701,6 +705,41 @@ export async function importAssetsExcel(req: Request, res: Response) {
                 const supervisorId = await getEmployeeIdByCode(row.supervisorEmployeeCode);
 
                 const existing = await findAssetByReferenceOrSerial(row.referenceCode, row.serialNumber);
+
+                // ── Financial-year lock (same rules as the asset form) ─────────
+                // New non-legacy rows can't be dated into a locked year. A row
+                // that matches an existing asset acquired in a locked year can't
+                // change its category, cost or acquisition date — a re-import
+                // must not bypass the lock (or the CFO-approved reclassification).
+                if (lockedYears.size) {
+                    const newAcq = acquisitionDateOf({ purchaseDate: parseDate(row.purchaseDate), donationDate: parseDate(row.donationDate) });
+                    const exAcq = existing ? acquisitionDateOf(existing) : null;
+                    const exLocked = !!exAcq && isLocked(lockedYears, exAcq) && existing?.parentAssetId == null;
+
+                    if (existing && exLocked) {
+                        const changed: string[] = [];
+                        if (existing.assetCategoryId !== category.id) changed.push('category');
+                        if (modeOfProcurement === 'PURCHASE' &&
+                            Math.abs(Number(existing.purchaseCost ?? 0) - Number(toNumber(row.purchaseCost) ?? 0)) > 0.005) {
+                            changed.push('purchase cost');
+                        }
+                        if (newAcq && (Math.abs(newAcq.getTime() - exAcq!.getTime()) > 36 * 3600_000 ||
+                                       fiscalYearOf(newAcq) !== fiscalYearOf(exAcq!))) {
+                            changed.push('acquisition date');
+                        }
+                        if (changed.length) {
+                            pushValidationError(
+                                `This asset was acquired in ${fyLabelOf(fiscalYearOf(exAcq!))}, which is locked, ` +
+                                `so the import can't change its ${changed.join(', ')}.` +
+                                (changed.includes('category') ? ' Category corrections go through Reclassify (CFO approval).' : '')
+                            );
+                            continue;
+                        }
+                    } else if (!isLegacy) {
+                        const msg = lockMessageFor(lockedYears, 'acquisition date', newAcq);
+                        if (msg) { pushValidationError(msg); continue; }
+                    }
+                }
 
                 // Serial number / reference code — both optional. Auto-generate serial if missing.
                 const cleanSerial = toStringOrNull(row.serialNumber);

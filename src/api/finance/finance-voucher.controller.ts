@@ -1,8 +1,25 @@
 import { Response } from "express";
 import { PrismaClient, FinanceVoucherStatus } from "@prisma/client";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { fyLockMessage, getLockedYears, isLocked } from "../../utilis/fyLock";
 
 const prisma = new PrismaClient();
+
+/**
+ * Financial-year lock. Anything that puts an entry into the ledger, or changes
+ * one that's there, is refused for a date in a finalized year (or one awaiting
+ * CFO finalization). Clearing out a voucher that was never posted is allowed —
+ * it isn't in the books. Answers with both `error` (this module's convention)
+ * and `message`.
+ */
+async function refuseIfLocked(res: Response, dates: { label: string; date: any }[]): Promise<boolean> {
+  const msg = await fyLockMessage(dates);
+  if (msg) {
+    res.status(409).json({ error: msg, message: msg, code: "FY_LOCKED" });
+    return true;
+  }
+  return false;
+}
 
 const voucherInclude = {
   lines: { include: { account: true, costCentre: true } },
@@ -71,6 +88,7 @@ export async function createVoucher(req: AuthenticatedRequest, res: Response) {
     res.status(400).json({ error: "Debit and Credit must balance" }); return;
   }
   try {
+    if (await refuseIfLocked(res, [{ label: "voucher date", date: voucherDate }])) return;
     const voucherNo = await nextVoucherNo();
     const config = await prisma.financeConfig.findFirst();
     const status: FinanceVoucherStatus = config?.requireApproval ? "DRAFT" : "POSTED";
@@ -115,6 +133,8 @@ export async function approveVoucher(req: AuthenticatedRequest, res: Response) {
     if (v.status !== "DRAFT" && v.status !== "PENDING_APPROVAL") {
       res.status(400).json({ error: `Cannot approve voucher in ${v.status} status` }); return;
     }
+    // Approving posts it to the ledger.
+    if (await refuseIfLocked(res, [{ label: "voucher date", date: v.voucherDate }])) return;
     const updated = await prisma.financeVoucher.update({
       where: { id: v.id },
       data: { status: "POSTED", approvedById: req.user.employeeDbId, approvedAt: new Date() },
@@ -136,6 +156,9 @@ export async function rejectVoucher(req: AuthenticatedRequest, res: Response) {
   try {
     const v = await prisma.financeVoucher.findUnique({ where: { id: Number(req.params.id) } });
     if (!v) { res.status(404).json({ error: "Voucher not found" }); return; }
+    // Rejecting an unposted voucher is cleanup; rejecting a POSTED one takes it
+    // out of the books, which a closed year can't allow.
+    if (v.status === "POSTED" && await refuseIfLocked(res, [{ label: "voucher date", date: v.voucherDate }])) return;
     const updated = await prisma.financeVoucher.update({
       where: { id: v.id },
       data: { status: "REJECTED", rejectionReason: reason || null, approvedById: req.user.employeeDbId, approvedAt: new Date() },
@@ -157,6 +180,8 @@ export async function voidVoucher(req: AuthenticatedRequest, res: Response) {
     const v = await prisma.financeVoucher.findUnique({ where: { id: Number(req.params.id) } });
     if (!v) { res.status(404).json({ error: "Voucher not found" }); return; }
     if (v.status === "VOID") { res.status(400).json({ error: "Already voided" }); return; }
+    // Voiding a POSTED voucher reverses a ledger entry — not in a closed year.
+    if (v.status === "POSTED" && await refuseIfLocked(res, [{ label: "voucher date", date: v.voucherDate }])) return;
     const updated = await prisma.financeVoucher.update({
       where: { id: v.id },
       data: { status: "VOID" },
@@ -170,6 +195,11 @@ export async function voidVoucher(req: AuthenticatedRequest, res: Response) {
 }
 
 // ─── Auto-Voucher helper (called internally from other controllers) ─────────
+/** What createAutoVoucher actually did — a caller must not report "posted" otherwise. */
+export type AutoVoucherResult =
+  | { created: true; status: FinanceVoucherStatus; voucherNo: string }
+  | { created: false; reason: "AUTO_VOUCHER_OFF" | "LOCKED_YEAR" | "UNBALANCED" };
+
 export async function createAutoVoucher(params: {
   sourceType: string;
   sourceId: number;
@@ -179,13 +209,24 @@ export async function createAutoVoucher(params: {
   batchRunId?: number;
   createdById?: number;
   lines: { accountId: number; debit: number; credit: number; narration?: string; costCentreId?: number }[];
-}): Promise<void> {
+}): Promise<AutoVoucherResult> {
   const config = await prisma.financeConfig.findFirst();
-  if (!config?.autoVoucher) return;
+  if (!config?.autoVoucher) return { created: false, reason: "AUTO_VOUCHER_OFF" };
+
+  // Defence in depth: callers already refuse locked years before getting here
+  // (depreciation approval, reclassification), but an automatic entry must
+  // never land in a closed year whatever calls it.
+  if (isLocked(await getLockedYears(), params.voucherDate)) {
+    console.warn(`Auto-voucher (${params.sourceType} #${params.sourceId}) not created: its date falls in a locked financial year.`);
+    return { created: false, reason: "LOCKED_YEAR" };
+  }
 
   const totalDebit = params.lines.reduce((s, l) => s + l.debit, 0);
   const totalCredit = params.lines.reduce((s, l) => s + l.credit, 0);
-  if (Math.abs(totalDebit - totalCredit) > 0.01) return;
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
+    console.warn(`Auto-voucher (${params.sourceType} #${params.sourceId}) not created: debits ${totalDebit} ≠ credits ${totalCredit}.`);
+    return { created: false, reason: "UNBALANCED" };
+  }
 
   const voucherNo = await nextVoucherNo();
   const status: FinanceVoucherStatus = config.requireApproval ? "DRAFT" : "POSTED";
@@ -206,4 +247,5 @@ export async function createAutoVoucher(params: {
       lines: { create: params.lines },
     },
   });
+  return { created: true, status, voucherNo };
 }

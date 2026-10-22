@@ -3,6 +3,7 @@ import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { ExternalAuditorRequest } from "../../middleware/externalAuditorMiddleware";
 import { getFYLabel } from "../financial-dashboard/financial-dashboard.utils";
+import { BOOKED_LOG_WHERE } from "../../utilis/depreciationEngine";
 
 // DepreciationLog.fyLabel is stored as "FY2022-23"; getFYLabel(2022) → "2022-23".
 function fyLabelFor(fiscalYear: number): string {
@@ -12,7 +13,9 @@ function fyLabelFor(fiscalYear: number): string {
 // Snapshot the depreciation booked for a financial year (keyed by fyLabel).
 async function snapshotFY(fiscalYear: number) {
   const fyLabel = fyLabelFor(fiscalYear);
-  const where = { fyLabel };
+  // Booked only — an auditor signing off a year must not be shown draft or
+  // rejected batch rows as if they were charged.
+  const where = { fyLabel, ...BOOKED_LOG_WHERE };
 
   const [sum, distinctAssets] = await Promise.all([
     prisma.depreciationLog.aggregate({ where, _sum: { depreciationAmount: true } }),
@@ -72,7 +75,7 @@ export const getAuditStatus = async (req: AuthenticatedRequest, res: Response) =
 export const getAuditableYears = async (_req: AuthenticatedRequest, res: Response) => {
   try {
     const rows = await prisma.depreciationLog.findMany({
-      where: { fyLabel: { not: null } },
+      where: { fyLabel: { not: null }, ...BOOKED_LOG_WHERE },
       distinct: ["fyLabel"],
       select: { fyLabel: true },
     });
@@ -104,7 +107,7 @@ export const getPreview = async (req: AuthenticatedRequest, res: Response) => {
     // mechanics (rate, half/full-year rule, opening WDV, closing book value)
     // before initiating.
     const logs = await prisma.depreciationLog.findMany({
-      where: { fyLabel },
+      where: { fyLabel, ...BOOKED_LOG_WHERE },
       select: {
         assetId: true,
         depreciationAmount: true,

@@ -1,6 +1,7 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { assertFyOpen } from "../../utilis/fyLock";
 import multer from "multer";
 import { rejectBlockedUploads, saveUpload, tempUploadDir } from "../../lib/fileStorage";
 
@@ -80,6 +81,9 @@ export const create = async (req: AuthenticatedRequest, res: Response) => {
     if (!invoiceNo || !invoiceDate || !invoiceAmount) {
       res.status(400).json({ message: "invoiceNo, invoiceDate and invoiceAmount are required" }); return;
     }
+    // Financial-year lock: no invoice dated into a finalized year (or one
+    // awaiting CFO finalization) — it would add an expense to closed books.
+    if (!(await assertFyOpen(res, [{ label: "invoice date", date: invoiceDate }]))) return;
 
     const amt  = Number(invoiceAmount);
     const gst  = Number(gstPct ?? 18);
@@ -124,6 +128,10 @@ export const approve = async (req: AuthenticatedRequest, res: Response) => {
     if (record.status !== "PENDING_APPROVAL") {
       res.status(400).json({ message: `Cannot approve — current status is ${record.status}` }); return;
     }
+    // Approving accepts the expense into the invoice's year. (Rejecting an
+    // unapproved one, and marking an approved one paid — dated today — stay
+    // allowed: neither changes a closed year.)
+    if (!(await assertFyOpen(res, [{ label: "invoice date", date: record.invoiceDate }]))) return;
     const updated = await prisma.serviceInvoice.update({
       where: { id },
       data: { status: "APPROVED", approvedById: user?.employeeDbId ?? null },

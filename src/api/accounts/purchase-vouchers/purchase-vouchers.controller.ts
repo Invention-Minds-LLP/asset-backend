@@ -2,6 +2,12 @@ import { Response } from "express";
 import prisma from "../../../prismaClient";
 import { AuthenticatedRequest } from "../../../middleware/authMiddleware";
 import { logAction } from "../../audit-trail/audit-trail.controller";
+import { assertFyOpen } from "../../../utilis/fyLock";
+
+// Financial-year lock: a voucher dated in a finalized year (or one awaiting CFO
+// finalization) can't be created, edited, approved or posted — and an open one
+// can't be re-dated into such a year. Cancelling an unposted one stays allowed
+// (it isn't in the books). See utilis/fyLock.ts.
 
 // ── Number generator ─────────────────────────────────────────────────────────
 async function generatePVNumber(): Promise<string> {
@@ -92,6 +98,7 @@ export const createPurchaseVoucher = async (req: AuthenticatedRequest, res: Resp
     if (!voucherDate || !amount) {
       res.status(400).json({ message: "voucherDate and amount are required" }); return;
     }
+    if (!(await assertFyOpen(res, [{ label: "voucher date", date: voucherDate }]))) return;
 
     const voucherNo = await generatePVNumber();
 
@@ -143,6 +150,10 @@ export const updatePurchaseVoucher = async (req: AuthenticatedRequest, res: Resp
     if (existing.status === "POSTED") { res.status(400).json({ message: "Cannot edit a posted voucher" }); return; }
 
     const { voucherDate, amount, narration, vendorId, invoiceNo, invoiceDate, invoiceAmount, attachmentUrl } = req.body;
+    if (!(await assertFyOpen(res, [
+      { label: "voucher date", date: existing.voucherDate },
+      { label: "new voucher date", date: voucherDate },
+    ]))) return;
     const updated = await prisma.purchaseVoucher.update({
       where: { id },
       data: {
@@ -175,6 +186,7 @@ export const approvePurchaseVoucher = async (req: AuthenticatedRequest, res: Res
     if (!["DRAFT", "PENDING_APPROVAL"].includes(existing.status)) {
       res.status(400).json({ message: "Voucher is not in an approvable state" }); return;
     }
+    if (!(await assertFyOpen(res, [{ label: "voucher date", date: existing.voucherDate }]))) return;
     const updated = await prisma.purchaseVoucher.update({
       where: { id },
       data: { status: "APPROVED", approvedById: user?.employeeDbId ?? null, approvedAt: new Date(), approvalRemarks: remarks ?? null },
@@ -197,6 +209,7 @@ export const postPurchaseVoucher = async (req: AuthenticatedRequest, res: Respon
     if (existing.status !== "APPROVED") {
       res.status(400).json({ message: "Only approved vouchers can be posted" }); return;
     }
+    if (!(await assertFyOpen(res, [{ label: "voucher date", date: existing.voucherDate }]))) return;
     const updated = await prisma.purchaseVoucher.update({ where: { id }, data: { status: "POSTED" } });
     logAction({ entityType: "PURCHASE_VOUCHER", entityId: id, action: "POST", description: `Purchase voucher ${updated.voucherNo} posted to ledger`, performedById: user?.employeeDbId });
     res.json(updated);
@@ -216,6 +229,9 @@ export const cancelPurchaseVoucher = async (req: AuthenticatedRequest, res: Resp
     if (existing.status === "POSTED") {
       res.status(400).json({ message: "Cannot cancel a posted voucher" }); return;
     }
+    // No year-lock check here on purpose: a voucher that was never posted isn't
+    // in the books, so cancelling it can't change a closed year — and blocking
+    // it would leave dead drafts in a finalized year with no way to clear them.
     const updated = await prisma.purchaseVoucher.update({ where: { id }, data: { status: "CANCELLED" } });
     logAction({ entityType: "PURCHASE_VOUCHER", entityId: id, action: "CANCEL", description: `Purchase voucher ${updated.voucherNo} cancelled`, performedById: user?.employeeDbId });
     res.json(updated);

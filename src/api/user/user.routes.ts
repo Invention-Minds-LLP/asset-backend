@@ -1,6 +1,6 @@
 import express from "express";
 import { z } from "zod";
-import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword, refreshAccessToken, logoutUser, provisionUsersForEmployees } from "./user.controller";
+import { getAllUsers, createUser, updateUser, deleteUser, loginUser, resetPassword, refreshAccessToken, logoutUser, provisionUsersForEmployees, loginChallengeMfa, resetUserMfa } from "./user.controller";
 import { authenticateToken, requireRole } from "../../middleware/authMiddleware";
 import { validateBody } from "../../middleware/validate";
 
@@ -47,10 +47,14 @@ router.post("/provision", authenticateToken, requireUserAdmin, provisionUsersFor
 router.put("/reset-password", authenticateToken, requireUserAdmin, validateBody(resetPasswordSchema), resetPassword);
 
 router.post("/login", validateBody(loginSchema), loginUser);
+// Second step for accounts that need Google Authenticator (DPDP). Shares the
+// /api/users/login rate limiter mounted in index.ts (prefix match).
+router.post("/login/challenge/mfa", loginChallengeMfa);
 // Cookie-authenticated (refresh cookie + CSRF header), no bearer token required.
 router.post("/refresh", refreshAccessToken);
 router.post("/logout", logoutUser);
 
+router.put("/:id/reset-mfa", authenticateToken, requireUserAdmin, resetUserMfa);
 router.put("/:id", authenticateToken, requireUserAdmin, updateUser);
 router.delete("/:id", authenticateToken, requireUserAdmin, deleteUser);
 

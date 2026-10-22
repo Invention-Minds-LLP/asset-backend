@@ -18,6 +18,13 @@ import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
 import { getFYContext } from "../../utilis/depreciationEngine";
+import { assertFyOpen } from "../../utilis/fyLock";
+
+// The lock rule for migration is about the MIGRATION date, not the purchase:
+// a legacy asset may have been bought in any year (that's the point of
+// migrating it), but it enters the books as an opening balance on the
+// migration date — which must fall in an open year. Migrating into a finalized
+// year would change closed books.
 
 const VALID_MODES = ["GRANULAR", "PROPORTIONAL", "CARRY_AS_NEW"] as const;
 type MigrationMode = typeof VALID_MODES[number];
@@ -52,6 +59,8 @@ export const migrateSingleAsset = async (req: AuthenticatedRequest, res: Respons
       include: { depreciation: true },
     });
     if (!asset) { res.status(404).json({ message: "Asset not found" }); return; }
+
+    if (!(await assertFyOpen(res, [{ label: "migration date", date: migrationDate }]))) return;
 
     const migDate = new Date(migrationDate);
     const cost = Number(originalCost ?? asset.purchaseCost ?? 0);
@@ -128,6 +137,7 @@ export const migrateBulk = async (req: AuthenticatedRequest, res: Response) => {
       res.status(400).json({ message: `migrationMode must be one of ${VALID_MODES.join(", ")}` });
       return;
     }
+    if (!(await assertFyOpen(res, [{ label: "migration date", date: migrationDate }]))) return;
 
     const migDate = new Date(migrationDate);
     const fyStart = getFYContext(migDate).fyStart;
@@ -207,6 +217,7 @@ export const migrateProportional = async (req: AuthenticatedRequest, res: Respon
       res.status(400).json({ message: "categoryId or poolId required" });
       return;
     }
+    if (!(await assertFyOpen(res, [{ label: "migration date", date: migrationDate }]))) return;
 
     const where: any = {};
     if (categoryId) where.assetCategoryId = Number(categoryId);
@@ -333,6 +344,10 @@ export const revertMigration = async (req: AuthenticatedRequest, res: Response) 
     const id = Number(req.params.assetId);
     const asset = await prisma.asset.findUnique({ where: { id } });
     if (!asset) { res.status(404).json({ message: "Not found" }); return; }
+
+    // Reverting removes the opening balance the asset entered the books with —
+    // not allowed once that year is locked.
+    if (!(await assertFyOpen(res, [{ label: "migration date", date: (asset as any).migrationDate }]))) return;
 
     const updated = await prisma.asset.update({
       where: { id },

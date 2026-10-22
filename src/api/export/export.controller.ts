@@ -1,6 +1,9 @@
 import { Request, Response } from "express";
 import XLSX from "xlsx";
 import prisma from "../../prismaClient";
+// Every depreciation figure exported here is booked depreciation — drafts and
+// rejected batch runs must never reach a register (see depreciationEngine).
+import { BOOKED_LOG_WHERE } from "../../utilis/depreciationEngine";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Formatters
@@ -276,9 +279,9 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           prisma.assetCategory.findMany({ select: { id: true, name: true } }),
           f.fyStart && f.fyEnd
             ? prisma.depreciationLog.findMany({
-                where: { periodStart: { gte: f.fyStart }, periodEnd: { lte: f.fyEnd } },
+                where: { periodStart: { gte: f.fyStart }, periodEnd: { lte: f.fyEnd }, ...BOOKED_LOG_WHERE },
               })
-            : prisma.depreciationLog.findMany(),
+            : prisma.depreciationLog.findMany({ where: { ...BOOKED_LOG_WHERE } }),
         ]);
 
         const depByAsset = new Map<number, number>();
@@ -490,6 +493,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           where: {
             assetId: { in: assets.map(a => a.id) },
             periodEnd: { lte: winEnd },
+            ...BOOKED_LOG_WHERE,
           },
           select: { assetId: true, periodEnd: true, depreciationAmount: true },
         });
@@ -812,7 +816,9 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const [assets, depLogs, additions, disposals, vendorBalances] = await Promise.all([
           prisma.asset.findMany({ include: { assetCategory: true, depreciation: true } }),
           prisma.depreciationLog.findMany({
-            where: f.fyStart && f.fyEnd ? { periodStart: { gte: f.fyStart }, periodEnd: { lte: f.fyEnd } } : {},
+            where: f.fyStart && f.fyEnd
+              ? { periodStart: { gte: f.fyStart }, periodEnd: { lte: f.fyEnd }, ...BOOKED_LOG_WHERE }
+              : { ...BOOKED_LOG_WHERE },
             include: { asset: { select: { assetId: true, assetName: true } } },
             orderBy: { periodEnd: "desc" },
           }),
@@ -886,6 +892,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         const dr = dateRangeOn(f);
         if (dr) where.periodEnd = dr;
         if (f.fyLabel) where.fyLabel = f.fyLabel.startsWith("FY") ? f.fyLabel : `FY${f.fyLabel}`;
+        Object.assign(where, BOOKED_LOG_WHERE);
         const logs = await prisma.depreciationLog.findMany({
           where,
           include: { asset: { include: { assetCategory: true, department: true } }, doneBy: true, batchRun: true },
@@ -1065,7 +1072,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
 
       // B8 — Half-Year Convention Applied
       case "half-year-applied": {
-        const where: any = { halfYearApplied: true };
+        const where: any = { halfYearApplied: true, ...BOOKED_LOG_WHERE };
         const dr = dateRangeOn(f);
         if (dr) where.periodEnd = dr;
         const logs = await prisma.depreciationLog.findMany({
@@ -1369,7 +1376,7 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
           include: {
             assetCategory: true,
             depreciation: true,
-            depreciationLogs: { orderBy: { periodEnd: "desc" }, take: 12 },
+            depreciationLogs: { where: { ...BOOKED_LOG_WHERE }, orderBy: { periodEnd: "desc" }, take: 12 },
             costAllocations: true,
           },
         });

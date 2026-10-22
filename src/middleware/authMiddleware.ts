@@ -38,6 +38,13 @@ export const authenticateToken = async (
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    // Purpose-scoped tokens (MFA login challenge, download grant/ticket) share
+    // JWT_SECRET but are NOT sessions — accepting one here would let a
+    // password-only "challenge" token skip Google Authenticator.
+    if (decoded.purpose) {
+      res.status(401).json({ message: "Unauthorized: Invalid token" });
+      return;
+    }
         req.user = {
       // `id` is the Employee.id, matching mobileAuthMiddleware and every
       // *ById column in the schema (they all FK to Employee). It was missing

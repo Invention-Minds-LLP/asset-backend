@@ -2,12 +2,16 @@ import "dotenv/config";          // load .env before anything else evaluates
 import "./config/validateEnv";   // fail fast if a critical secret is missing
 import express from "express";
 import cookieParser from "cookie-parser";
+import { downloadGate } from "./middleware/downloadGate";
+import downloadOtpRoutes from "./api/download-otp/download-otp.routes";
 import assetRoutes from "./api/assets/assets.routes";
 import warrantyRoutes from "./api/warranty/warranty.routes";
 import ticketRoutes from "./api/tickets/tickets.routes";
 import assetCategoryRoutes from "./api/assetCategory/assetCategory.routes";
 import assetSubTypeRoutes from "./api/asset-subtype/asset-subtype.routes";
 import itemMasterRoutes from "./api/item-master/item-master.routes";
+import fyCloseRoutes from "./api/fy-close/fy-close.routes";
+import reclassificationRoutes from "./api/reclassification/reclassification.routes";
 import subTypeSupportRoutes from "./api/subtype-support/subtype-support.routes";
 import departmentColumnRoutes from "./api/department-columns/department-columns.routes";
 // import departmentDashboardRoutes from "./api/department-dashboard/department-dashboard.routes";
@@ -184,6 +188,11 @@ app.use("/api/trial", trialRoutes);
 // so production and dev instances are completely unaffected.
 app.use(trialGuard);
 
+// DPDP: email OTP + captcha + reason before any file leaves the API. The gate
+// holds the full list of file routes (see middleware/downloadGate.ts).
+app.use("/api/download-otp", downloadOtpRoutes);
+app.use(downloadGate);
+
 // NOTE: Module access is enforced on the FRONTEND only (sidebar + route guards).
 // It governs UI navigation — which screens/menus a user can open. It must NOT gate
 // the API, because screens legitimately reuse other modules' endpoints (e.g. the
@@ -200,6 +209,8 @@ app.use("/api/tickets", ticketRoutes);
 app.use("/api/categories", assetCategoryRoutes);
 app.use("/api/asset-subtypes", assetSubTypeRoutes);
 app.use("/api/asset-items", itemMasterRoutes);
+app.use("/api/fy-close", fyCloseRoutes);
+app.use("/api/reclassification", reclassificationRoutes);
 app.use("/api/subtype-support", subTypeSupportRoutes);
 app.use("/api/department-columns", departmentColumnRoutes);
 // app.use("/api/department-dashboard", departmentDashboardRoutes);

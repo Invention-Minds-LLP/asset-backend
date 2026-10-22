@@ -87,6 +87,8 @@ export const seedDefaultModules = async (req: Request, res: Response) => {
           { name: "decision-engine",     label: "Decision Engine",    path: "/decision-engine",     icon: "pi pi-microchip",   sortOrder: 5 },
           { name: "batch-depreciation",    label: "Batch Depreciation",   path: "/batch-depreciation",    icon: "pi pi-chart-line", sortOrder: 6 },
           { name: "depreciation-audit",    label: "Depreciation Audit",   path: "/depreciation-audit",    icon: "pi pi-verified",   sortOrder: 7 },
+          { name: "fy-close",              label: "Financial Year Close", path: "/fy-close",              icon: "pi pi-lock",       sortOrder: 7 },
+          { name: "reclassification",      label: "Asset Reclassification", path: "/reclassification",    icon: "pi pi-arrow-right-arrow-left", sortOrder: 7 },
           { name: "fixed-assets-schedule", label: "Fixed Assets Schedule", path: "/fixed-assets-schedule", icon: "pi pi-table",           sortOrder: 8 },
           { name: "finance-centre",        label: "Finance Centre",        path: "/finance-centre",        icon: "pi pi-building-columns", sortOrder: 9 },
           { name: "reports",               label: "Reports",               path: "/reports",               icon: "pi pi-file",             sortOrder: 10 },

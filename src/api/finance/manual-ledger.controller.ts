@@ -1,8 +1,19 @@
 import { Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { fyLockMessage } from "../../utilis/fyLock";
 
 const prisma = new PrismaClient();
+
+/** Financial-year lock: no entry added to, or deleted from, a locked year. */
+async function refuseIfLocked(res: Response, label: string, date: any): Promise<boolean> {
+  const msg = await fyLockMessage([{ label, date }]);
+  if (msg) {
+    res.status(409).json({ error: msg, message: msg, code: "FY_LOCKED" });
+    return true;
+  }
+  return false;
+}
 
 async function nextEntryNo(): Promise<string> {
   const now = new Date();
@@ -40,6 +51,7 @@ export async function createManualLedger(req: AuthenticatedRequest, res: Respons
     res.status(400).json({ error: "entryDate, narration, amount, entryType are required" }); return;
   }
   try {
+    if (await refuseIfLocked(res, "entry date", entryDate)) return;
     const entryNo = await nextEntryNo();
     const entry = await prisma.manualLedgerEntry.create({
       data: { entryNo, entryDate: new Date(entryDate), narration, amount, entryType, referenceNo: referenceNo || null, attachmentUrl: attachmentUrl || null, createdById: req.user.employeeDbId },
@@ -58,6 +70,10 @@ export async function deleteManualLedger(req: AuthenticatedRequest, res: Respons
     res.status(403).json({ error: "FINANCE or CFO role required" }); return;
   }
   try {
+    const existing = await prisma.manualLedgerEntry.findUnique({ where: { id: Number(req.params.id) }, select: { entryDate: true } });
+    if (!existing) { res.status(404).json({ error: "Entry not found" }); return; }
+    // Deleting an entry takes it out of the books.
+    if (await refuseIfLocked(res, "entry date", existing.entryDate)) return;
     await prisma.manualLedgerEntry.delete({ where: { id: Number(req.params.id) } });
     res.json({ message: "Deleted" });
   } catch (err) {

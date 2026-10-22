@@ -1,6 +1,7 @@
 import { Response } from "express";
 import prisma from "../../prismaClient";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { getLockedYears, lockMessageFor, acquisitionDateOf } from "../../utilis/fyLock";
 
 // ─── Clone/Duplicate Asset ───────────────────────────────────────────────────
 export const duplicateAsset = async (req: AuthenticatedRequest, res: Response) => {
@@ -19,6 +20,14 @@ export const duplicateAsset = async (req: AuthenticatedRequest, res: Response) =
     if (!source) {
       res.status(404).json({ message: "Source asset not found" });
       return;
+    }
+
+    // The clone keeps the source's acquisition date, so duplicating an asset
+    // from a locked year would add a new asset to closed books.
+    if (!source.isLegacyAsset && source.parentAssetId == null) {
+      const msg = lockMessageFor(await getLockedYears(), "acquisition date (copied from the source asset)",
+        acquisitionDateOf(source));
+      if (msg) { res.status(409).json({ message: msg, code: "FY_LOCKED" }); return; }
     }
 
     // Check uniqueness

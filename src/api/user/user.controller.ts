@@ -25,6 +25,16 @@ import {
   recordTrialViolation,
   trialEnabled,
 } from "../../lib/trial";
+import {
+  SecurityError,
+  getMfaSetup,
+  readChallenge,
+  requiresMfa,
+  resetMfa,
+  signChallenge,
+  verifyMfaCode,
+} from "../../lib/accountSecurity";
+import { logAction } from "../audit-trail/audit-trail.controller";
 
 // Validated at startup by src/config/validateEnv.ts — no insecure fallback.
 const JWT_SECRET = process.env.JWT_SECRET as string;
@@ -198,6 +208,101 @@ export const loginUser = async (req: Request, res: Response) => {
     if (blocked) return;
   }
 
+  // DPDP: Google Authenticator for every role except the exempt ones. No session
+  // is issued yet — the client gets a 10-minute challenge token and must post
+  // the TOTP code to /login/challenge/mfa (first time: scan the QR in mfaSetup).
+  if (requiresMfa(user.role, user.employee?.role)) {
+    try {
+      res.json({ challenge: await buildMfaChallenge(user) });
+    } catch (err) {
+      console.error("[login] MFA challenge failed:", err);
+      res.status(500).json({ message: "Two-step verification is not configured on the server." });
+    }
+    return;
+  }
+
+  await completeLogin(req, res, user);
+};
+
+async function buildMfaChallenge(user: {
+  id: number;
+  employeeID: string;
+  totpSecret: string | null;
+  totpEnabledAt: Date | null;
+}) {
+  const step = user.totpEnabledAt ? "mfa" : "mfa_setup";
+  return {
+    token: signChallenge(user.id),
+    step,
+    mfaSetup: step === "mfa_setup" ? await getMfaSetup(user) : undefined,
+  };
+}
+
+// POST /api/users/login/challenge/mfa  { challengeToken, code }
+// Second login step: verify the Google Authenticator code (enrols on first
+// success), then issue the session exactly like a normal login.
+export const loginChallengeMfa = async (req: Request, res: Response) => {
+  try {
+    const userId = readChallenge(req.body?.challengeToken);
+    const user = await prisma.user.findUnique({ where: { id: userId }, include: { employee: true } });
+    if (!user || user.employee?.isActive === false) {
+      res.status(403).json({ message: "Your account is inactive. Please contact your administrator." });
+      return;
+    }
+    try {
+      await verifyMfaCode(user, req.body?.code);
+    } catch (err) {
+      await prisma.loginHistory.create({
+        data: {
+          userId: user.id,
+          attemptedAt: new Date(),
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"] || "unknown",
+          success: false,
+        },
+      });
+      throw err;
+    }
+    await completeLogin(req, res, user);
+  } catch (error) {
+    if (error instanceof SecurityError) {
+      res.status(error.status).json({ message: error.message });
+      return;
+    }
+    console.error("[login] challenge/mfa failed:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// PUT /api/users/:id/reset-mfa — admin: clear a user's authenticator so the
+// next login shows a fresh QR (lost/changed phone).
+export const resetUserMfa = async (req: Request, res: Response) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) {
+    res.status(400).json({ message: "Invalid user id" });
+    return;
+  }
+  const user = await prisma.user.findUnique({ where: { id }, select: { id: true, employeeID: true } });
+  if (!user) {
+    res.status(404).json({ message: "User not found" });
+    return;
+  }
+  await resetMfa(id);
+  const actor = (req as any).user;
+  await logAction({
+    entityType: "USER",
+    entityId: id,
+    action: "UPDATE",
+    description: `Google Authenticator reset for ${user.employeeID}`,
+    performedBy: actor?.name || actor?.employeeID,
+    performedById: actor?.employeeDbId,
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+  res.json({ message: "Two-step verification reset. The user will set it up again at next login." });
+};
+
+async function completeLogin(req: Request, res: Response, user: any) {
   // Successful login → update lastLogin
   await prisma.user.update({
     where: { id: user.id },
@@ -240,8 +345,7 @@ export const loginUser = async (req: Request, res: Response) => {
       employeeRole: user.employee?.role,
     },
   });
-  return;
-};
+}
 
 // Silent refresh: swap the httpOnly refresh cookie for a fresh access token.
 // Rotates the refresh token (revoke old, issue new) so a stolen one has a short
@@ -343,7 +447,14 @@ export const getAllUsers = async (req: Request, res: Response) => {
   // Strip the bcrypt hash before it leaves the server. Returning it handed every
   // signed-in employee the material to crack other people's passwords offline —
   // hashing the password is pointless if the hash itself is an API response.
-  res.json(users.map(({ passwordHash, ...rest }) => rest));
+  // Same for the encrypted TOTP secret; expose only whether 2FA applies/is set up.
+  res.json(
+    users.map(({ passwordHash, totpSecret, ...rest }) => ({
+      ...rest,
+      mfaRequired: requiresMfa(rest.role, rest.employee?.role),
+      mfaEnrolled: !!rest.totpEnabledAt,
+    }))
+  );
 };
 
 export const createUser = async (req: Request, res: Response) => {

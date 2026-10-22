@@ -33,6 +33,11 @@ export const mobileAuth = (
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
+    // MFA challenge / download grant tokens are not sessions (see authMiddleware).
+    if (decoded.purpose) {
+      res.status(403).json({ message: "Invalid or expired token" });
+      return;
+    }
     req.user = {
       id: decoded.employeeDbId,
       userId: decoded.userId,

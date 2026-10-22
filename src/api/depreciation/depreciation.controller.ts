@@ -7,9 +7,12 @@ import {
   persistDepreciationResult,
   getFYContext,
   effectiveResidualValue as residualValueShared,
+  BOOKED_LOG_WHERE,
+  LIVE_LOG_STATUSES,
   type AssetForDep,
   type DepreciationConfig,
 } from "../../utilis/depreciationEngine";
+import { getLockedYears, isLocked, lockMessageFor, acquisitionDateOf, fiscalYearOf, fyLabelOf } from "../../utilis/fyLock";
 
 export const addDepreciation = async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -125,6 +128,42 @@ export const updateDepreciation = async (req: AuthenticatedRequest, res: Respons
     const id = parseInt(req.params.id);
     const data = req.body;
 
+    // ── Financial-year lock ────────────────────────────────────────────────
+    // For an asset acquired in a locked (finalized / awaiting-CFO) year, how it
+    // depreciates is part of the closed books' story: changing the method, rate,
+    // life, salvage or start here would reprice this year with no approval. That
+    // change is exactly what a reclassification is, so it goes through that
+    // (CFO-approved) route instead. Round-off and active flags stay editable.
+    const current = await prisma.assetDepreciation.findUnique({
+      where: { id },
+      include: { asset: { select: { purchaseDate: true, donationDate: true, parentAssetId: true } } },
+    });
+    if (current && current.asset && current.asset.parentAssetId == null) {
+      const locked = await getLockedYears();
+      const acq = acquisitionDateOf(current.asset);
+      if (acq && isLocked(locked, acq)) {
+        const numDiff = (a: any, b: any) =>
+          a != null && a !== "" && Math.abs(Number(a) - Number(b ?? 0)) > 0.005;
+        const changed: string[] = [];
+        if (data.depreciationMethod && data.depreciationMethod !== current.depreciationMethod) changed.push("method");
+        if (numDiff(data.depreciationRate, current.depreciationRate)) changed.push("rate");
+        if (data.expectedLifeYears != null && Number(data.expectedLifeYears) !== current.expectedLifeYears) changed.push("useful life");
+        if (numDiff(data.salvageValue, current.salvageValue)) changed.push("salvage value");
+        if (data.depreciationStart) {
+          const a = new Date(data.depreciationStart), b = new Date(current.depreciationStart);
+          if (Math.abs(a.getTime() - b.getTime()) > 36 * 3600_000) changed.push("start date");
+        }
+        if (changed.length) {
+          res.status(409).json({
+            code: "FY_LOCKED",
+            message: `This asset was acquired in ${fyLabelOf(fiscalYearOf(acq))}, which is ${locked.get(fiscalYearOf(acq)) === "FINALIZED" ? "finalized" : "awaiting CFO finalization"}, ` +
+              `so its depreciation ${changed.join(", ")} can't be changed here. Use Reclassify, which applies from the current year with CFO approval.`,
+          });
+          return;
+        }
+      }
+    }
+
     const updated = await prisma.assetDepreciation.update({
       where: { id },
       data: {
@@ -213,23 +252,26 @@ export const calculateDepreciation = async (req: Request, res: Response) => {
       depreciationTillDate = 0;
     }
 
-    await prisma.assetDepreciation.update({
-      where: { assetId: asset.id },
-      data: {
-        accumulatedDepreciation: depreciationTillDate,
-        currentBookValue: bookValue,
-        lastCalculatedAt: new Date()
-      }
-    });
-
+    // READ-ONLY. This used to write the projection back into
+    // accumulatedDepreciation / currentBookValue / lastCalculatedAt, and the
+    // asset form calls it every time an asset is opened — so merely viewing an
+    // asset restated its depreciation at the current rate from day one, fed that
+    // into every dashboard and disposal figure, and pushed lastCalculatedAt to
+    // today (which could make the next batch skip a year that was never booked).
+    // Booked figures now change only through an approved batch run.
     res.json({
       assetId,
       depreciationMethod: method,
       purchaseCost: cost,
       salvageValue: salvage,
+      // Projection to today — a straight-line/compound estimate, not booked.
       depreciationTillDate: Number(depreciationTillDate.toFixed(2)),
       bookValue: Number(bookValue.toFixed(2)),
-      yearsUsed: Number(diffYears.toFixed(2))
+      yearsUsed: Number(diffYears.toFixed(2)),
+      // What is actually in the books, from approved runs only.
+      bookedAccumulatedDepreciation: dep.accumulatedDepreciation != null ? Number(dep.accumulatedDepreciation) : null,
+      bookedBookValue: dep.currentBookValue != null ? Number(dep.currentBookValue) : null,
+      bookedUpTo: dep.lastCalculatedAt ?? null,
     });
 
     return;
@@ -253,6 +295,12 @@ export const runDepreciationForAsset = async (req: AuthenticatedRequest, res: Re
   try {
     if (!req.user) {
       res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    // This path books depreciation immediately, with no draft/approval step —
+    // so it is held to the same roles as approving a batch.
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can book depreciation" });
       return;
     }
 
@@ -289,8 +337,35 @@ export const runDepreciationForAsset = async (req: AuthenticatedRequest, res: Re
       fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
     }
 
+    // Same year-lock rules as the batch run (see computeEligibleDepreciations).
+    const lockedYears = await getLockedYears();
+    fy = skipFinalizedYears(fy, lockedYears);
+    if (lockedYears.get(fy.fyStart.getFullYear()) === "PENDING_CFO") {
+      res.status(409).json({ message: `${fy.fyLabel} is awaiting CFO finalization — depreciation can't be booked into it now.`, code: "FY_LOCKED" });
+      return;
+    }
+
     if (fy.fyEnd > today) {
       res.status(400).json({ message: `Next depreciation period (${fy.fyLabel}) has not ended yet` });
+      return;
+    }
+
+    // Already drafted or booked for this year (e.g. in a pending batch run)?
+    // Booking it here too would charge the year twice.
+    const clash = await prisma.depreciationLog.findFirst({
+      where: {
+        assetId,
+        status: { in: [...LIVE_LOG_STATUSES] },
+        periodEnd: { gte: fy.fyStart, lte: fy.fyEnd },
+      },
+      select: { status: true, batchRun: { select: { runNumber: true } } },
+    });
+    if (clash) {
+      res.status(409).json({
+        message: clash.status === "DRAFT"
+          ? `${fy.fyLabel} is already in draft run ${clash.batchRun?.runNumber ?? ""} for this asset — approve or reject that run first.`
+          : `${fy.fyLabel} depreciation is already booked for this asset.`,
+      });
       return;
     }
 
@@ -354,6 +429,15 @@ export const runDepreciationForAsset = async (req: AuthenticatedRequest, res: Re
     return;
   }
 };
+
+/** Advance past finalized years (their depreciation lives in the closed books). */
+function skipFinalizedYears(fy: ReturnType<typeof getFYContext>, locked: Map<number, string>) {
+  let guard = 0;
+  while (locked.get(fy.fyStart.getFullYear()) === "FINALIZED" && guard++ < 100) {
+    fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
+  }
+  return fy;
+}
 
 // ─── Shared: compute eligible depreciations ──────────────────────────────────
 interface DepreciationFilters {
@@ -513,6 +597,23 @@ async function computeEligibleDepreciations(filters: DepreciationFilters = {}) {
   const today = new Date();
   const eligible: any[] = [];
 
+  // Locked years (finalized or awaiting CFO). Fetched once for the whole run.
+  const lockedYears = await getLockedYears();
+
+  // (asset, FY) pairs already in a pending draft or already booked.
+  // lastCalculatedAt only advances on APPROVAL, so without this two draft runs
+  // created before either was approved both picked up the same year — and
+  // approving both charged it twice.
+  const claimed = new Set<string>();
+  const assetIds = depreciations.map((d: any) => d.asset.id);
+  if (assetIds.length) {
+    const liveLogs = await prisma.depreciationLog.findMany({
+      where: { assetId: { in: assetIds }, status: { in: [...LIVE_LOG_STATUSES] } },
+      select: { assetId: true, periodEnd: true },
+    });
+    for (const l of liveLogs) claimed.add(`${l.assetId}|${getFYContext(new Date(l.periodEnd)).fyLabel}`);
+  }
+
   for (const dep of depreciations) {
     const cost = Number(dep.asset.purchaseCost ?? dep.asset.estimatedValue ?? 0);
     const salvage = effectiveResidualValue(cost, Number(dep.salvageValue ?? 0));
@@ -529,8 +630,18 @@ async function computeEligibleDepreciations(filters: DepreciationFilters = {}) {
       fy = getFYContext(new Date(fy.fyEnd.getTime() + 86400000));
     }
 
+    // A finalized year is already in the closed books (its figures are frozen
+    // in the year-end snapshot), so it's skipped rather than charged again —
+    // the next open year then opens from that frozen closing value. A year
+    // awaiting CFO finalization can't be charged or skipped yet: hold the asset.
+    fy = skipFinalizedYears(fy, lockedYears);
+    if (lockedYears.get(fy.fyStart.getFullYear()) === "PENDING_CFO") continue;
+
     // Not yet due — skip unless forceOverride
     if (fy.fyEnd > today && !filters.forceOverride) continue;
+
+    // Already drafted in another run, or already booked, for this year.
+    if (claimed.has(`${dep.asset.id}|${fy.fyLabel}`)) continue;
 
     // ── Run split-method engine ────────────────────────────────────────────
     const assetForDep: AssetForDep = {
@@ -570,6 +681,7 @@ async function computeEligibleDepreciations(filters: DepreciationFilters = {}) {
       assetName: dep.asset.assetName,
       department: dep.asset.department?.name || null,
       category: dep.asset.assetCategory?.name || null,
+      assetCategoryId: dep.asset.assetCategoryId ?? null,
       method,
       frequency: dep.depreciationFrequency || "YEARLY",
       roundOff: dep.roundOff ?? false,
@@ -910,6 +1022,8 @@ export const runBatchDepreciation = async (req: AuthenticatedRequest, res: Respo
         doneById: employeeId,
         reason: "BATCH_DRAFT",
         batchRunId: run.id,
+        status: "DRAFT",
+        assetCategoryId: e.assetCategoryId ?? null,
       }));
 
       // Chunk to keep the single SQL packet under MySQL's max_allowed_packet
@@ -1021,6 +1135,8 @@ export const runAssetDepreciation = async (req: AuthenticatedRequest, res: Respo
           doneById: employeeId,
           reason: "BATCH_DRAFT",
           batchRunId: run.id,
+          status: "DRAFT",
+          assetCategoryId: e.assetCategoryId ?? null,
         },
       });
 
@@ -1131,6 +1247,12 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
             asset: {
               select: {
                 id: true,
+                assetId: true,
+                assetName: true,
+                // Needed for the GL voucher. This select used to omit it, so
+                // every log had no category, no voucher lines were built, and
+                // the auto-voucher was silently skipped on every approval.
+                assetCategoryId: true,
                 depreciation: { select: { id: true, accumulatedDepreciation: true, currentBookValue: true, lastCalculatedAt: true } }
               }
             }
@@ -1142,6 +1264,49 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
     if (!run) { res.status(404).json({ message: "Batch run not found" }); return; }
     if (run.status !== "DRAFT") {
       res.status(400).json({ message: `Cannot approve a run with status: ${run.status}` }); return;
+    }
+
+    // Refuse if any row falls in a locked year. Submission requires a year to
+    // have no drafts, so this only catches a draft left over from before the
+    // lock existed — approving it would change a closed year's books.
+    const lockedYears = await getLockedYears();
+    const lockedRow = run.logs.find((l: any) => isLocked(lockedYears, l.periodEnd));
+    if (lockedRow) {
+      const msg = lockMessageFor(lockedYears, "depreciation period ending", lockedRow.periodEnd);
+      res.status(409).json({ message: `${msg} Reject this run instead.`, code: "FY_LOCKED" });
+      return;
+    }
+
+    // Refuse if any (asset, year) in this run is already booked by another
+    // run. New drafts can no longer overlap (computeEligibleDepreciations skips
+    // claimed years), but drafts created before that check existed still can —
+    // and approving both would charge the year twice.
+    const runKeys = new Map<string, string>(); // key → asset code, for the message
+    for (const l of run.logs) {
+      runKeys.set(`${l.assetId}|${getFYContext(new Date(l.periodEnd)).fyLabel}`, l.asset?.assetId ?? String(l.assetId));
+    }
+    if (runKeys.size) {
+      const booked = await prisma.depreciationLog.findMany({
+        where: {
+          assetId: { in: run.logs.map((l: any) => l.assetId) },
+          ...BOOKED_LOG_WHERE,
+          NOT: { batchRunId: runId },
+        },
+        select: { assetId: true, periodEnd: true },
+      });
+      const clashes = [...new Set(
+        booked
+          .map(b => `${b.assetId}|${getFYContext(new Date(b.periodEnd)).fyLabel}`)
+          .filter(k => runKeys.has(k))
+      )];
+      if (clashes.length) {
+        const sample = clashes.slice(0, 5).map(k => `${runKeys.get(k)} (${k.split("|")[1]})`).join(", ");
+        res.status(409).json({
+          message: `Already booked for ${clashes.length} asset-year(s): ${sample}${clashes.length > 5 ? ", …" : ""}. ` +
+            `Approving would charge those years twice — reject this run and re-run it.`,
+        });
+        return;
+      }
     }
 
     // Commit depreciation values to AssetDepreciation
@@ -1166,10 +1331,10 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
         });
       }
 
-      // Bulk-flip log status DRAFT → BATCH_RUN in one query
+      // Bulk-flip the run's rows to booked in one query
       await tx.depreciationLog.updateMany({
         where: { batchRunId: runId },
-        data: { reason: "BATCH_RUN" },
+        data: { reason: "BATCH_RUN", status: "APPROVED" },
       });
 
       await tx.batchDepreciationRun.update({
@@ -1183,37 +1348,55 @@ export const approveBatchRun = async (req: AuthenticatedRequest, res: Response) 
     }, { timeout: 120_000, maxWait: 10_000 });
 
     // Auto-voucher: DR Depreciation Expense / CR Accumulated Depreciation (per GL mappings)
-    // We fire-and-forget — a missing GL mapping just skips the voucher gracefully
+    // We fire-and-forget — a missing GL mapping just skips the voucher gracefully.
+    //
+    // One voucher per financial year in the run, dated at that year's end.
+    // Depreciation for FY2025-26 approved in May 2026 belongs in FY2025-26's
+    // books; dating it "today" would put the charge in the following year. (A
+    // run is usually one year, but assets that were behind can put several
+    // years in one run.) Accounts come from the category each row was charged
+    // under — the snapshot on the log — not whatever the asset is today.
     try {
-      const totalDepAmount = run.logs.reduce((s: number, l: any) => s + Number(l.depreciationAmount), 0);
-      if (totalDepAmount > 0) {
-        // Collect GL accounts from category mappings for each log
-        const mappingCache = new Map<number, any>();
-        const lines: { accountId: number; debit: number; credit: number; narration?: string }[] = [];
-        for (const log of run.logs) {
-          const catId = log.asset?.assetCategoryId;
-          if (!catId) continue;
-          if (!mappingCache.has(catId)) {
-            const m = await (prisma as any).assetGLMapping.findUnique({ where: { assetCategoryId: catId } });
-            mappingCache.set(catId, m);
-          }
-          const mapping = mappingCache.get(catId);
-          if (!mapping?.depExpenseAccountId || !mapping?.accDepAccountId) continue;
-          const amt = Number(log.depreciationAmount);
-          lines.push({ accountId: mapping.depExpenseAccountId, debit: amt, credit: 0, narration: `Dep. ${log.asset?.assetName || ""}` });
-          lines.push({ accountId: mapping.accDepAccountId, debit: 0, credit: amt, narration: `Acc. Dep. ${log.asset?.assetName || ""}` });
+      const mappingCache = new Map<number, any>();
+      const byFy = new Map<string, { fyEnd: Date; lines: { accountId: number; debit: number; credit: number; narration?: string }[] }>();
+      let unmapped = 0;
+
+      for (const log of run.logs) {
+        const amt = Number(log.depreciationAmount);
+        if (!(amt > 0)) continue;
+        const catId = log.assetCategoryId ?? log.asset?.assetCategoryId;
+        if (!catId) { unmapped++; continue; }
+        if (!mappingCache.has(catId)) {
+          const m = await (prisma as any).assetGLMapping.findUnique({ where: { assetCategoryId: catId } });
+          mappingCache.set(catId, m);
         }
-        if (lines.length >= 2) {
-          await createAutoVoucher({
-            sourceType: "DEPRECIATION_BATCH",
-            sourceId: runId,
-            voucherDate: new Date(),
-            narration: `Depreciation batch ${run.runNumber} — FY${run.fiscalYear}`,
-            batchRunId: runId,
-            createdById: employeeId,
-            lines,
-          });
-        }
+        const mapping = mappingCache.get(catId);
+        if (!mapping?.depExpenseAccountId || !mapping?.accDepAccountId) { unmapped++; continue; }
+
+        const fy = getFYContext(new Date(log.periodEnd));
+        if (!byFy.has(fy.fyLabel)) byFy.set(fy.fyLabel, { fyEnd: fy.fyEnd, lines: [] });
+        const bucket = byFy.get(fy.fyLabel)!;
+        bucket.lines.push({ accountId: mapping.depExpenseAccountId, debit: amt, credit: 0, narration: `Dep. ${log.asset?.assetName || ""}` });
+        bucket.lines.push({ accountId: mapping.accDepAccountId, debit: 0, credit: amt, narration: `Acc. Dep. ${log.asset?.assetName || ""}` });
+      }
+
+      for (const [fyLabel, { fyEnd, lines }] of byFy) {
+        if (lines.length < 2) continue;
+        await createAutoVoucher({
+          sourceType: "DEPRECIATION_BATCH",
+          sourceId: runId,
+          voucherDate: fyEnd,
+          narration: `Depreciation batch ${run.runNumber} — ${fyLabel}`,
+          batchRunId: runId,
+          createdById: employeeId,
+          lines,
+        });
+      }
+
+      // Say so rather than skip silently: the run is approved, but part of it
+      // never reached the ledger until the category's GL mapping is set up.
+      if (unmapped > 0) {
+        console.warn(`Batch ${run.runNumber}: ${unmapped} log(s) had no GL mapping for their category — no voucher lines for them.`);
       }
     } catch (voucherErr) {
       console.warn("Auto-voucher creation skipped (GL mapping may be incomplete):", voucherErr);
@@ -1243,15 +1426,25 @@ export const rejectBatchRun = async (req: AuthenticatedRequest, res: Response) =
       res.status(400).json({ message: `Cannot reject a run with status: ${run.status}` }); return;
     }
 
-    await (prisma as any).batchDepreciationRun.update({
-      where: { id: runId },
-      data: {
-        status: "REJECTED",
-        rejectionReason: reason || "Rejected by FINANCE",
-        approvedById: req.user.employeeDbId,
-        approvedAt: new Date(),
-      },
-    });
+    // Reject the run AND its rows together. The rows used to stay behind
+    // looking exactly like booked depreciation (only `reason` differed), so
+    // reports and the next year's opening WDV still counted a rejected run.
+    // Kept as REJECTED rather than deleted, so the audit trail survives.
+    await (prisma as any).$transaction([
+      (prisma as any).depreciationLog.updateMany({
+        where: { batchRunId: runId },
+        data: { status: "REJECTED" },
+      }),
+      (prisma as any).batchDepreciationRun.update({
+        where: { id: runId },
+        data: {
+          status: "REJECTED",
+          rejectionReason: reason || "Rejected by FINANCE",
+          approvedById: req.user.employeeDbId,
+          approvedAt: new Date(),
+        },
+      }),
+    ]);
 
     res.json({ message: `Batch run ${run.runNumber} rejected.` });
   } catch (err) {
@@ -1325,10 +1518,13 @@ export const getAllDepreciations = async (req: AuthenticatedRequest, res: Respon
 // ─── Get Depreciation Logs ───────────────────────────────────────────────────
 export const getDepreciationLogs = async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { assetId, page = "1", limit = "25" } = req.query;
+    const { assetId, status, page = "1", limit = "25" } = req.query;
 
+    // A history view, so every row is returned by default — each carries its
+    // `status`, and ?status=APPROVED narrows it to booked depreciation.
     const where: any = {};
     if (assetId) where.assetId = Number(assetId);
+    if (status) where.status = String(status);
 
     const skip = (parseInt(String(page)) - 1) * parseInt(String(limit));
     const take = parseInt(String(limit));
@@ -1368,6 +1564,14 @@ import { backfillHistoricalDepreciation } from "../../utilis/depreciationEngine"
 
 export const backfillDepreciationLogs = async (req: AuthenticatedRequest, res: Response) => {
   try {
+    // Writes (and with resetExisting, deletes) booked depreciation history —
+    // this had no role check at all.
+    if (!req.user) { res.status(401).json({ message: "Unauthorized" }); return; }
+    if (req.user.role !== "FINANCE" && req.user.role !== "CFO") {
+      res.status(403).json({ message: "Only FINANCE or CFO role can backfill depreciation history" });
+      return;
+    }
+
     const { assetIds, categoryId, resetExisting, dryRun } = req.body ?? {};
 
     const where: any = { isActive: true };
@@ -1406,8 +1610,43 @@ export const backfillDepreciationLogs = async (req: AuthenticatedRequest, res: R
     for (const dep of depreciations) {
       const a = dep.asset;
       try {
-        // If resetExisting → wipe existing logs + reset cumulative values first
+        // If resetExisting → wipe existing logs + reset cumulative values first.
+        // Never for an asset with depreciation booked through an approved batch
+        // run: that is posted history (with GL vouchers), and regenerating the
+        // rows beneath it at today's rate would rewrite past years.
         if (resetExisting && !dryRun) {
+          // Nor for an asset with any row in a locked (finalized / awaiting-CFO) year.
+          const lockedYearsForReset = await getLockedYears();
+          if (lockedYearsForReset.size) {
+            const rows = await prisma.depreciationLog.findMany({
+              where: { assetId: a.id, status: { not: "REJECTED" } },
+              select: { periodEnd: true },
+            });
+            const inLocked = rows.find(r => isLocked(lockedYearsForReset, r.periodEnd));
+            if (inLocked) {
+              results.push({
+                assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
+                skipped: 1,
+                reason: lockMessageFor(lockedYearsForReset, "depreciation period ending", inLocked.periodEnd) + " History not reset.",
+              });
+              totalSkipped++;
+              continue;
+            }
+          }
+
+          const approvedRun = await prisma.depreciationLog.findFirst({
+            where: { assetId: a.id, batchRunId: { not: null }, ...BOOKED_LOG_WHERE },
+            select: { fyLabel: true, batchRun: { select: { runNumber: true } } },
+          });
+          if (approvedRun) {
+            results.push({
+              assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
+              skipped: 1,
+              reason: `Has depreciation booked in approved run ${approvedRun.batchRun?.runNumber ?? ""} (${approvedRun.fyLabel ?? ""}) — history not reset`,
+            });
+            totalSkipped++;
+            continue;
+          }
           await prisma.depreciationLog.deleteMany({ where: { assetId: a.id } });
           const cost = Number(a.purchaseCost ?? a.estimatedValue ?? 0);
           await prisma.assetDepreciation.update({
@@ -1451,7 +1690,7 @@ export const backfillDepreciationLogs = async (req: AuthenticatedRequest, res: R
 
         if (dryRun) {
           // Just count what WOULD be created (don't persist)
-          const existingCount = await prisma.depreciationLog.count({ where: { assetId: a.id } });
+          const existingCount = await prisma.depreciationLog.count({ where: { assetId: a.id, status: { not: "REJECTED" } } });
           results.push({
             assetId: a.id, assetCode: a.assetId, assetName: a.assetName,
             existingLogs: existingCount,

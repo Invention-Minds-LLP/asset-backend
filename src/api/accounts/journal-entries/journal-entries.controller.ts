@@ -2,6 +2,7 @@ import { Response } from "express";
 import prisma from "../../../prismaClient";
 import { AuthenticatedRequest } from "../../../middleware/authMiddleware";
 import { logAction } from "../../audit-trail/audit-trail.controller";
+import { assertFyOpen } from "../../../utilis/fyLock";
 
 async function generateJENumber(): Promise<string> {
   const now = new Date();
@@ -95,6 +96,8 @@ export const createJournalEntry = async (req: AuthenticatedRequest, res: Respons
     if (!entryDate || !lines || !Array.isArray(lines) || lines.length === 0) {
       res.status(400).json({ message: "entryDate and lines[] are required" }); return;
     }
+    // No entry may be dated into a finalized year (or one awaiting CFO finalization).
+    if (!(await assertFyOpen(res, [{ label: "entry date", date: entryDate }]))) return;
 
     // Validate that total debits == total credits
     const totalDebit = lines.reduce((s: number, l: any) => l.debitAccountId ? s + parseFloat(l.amount) : s, 0);

@@ -1,8 +1,24 @@
 import { Response } from "express";
 import { PrismaClient } from "@prisma/client";
 import { AuthenticatedRequest } from "../../middleware/authMiddleware";
+import { yearLockMessage } from "../../utilis/fyLock";
 
 const prisma = new PrismaClient();
+
+/**
+ * Financial-year lock: a finalized year's capex budget (or one awaiting CFO
+ * finalization) is frozen — no new lines, no edits, and no "refresh actuals",
+ * which re-totals by each asset's CURRENT category and would quietly move a
+ * closed year's spend after a reclassification.
+ */
+async function refuseIfYearLocked(res: Response, fiscalYear: number): Promise<boolean> {
+  const msg = await yearLockMessage(fiscalYear, "capex budget");
+  if (msg) {
+    res.status(409).json({ error: msg, message: msg, code: "FY_LOCKED" });
+    return true;
+  }
+  return false;
+}
 
 const include = {
   department: { select: { id: true, name: true } },
@@ -34,6 +50,7 @@ export async function createCapexBudget(req: AuthenticatedRequest, res: Response
   }
   const { fiscalYear, departmentId, categoryId, budgetAmount, notes } = req.body;
   try {
+    if (await refuseIfYearLocked(res, parseInt(fiscalYear))) return;
     const budget = await prisma.capexBudget.create({
       data: { fiscalYear: parseInt(fiscalYear), departmentId: departmentId || null, categoryId: categoryId || null, budgetAmount, notes: notes || null, createdById: req.user.employeeDbId },
       include,
@@ -53,6 +70,9 @@ export async function updateCapexBudget(req: AuthenticatedRequest, res: Response
   }
   const { budgetAmount, notes } = req.body;
   try {
+    const existing = await prisma.capexBudget.findUnique({ where: { id: Number(req.params.id) }, select: { fiscalYear: true } });
+    if (!existing) { res.status(404).json({ error: "Budget not found" }); return; }
+    if (await refuseIfYearLocked(res, existing.fiscalYear)) return;
     const budget = await prisma.capexBudget.update({
       where: { id: Number(req.params.id) },
       data: { budgetAmount, notes: notes || null },
@@ -72,6 +92,7 @@ export async function refreshCapexActuals(req: AuthenticatedRequest, res: Respon
   const fyStart = new Date(`${fy}-04-01`);
   const fyEnd = new Date(`${fy + 1}-03-31T23:59:59`);
   try {
+    if (await refuseIfYearLocked(res, fy)) return;
     const budgets = await prisma.capexBudget.findMany({ where: { fiscalYear: fy }, include: { department: true, category: true } });
     for (const budget of budgets) {
       const where: any = { purchaseDate: { gte: fyStart, lte: fyEnd } };

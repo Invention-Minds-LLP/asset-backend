@@ -220,6 +220,11 @@ export const approveDisposal = async (
       return;
     }
 
+    // Financial-year lock: none needed while the disposal date is always "now" —
+    // today is in the current year, which can't be locked (only a year that has
+    // ended can be submitted for finalization). If a user-chosen or back-dated
+    // disposal date is ever added, guard it with assertFyOpen (utilis/fyLock.ts):
+    // a disposal dated into a closed year would change that year's deletions.
     const now = new Date();
 
     // subAssetResolutions: [{ subAssetId: number, action: "CONDEMN"|"MOVE_TO_STORE"|"RELINK", newParentAssetId?: number }]

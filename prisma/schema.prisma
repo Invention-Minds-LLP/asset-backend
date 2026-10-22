@@ -730,12 +730,57 @@ model User {
   // unaffected.
   activeSessionId String?
 
+  // Google Authenticator (DPDP). totpSecret is AES-256-GCM encrypted with
+  // MFA_ENC_KEY. Enforced at web login for every role except the exempt ones
+  // (MFA_EXEMPT_ROLES, default EXECUTIVE/SUPERVISOR/SECURITY) once enrolled;
+  // totpEnabledAt null = not yet enrolled → QR shown at next login.
+  totpSecret    String?   @db.Text
+  totpEnabledAt DateTime?
+
   loginHistory  LoginHistory[]
   refreshTokens RefreshToken[]
+  downloadLogs  DownloadLog[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @default(now()) @updatedAt
 
   @@map("users")
+}
+
+// Every download / export / print (DPDP). Written by POST /api/download-otp/authorize
+// after email-OTP grant + captcha + reason. servedAt is stamped when a server
+// file route consumes the ticket (single use); stays null for client-built files.
+model DownloadLog {
+  id          String    @id @default(uuid())
+  userId      Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  employeeID  String
+  name        String?
+  role        String
+  label       String
+  page        String?
+  reason      String    @db.Text
+  ipAddress   String?
+  userAgent   String?   @db.Text
+  serverRoute String?   @db.Text
+  servedAt    DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([createdAt])
+  @@map("downloadlog")
+}
+
+// Picture-captcha answers for the download gate. DB-backed (not in-memory) so it
+// works across Cloud Run instances. Single use: deleted on verify.
+model DownloadCaptcha {
+  id         String   @id @default(uuid())
+  userId     Int
+  answerHash String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([expiresAt])
+  @@map("downloadcaptcha")
 }
 
 // Server-side refresh tokens for the web auth flow. Only the SHA-256 hash of the

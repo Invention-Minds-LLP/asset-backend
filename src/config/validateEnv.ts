@@ -15,4 +15,13 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+// Not fatal (exempt roles can still sign in), but every Google-Authenticator
+// login will fail until it is set.
+if (!process.env.MFA_ENC_KEY && process.env.MFA_ENABLED !== "false") {
+  console.warn(
+    "[WARN] MFA_ENC_KEY is not set — Google Authenticator logins will fail. " +
+      "Set a long random value (e.g. `openssl rand -hex 32`) and keep it stable."
+  );
+}
+
 export {};

@@ -11,6 +11,7 @@ import {
   calculateAssetFYDepreciation,
   getFYContext,
   effectiveResidualValue,
+  LIVE_LOG_STATUSES,
   type AssetForDep,
   type DepreciationConfig,
 } from "../../utilis/depreciationEngine";
@@ -93,6 +94,19 @@ async function yearEndDepreciationCore(opts: { preview: boolean }) {
   // Target = the FY that has already ended and is most recent
   const targetFYEnd = getFYContext(new Date(today.getTime() - 86400000));
 
+  // Never draft into a year that is finalized or awaiting CFO finalization.
+  const lock = await prisma.financialYearClose.findUnique({
+    where: { fiscalYear: targetFYEnd.fyStart.getFullYear() },
+    select: { status: true },
+  });
+  if (lock && (lock.status === "FINALIZED" || lock.status === "PENDING_CFO")) {
+    return {
+      fyLabel: targetFYEnd.fyLabel, totalAssets: 0, totalDepreciation: 0,
+      status: "LOCKED",
+      note: `${targetFYEnd.fyLabel} is ${lock.status === "FINALIZED" ? "finalized" : "awaiting CFO finalization"} — no draft created.`,
+    };
+  }
+
   const depreciations = await (prisma as any).assetDepreciation.findMany({
     where: { isActive: true },
     include: {
@@ -103,10 +117,24 @@ async function yearEndDepreciationCore(opts: { preview: boolean }) {
           isLegacyAsset: true, migrationMode: true, migrationDate: true,
           originalPurchaseDate: true, originalCost: true,
           accDepAtMigration: true, openingWdvAtMigration: true,
+          assetCategoryId: true,
         },
       },
     },
   });
+
+  // Assets already drafted (in a pending run) or booked for the target year.
+  // lastCalculatedAt only moves on approval, so it alone can't stop a second
+  // draft of the same year — which would be double-charged if both approved.
+  const claimed = new Set<number>(
+    (await prisma.depreciationLog.findMany({
+      where: {
+        status: { in: [...LIVE_LOG_STATUSES] },
+        periodEnd: { gte: targetFYEnd.fyStart, lte: targetFYEnd.fyEnd },
+      },
+      select: { assetId: true },
+    })).map(l => l.assetId)
+  );
 
   const eligible: any[] = [];
   for (const dep of depreciations) {
@@ -114,6 +142,7 @@ async function yearEndDepreciationCore(opts: { preview: boolean }) {
     const salvage = effectiveResidualValue(cost, Number(dep.salvageValue ?? 0));
 
     if (dep.lastCalculatedAt && new Date(dep.lastCalculatedAt) >= targetFYEnd.fyEnd) continue;
+    if (claimed.has(dep.asset.id)) continue;
 
     const a: AssetForDep = {
       id: dep.asset.id, assetId: dep.asset.assetId,
@@ -195,6 +224,8 @@ async function yearEndDepreciationCore(opts: { preview: boolean }) {
         openingWdvSource: e.result.openingWdvSource,
         reason: "CRON_YEAR_END_DRAFT",
         batchRunId: run.id,
+        status: "DRAFT",
+        assetCategoryId: e.dep.asset.assetCategoryId ?? null,
       } as any,
     });
   }

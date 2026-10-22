@@ -333,6 +333,20 @@ export const getEmployeeIdsByRole = async (roles: string[]): Promise<number[]> =
   return emps.map(e => e.id);
 };
 
+// ── CFOs, by either role field ──
+// Finance approvals are gated on User.role (what's in the token), but
+// getEmployeeIdsByRole reads Employee.role — the two can disagree, and a CFO
+// set on only one of them would never be told something awaits them.
+export const getCfoIds = async (): Promise<number[]> => {
+  const [byUser, byEmployee] = await Promise.all([
+    prisma.user.findMany({ where: { role: "CFO" }, select: { employee: { select: { id: true } } } }),
+    getEmployeeIdsByRole(["CFO"]),
+  ]);
+  const ids = new Set<number>(byEmployee);
+  for (const u of byUser) if (u.employee?.id) ids.add(u.employee.id);
+  return [...ids];
+};
+
 // ── Finance approvers: FINANCE-role employees + the Finance department HOD ──
 // Falls back to admins so approval requests are never silently dropped.
 export const getFinanceApproverIds = async (): Promise<number[]> => {
