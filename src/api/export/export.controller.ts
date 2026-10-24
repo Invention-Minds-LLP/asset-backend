@@ -2213,6 +2213,90 @@ export const exportReport = async (req: Request, res: Response): Promise<void> =
         return sendExcel(res, "Physical_Audit", headers, rows);
       }
 
+      // J3a/J3b — QR sticker status worklists. "Not stickered" is the field
+      // team's to-do list, sorted department → block → floor → room so it can
+      // be walked; "stickered" is the done list with who/when. Disposed assets
+      // need no sticker and are left out. Sheet 2 is the per-department count.
+      case "qr-not-stickered":
+      case "qr-stickered": {
+        const wantStickered = report === "qr-stickered";
+        const where: any = {
+          status: { notIn: ["DISPOSED", "WRITTEN_OFF", "SCRAPPED"] },
+          ...(wantStickered ? { qrStickered: true } : { OR: [{ qrStickered: false }, { qrStickered: null }] }),
+        };
+        if (f.assetCategoryId) where.assetCategoryId = f.assetCategoryId;
+        if (f.departmentId)    where.departmentId    = f.departmentId;
+        if (f.branchId)        where.currentBranchId = f.branchId;
+
+        const [assets, allActive] = await Promise.all([
+          prisma.asset.findMany({
+            where,
+            include: {
+              assetCategory: true,
+              department: true,
+              currentBranch: true,
+              supervisor: true,
+              qrStickeredBy: true,
+              parentAsset: { select: { assetId: true } },
+              locations: {
+                where: { isActive: true, status: "APPROVED" },
+                orderBy: { id: "desc" },
+                take: 1,
+              },
+            } as any,
+          }),
+          // Summary counts use the same scope minus the sticker condition.
+          prisma.asset.findMany({
+            where: { ...where, OR: undefined, qrStickered: undefined },
+            select: { qrStickered: true, department: { select: { name: true } } },
+          }),
+        ]);
+
+        const loc = (a: any) => a.locations?.[0] ?? {};
+        const sortKey = (a: any) =>
+          [a.department?.name ?? "~", loc(a).block ?? "~", loc(a).floor ?? "~", loc(a).room ?? "~", a.assetId ?? ""]
+            .map((s: string) => String(s).toLowerCase())
+            .join("|");
+        const sorted = [...(assets as any[])].sort((x, y) => sortKey(x).localeCompare(sortKey(y)));
+
+        const headers = [
+          "Asset ID", "Asset Name", "Serial No", "Category", "Department", "Branch",
+          "Block", "Floor", "Room", "Location", "Supervisor", "Parent Asset ID", "Status",
+          "QR Generated", "QR Label Printed",
+          ...(wantStickered ? ["Stickered On", "Stickered By", "Sticker Remarks"] : []),
+        ];
+        const rows: Row[] = sorted.map(a => [
+          a.assetId, a.assetName, a.serialNumber ?? "",
+          a.assetCategory?.name ?? "", a.department?.name ?? "", a.currentBranch?.name ?? "",
+          loc(a).block ?? "", loc(a).floor ?? "", loc(a).room ?? "", a.currentLocation ?? "",
+          a.supervisor?.name ?? "", a.parentAsset?.assetId ?? "", a.status ?? "",
+          yn(!!a.qrCode), yn(!!a.qrLabelPrinted),
+          ...(wantStickered
+            ? [fmt(a.qrStickeredAt), a.qrStickeredBy ? `${a.qrStickeredBy.name} (${a.qrStickeredBy.employeeID})` : "", a.qrStickeredRemarks ?? ""]
+            : []),
+        ]);
+
+        const byDept = new Map<string, { total: number; done: number }>();
+        for (const a of allActive as any[]) {
+          const k = a.department?.name ?? "(No department)";
+          const s = byDept.get(k) ?? { total: 0, done: 0 };
+          s.total++;
+          if (a.qrStickered) s.done++;
+          byDept.set(k, s);
+        }
+        const sumRows: Row[] = [...byDept.entries()]
+          .sort((x, y) => x[0].localeCompare(y[0]))
+          .map(([d, s]) => [d, s.total, s.done, s.total - s.done, s.total ? Number(((s.done / s.total) * 100).toFixed(1)) : 0]);
+        const tot = [...byDept.values()].reduce((acc, s) => ({ total: acc.total + s.total, done: acc.done + s.done }), { total: 0, done: 0 });
+        sumRows.push(["", "", "", "", ""]);
+        sumRows.push(["TOTAL", tot.total, tot.done, tot.total - tot.done, tot.total ? Number(((tot.done / tot.total) * 100).toFixed(1)) : 0]);
+
+        return sendMultiSheetExcel(res, wantStickered ? "QR_Stickered_Assets" : "QR_Not_Stickered_Assets", [
+          { name: wantStickered ? "Stickered" : "Not Stickered", headers, rows },
+          { name: "By Department", headers: ["Department", "Total Assets", "Stickered", "Not Stickered", "% Done"], rows: sumRows },
+        ]);
+      }
+
       // J4 — Asset Utilisation (assigned vs in-store vs idle)
       case "asset-utilisation": {
         const assets = await prisma.asset.findMany({
