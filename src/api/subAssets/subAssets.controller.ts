@@ -37,6 +37,15 @@ export const getSubAssetsByAssetId = async (req: Request, res: Response) => {
         referenceCode: true,
         exceedsParentThreshold: true,
         purchaseCost: true,
+        qrStickered: true,
+    qrStickeredAt: true,
+    qrStickeredRemarks: true,
+    qrStickeredBy: {
+      select: {
+        id: true,
+        name: true
+      }
+    }
       },
     });
 
