@@ -763,6 +763,10 @@ model DownloadLog {
   userAgent   String?   @db.Text
   serverRoute String?   @db.Text
   servedAt    DateTime?
+  // Footer stamped on the file: SA-<employeeID>-<yyyyMMdd>-<HHmmss IST>-<NNNN>,
+  // NNNN = this user's running download count (downloadNo).
+  downloadNo  Int?
+  refCode     String?   @unique
   createdAt   DateTime  @default(now())
 
   @@index([userId, createdAt])

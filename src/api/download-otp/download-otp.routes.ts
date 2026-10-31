@@ -14,6 +14,7 @@ import {
   verifyCaptcha,
   verifyDownloadOtp,
 } from "../../lib/accountSecurity";
+import { buildRefCode, footerText } from "../../lib/downloadStamp";
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -82,21 +83,46 @@ router.post("/authorize", async (req: any, res) => {
     }
     const label = typeof req.body?.label === "string" ? req.body.label.trim().slice(0, 191) : "";
     const page = typeof req.body?.page === "string" ? req.body.page.slice(0, 191) : null;
-    const log = await prisma.downloadLog.create({
-      data: {
-        userId,
-        employeeID: req.user.employeeID,
-        name: req.user.name ?? null,
-        role: req.user.role,
-        label: label || "Unlabelled download",
-        page,
-        reason: reason.slice(0, MAX_REASON),
-        ipAddress: (req.ip || "").slice(0, 64) || null,
-        userAgent: String(req.headers["user-agent"] || "").slice(0, 1000) || null,
-      },
-      select: { id: true },
+    // Footer ref: this user's Nth download. Retried on the (rare) collision of
+    // two simultaneous downloads by the same person getting the same number.
+    let log: { id: string; refCode: string | null; downloadNo: number | null; createdAt: Date } | null = null;
+    for (let attempt = 0; attempt < 3 && !log; attempt++) {
+      const at = new Date();
+      const downloadNo = (await prisma.downloadLog.count({ where: { userId } })) + 1 + attempt;
+      try {
+        log = await prisma.downloadLog.create({
+          data: {
+            userId,
+            employeeID: req.user.employeeID,
+            name: req.user.name ?? null,
+            role: req.user.role,
+            label: label || "Unlabelled download",
+            page,
+            reason: reason.slice(0, MAX_REASON),
+            ipAddress: (req.ip || "").slice(0, 64) || null,
+            userAgent: String(req.headers["user-agent"] || "").slice(0, 1000) || null,
+            downloadNo,
+            refCode: buildRefCode(req.user.employeeID, downloadNo, at),
+            createdAt: at,
+          },
+          select: { id: true, refCode: true, downloadNo: true, createdAt: true },
+        });
+      } catch (err: any) {
+        if (err?.code !== "P2002" || attempt === 2) throw err; // unique refCode clash → next number
+      }
+    }
+    const stamp = {
+      refCode: log!.refCode!, downloadNo: log!.downloadNo!, employeeID: req.user.employeeID,
+      name: req.user.name ?? null, at: log!.createdAt,
+    };
+    res.json({
+      logId: log!.id,
+      ticket: signDownloadTicket(userId, log!.id),
+      refCode: stamp.refCode,
+      downloadNo: stamp.downloadNo,
+      // Ready-made footer line for files the browser builds itself (CSV, print).
+      footer: footerText(stamp),
     });
-    res.json({ logId: log.id, ticket: signDownloadTicket(userId, log.id) });
   } catch (error) {
     sendError(res, error, "authorize");
   }
@@ -114,6 +140,7 @@ router.get("/logs", requireRole("ADMIN", "CEO_COO"), async (req, res) => {
     const where: any = {};
     if (search) {
       where.OR = [
+        { refCode: { contains: search } },
         { employeeID: { contains: search } },
         { name: { contains: search } },
         { label: { contains: search } },
@@ -129,7 +156,8 @@ router.get("/logs", requireRole("ADMIN", "CEO_COO"), async (req, res) => {
         skip: (page - 1) * pageSize,
         take: pageSize,
         select: {
-          id: true, employeeID: true, name: true, role: true, label: true, page: true, reason: true,
+          id: true, refCode: true, downloadNo: true,
+          employeeID: true, name: true, role: true, label: true, page: true, reason: true,
           ipAddress: true, serverRoute: true, servedAt: true, createdAt: true,
         },
       }),
